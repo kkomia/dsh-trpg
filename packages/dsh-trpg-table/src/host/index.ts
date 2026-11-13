@@ -45,7 +45,17 @@ export interface HostCtxLike {
 
 export interface AgentsScope {
   agents: {
-    create(options: { sessionId: string; setup: (agentCtx: GmAgentCtxLike) => void }): Promise<GmHandleLike>;
+    create(options: {
+      sessionId: string;
+      setup: (agentCtx: GmAgentCtxLike) => void;
+      agentOptions?: { provider: string; model: string; reasoningEffort?: string };
+    }): Promise<GmHandleLike>;
+  };
+}
+
+export interface ModelScope {
+  agentDefaultModel?: {
+    currentSelection(): { provider: string; model: string; reasoningEffort?: string } | undefined;
   };
 }
 
@@ -97,8 +107,9 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     return;
   }
 
-  // 惰性获取 agents 服务：插件不声明硬依赖，缺服务时只是 AI GM 起不来。
+  // 惰性获取 agents / 默认模型服务：插件不声明硬依赖，缺服务时只是 AI GM 起不来。
   let agentsService: AgentsScope['agents'] | null = null;
+  let defaultModel: ModelScope['agentDefaultModel'] | null = null;
   ctx.inject?.(['agents'], (scoped) => {
     agentsService = scoped.agents;
     log('agents service acquired: AI GM enabled');
@@ -106,10 +117,19 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       agentsService = null;
     };
   });
+  ctx.inject?.(['agentDefaultModel'], (scoped) => {
+    defaultModel = (scoped as unknown as ModelScope).agentDefaultModel ?? null;
+    return () => {
+      defaultModel = null;
+    };
+  });
 
   const createAgent: GmCreateAgent = async ({ sessionId, setup }) => {
     if (!agentsService) throw new Error('当前 DSH 没有 agents 服务，无法启动 AI GM');
-    return agentsService.create({ sessionId, setup });
+    const selection = defaultModel?.currentSelection?.();
+    const agentOptions = selection ? { provider: selection.provider, model: selection.model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) } : undefined;
+    // 不显式传模型时，DSH 可能拒绝发起第一次请求（没有 model selection），所以优先用宿主默认模型。
+    return agentsService.create({ sessionId, setup, ...(agentOptions ? { agentOptions } : {}) });
   };
 
   const manager = new GmManager({
@@ -133,6 +153,21 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     manager.onSessionEvent(session.id, { type: event.type, data: event.data });
   });
 
+  const offAgentError = ctx.on?.('agent/error', (...args: unknown[]) => {
+    const payload = args[0] as { agent?: { id?: string }; turn?: number; step?: number; error?: unknown } | undefined;
+    const sessionId = payload?.agent?.id;
+    if (!sessionId) return;
+    const error = payload?.error as { message?: string; code?: string; status?: number; requestId?: string } | undefined;
+    const message = error
+      ? `${error.message ?? String(error)}${error.code ? ` [${error.code}]` : ''}${error.status ? ` HTTP ${error.status}` : ''}`
+      : String(payload?.error ?? 'unknown');
+    manager.onSessionEvent(sessionId, { type: 'gm-error', data: { message, turn: payload?.turn, step: payload?.step } });
+  });
+
+  const offSignIn = ctx.on?.('deepseek-account/model-sign-in-required', () => {
+    manager.broadcastAlert('DeepSeek 账号需要重新登录（设置 → 账号），登录后 AI GM 才能继续。', 'error');
+  });
+
   http.server.on('error', (error: NodeJS.ErrnoException) => {
     log(`room server error on ${bindHost}:${port}: ${error.code ?? ''} ${error.message}`);
   });
@@ -144,6 +179,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     log('room server stopping');
     try {
       offSessionEvent?.();
+      offAgentError?.();
+      offSignIn?.();
     } catch {
       /* ignore */
     }

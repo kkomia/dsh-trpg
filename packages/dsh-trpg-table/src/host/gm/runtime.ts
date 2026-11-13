@@ -212,6 +212,17 @@ export class GmRuntime {
   /** DSH 会话事件 → 把 GM 的叙事广播到房间。 */
   onSessionEvent(event: { type: string; data?: unknown }): void {
     if (this.disposed) return;
+    if (event.type === 'gm-error') {
+      const data = event.data as { message?: string } | undefined;
+      const message = data?.message ?? 'unknown';
+      this.options.log?.(`GM agent error: ${message}`);
+      try {
+        this.options.roomService.gmAlert(this.roomId, `AI GM 出错：${message}`, 'error');
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     if (event.type !== 'assistant/message') return;
     const data = event.data as { message?: unknown } | undefined;
     const text = extractAssistantText(data?.message);
@@ -295,6 +306,17 @@ export class GmManager {
         this.options.roomService.gmAlert(roomId, `AI GM 启动失败：${message}`, 'error');
       } catch {
         /* ignore */
+      }
+    }
+  }
+
+  /** 向所有 AI 房间广播一条系统提示（账号/服务级故障用）。 */
+  broadcastAlert(text: string, level: 'info' | 'warning' | 'error' = 'warning'): void {
+    for (const runtime of this.runtimes.values()) {
+      try {
+        this.options.roomService.gmAlert(runtime.roomId, text, level);
+      } catch {
+        /* 房间可能已关闭 */
       }
     }
   }
