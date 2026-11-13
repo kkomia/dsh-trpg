@@ -16,6 +16,9 @@ import { createGmTools } from './gm/tools.ts';
 import { CombatRuntime } from './gm/combat.ts';
 import { extractAssistantText } from './gm/runtime.ts';
 
+/** 牌桌工具名前缀：避开 subagent GM 的全局同名工具。 */
+const TABLE_TOOL_PREFIX = 'trpg_';
+
 /** 会话 Agent 的最小结构面（不 import Harness 包）。 */
 export interface TableAgentLike {
   id: string;
@@ -83,8 +86,15 @@ export class TableSessionBridge {
     const disposers: Array<() => void> = [];
     try {
       const combat = new CombatRuntime({ roomService: this.deps.roomService, roomId, log: this.deps.log });
+      // 工具名加前缀：避免与 subagent GM 的全局工具（带 generation 后缀/同名）冲突，
+      // 同时把映射交给系统提示，保证 GM 看到的就是实际注册的名字。
+      const toolNames: Record<string, string> = {};
       for (const tool of createGmTools({ roomService: this.deps.roomService, roomId, lorebook: this.deps.lorebook, combat })) {
-        disposers.push(agent.ctx.tools.register(tool));
+        const definition = tool as { name?: unknown };
+        if (typeof definition.name !== 'string') continue;
+        const prefixed = { ...(tool as unknown as Record<string, unknown>), name: `${TABLE_TOOL_PREFIX}${definition.name}` };
+        toolNames[definition.name] = `${TABLE_TOOL_PREFIX}${definition.name}`;
+        disposers.push(agent.ctx.tools.register(prefixed));
       }
       disposers.push(
         agent.ctx.systemPrompt.section({
@@ -92,7 +102,7 @@ export class TableSessionBridge {
           order: 900,
           complete: false,
           interpolate: false,
-          text: () => buildGmSystemPrompt(this.deps.module, this.deps.lorebook),
+          text: () => buildGmSystemPrompt(this.deps.module, this.deps.lorebook, toolNames),
         }),
       );
     } catch (error) {
