@@ -25,6 +25,9 @@
 | [设计文档](./docs/DESIGN.md) | 架构、五道锁、规则系统、协议、AI GM、UI 槽位、风险 |
 | [路线图](./docs/ROADMAP.md) | M0–M5 里程碑与验收标准 |
 | [访谈决策账](./docs/DECISIONS.md) | 立项以来 22 条决策与理由 |
+| [玩家手册](./docs/PLAYER-GUIDE.md) | 安装、加入房间、落座、行动/私聊/掷骰、断线重连、常见问题 |
+| [GM / 房主手册](./docs/GM-GUIDE.md) | 建房、AI/真人模式、GM 控制台、存档续团、模组修改 |
+| [局域网验收清单](./docs/LAN-ACCEPTANCE.md) | 双机实机跑团的分步检查表 |
 
 ## 架构一图
 
