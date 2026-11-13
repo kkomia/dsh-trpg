@@ -50,20 +50,19 @@ M0 骨架 ─► M1 引擎+内容 ─► M2 房间+联机 ─► M3 AI GM 端到
 
 **验收**：`node --test` 53 项全绿；`node scripts/smoke-room.mjs` 真实 HTTP+SSE 21 项检查全通过（建房→加入→落座→公共/私密骰→悄悄话→重连补发→踢人→锁房）。双 DSH 实例实机联调与「玩家端不配模型」的检查顺延到 M5 局域网验收。详见 `docs/milestones/M2.md`。
 
-## M3 — AI GM 端到端 🔶 编排完成，待实机联调（2026-11-13）
+## M3 — AI GM 端到端 ✅ 实机验证通过 2026-11-13
 
 **目标**：AI 带团，且不串角。
 
-- [x] GM Agent 会话编排（`agents.create` + 专属工具/系统提示作用域 + 串行行动队列）
-- [x] GM 工具初版（roll_check / roll_dice / secret_note / reveal_lore / check_lore / list_party）
+- [x] GM Agent 会话编排（DSH **subagent 通道**：子 Agent 继承宿主会话模型上下文；串行行动队列）
+- [x] GM 工具全套（roll_check / roll_dice / secret_note / reveal_lore / check_lore / list_party / start_combat / attack / next_turn / combat_status / end_combat）
 - [x] 上下文组装（守则 + 模组 + 世界书 + 场景 + 单行动者绑定 + 最近事件）
-- [x] 输出处理：assistant 文本 → 房间公共叙事；工具副作用 → 骰子/私密事件
-- [x] 反串角回归用例：行动者绑定、单行动者 prompt、私密不越权、工具作用域隔离
-- [x] 战斗工具（start_combat / attack / next_turn / combat_status / end_combat，引擎强制轮次）
-- [ ] 实机联调：重启 DSH 后 `node scripts/probe-live-gm.mjs` 验证真实模型开口（**待主理人重启**）
-- [ ] 叙事流式输出
+- [x] 输出处理：子 Agent 结果 → 房间公共叙事；工具副作用 → 骰子/私密事件
+- [x] 反串角回归用例：行动者绑定、单行动者 prompt、私密不越权、工具作用域
+- [x] 实机联调：真实模型带团 + 引擎掷骰全链路（游说失败/洞悉成功两例）
+- [ ] 叙事流式输出（当前一次性输出）
 
-**验收**：`node --test` 64 项全绿；`node scripts/smoke-gm.mjs` 假 Agent 全链路 14 项检查通过；实机探针待重启后执行。详见 `docs/milestones/M3.md`。
+**验收**：真实 DeepSeek 模型实机开场 + 玩家行动回应 + `roll_check` 引擎掷骰（骰面/DC/成败进事件流），见 `docs/milestones/M3.md`。
 
 ## M4 — 真人 GM 模式 + 收尾 🔶 离线部分完成 2026-11-13
 
