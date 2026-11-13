@@ -50,18 +50,20 @@ M0 骨架 ─► M1 引擎+内容 ─► M2 房间+联机 ─► M3 AI GM 端到
 
 **验收**：`node --test` 53 项全绿；`node scripts/smoke-room.mjs` 真实 HTTP+SSE 21 项检查全通过（建房→加入→落座→公共/私密骰→悄悄话→重连补发→踢人→锁房）。双 DSH 实例实机联调与「玩家端不配模型」的检查顺延到 M5 局域网验收。详见 `docs/milestones/M2.md`。
 
-## M3 — AI GM 端到端
+## M3 — AI GM 端到端 🔶 编排完成，待实机联调（2026-11-13）
 
 **目标**：AI 带团，且不串角。
 
-- [ ] GM Agent 会话编排（`agentLoop.create` + `followup`）
-- [ ] GM 工具全套（roll_check / combat_attack / cast_spell / damage / initiative / npc_speak / reveal / secret_note …）
-- [ ] 上下文组装（守则 + 规则摘要 + 世界书命中 + 场景状态 + 行动 + 最近事件 + 私密层）
-- [ ] 输出三段处理：narrative / private / toolCalls
-- [ ] 反串角回归用例：跨玩家行动拒绝、未调工具不改状态、非当前行动者被拒、私密不越权、GM 秘密不泄露
+- [x] GM Agent 会话编排（`agents.create` + 专属工具/系统提示作用域 + 串行行动队列）
+- [x] GM 工具初版（roll_check / roll_dice / secret_note / reveal_lore / check_lore / list_party）
+- [x] 上下文组装（守则 + 模组 + 世界书 + 场景 + 单行动者绑定 + 最近事件）
+- [x] 输出处理：assistant 文本 → 房间公共叙事；工具副作用 → 骰子/私密事件
+- [x] 反串角回归用例：行动者绑定、单行动者 prompt、私密不越权、工具作用域隔离
+- [ ] 实机联调：重启 DSH 后 `node scripts/probe-live-gm.mjs` 验证真实模型开口（**待主理人重启**）
+- [ ] 战斗工具（start_combat / attack / monster_hp / end_combat），让 AI 跑通模组第二幕遭遇
 - [ ] 叙事流式输出
 
-**验收**：本机双实例由 AI GM 带完模组前半段；全部反串角用例通过。
+**验收**：`node --test` 64 项全绿；`node scripts/smoke-gm.mjs` 假 Agent 全链路 14 项检查通过；实机探针待重启后执行。详见 `docs/milestones/M3.md`。
 
 ## M4 — 真人 GM 模式 + 收尾
 

@@ -13,9 +13,12 @@ import {
   createRng,
   deriveRollSeed,
   rollDice,
+  rollSkillCheck,
+  SKILL_NAME,
   validateCharacterCard,
   type CharacterCard,
   type Rng,
+  type SkillId,
 } from '@dsh-trpg/engine';
 import {
   PROTOCOL_VERSION,
@@ -96,12 +99,25 @@ interface RoomRecord {
   createdAt: number;
 }
 
+export interface PlayerActionInfo {
+  roomId: string;
+  playerId: PlayerId;
+  playerName: string;
+  characterName?: string;
+  text: string;
+  private: boolean;
+}
+
 export interface RoomServiceOptions {
   /** 房间数上限（防止误开一堆）。 */
   maxRooms?: number;
   /** 事件日志上限（SSE 补发用）；超出后丢弃最旧事件。 */
   maxEvents?: number;
   now?: () => number;
+  /** 玩家提交行动/发言时回调（AI GM 编排用）。 */
+  onPlayerAction?: (info: PlayerActionInfo) => void;
+  /** 房间创建完成回调（启动 AI GM 运行时用）。 */
+  onRoomCreated?: (roomId: string) => void;
 }
 
 function randomToken(): string {
@@ -128,11 +144,15 @@ export class RoomService {
   private readonly maxRooms: number;
   private readonly maxEvents: number;
   private readonly now: () => number;
+  private readonly onPlayerAction?: (info: PlayerActionInfo) => void;
+  private readonly onRoomCreated?: (roomId: string) => void;
 
   constructor(options: RoomServiceOptions = {}) {
     this.maxRooms = options.maxRooms ?? 8;
     this.maxEvents = options.maxEvents ?? 5000;
     this.now = options.now ?? Date.now;
+    this.onPlayerAction = options.onPlayerAction;
+    this.onRoomCreated = options.onRoomCreated;
   }
 
   // -------------------------------------------------------------------------
@@ -163,6 +183,12 @@ export class RoomService {
     this.rooms.set(room.id, room);
     this.tokens.set(room.hostToken, { kind: 'host', roomId: room.id });
     const event = this.emit(room, 'room', 'all', this.publicView(room));
+    void event;
+    try {
+      this.onRoomCreated?.(room.id);
+    } catch {
+      /* 房间创建回调失败不影响建房 */
+    }
     return { room: this.viewFor(room, { kind: 'host', roomId: room.id }), hostToken: room.hostToken, inviteCode: room.inviteCode };
   }
 
@@ -358,7 +384,20 @@ export class RoomService {
         text: params.text.trim(),
       };
       const target: EventTarget = params.private ? 'gm' : 'all';
-      return { event: this.emit(room, 'narration', target, payload) };
+      const event = this.emit(room, 'narration', target, payload);
+      try {
+        this.onPlayerAction?.({
+          roomId: room.id,
+          playerId: player.id,
+          playerName: player.name,
+          characterName: player.character?.identity.name,
+          text: payload.text,
+          private: params.private === true,
+        });
+      } catch {
+        /* GM 回调失败不影响玩家动作落库 */
+      }
+      return { event };
     }
     const hostPlayer = room.players.get('host');
     const payload: NarrationPayload = {
@@ -368,6 +407,135 @@ export class RoomService {
     };
     const target: EventTarget = params.private ? 'gm' : 'all';
     return { event: this.emit(room, 'narration', target, payload) };
+  }
+
+  // -------------------------------------------------------------------------
+  // GM 编排面（内部 API：由受信任的 GM 运行时调用，不走 token 校验）
+  // -------------------------------------------------------------------------
+
+  gmExists(roomId: string): boolean {
+    return this.rooms.has(roomId);
+  }
+
+  gmView(roomId: string): RoomView {
+    return this.publicView(this.requireRoom(roomId));
+  }
+
+  gmModeOf(roomId: string): GMMode {
+    return this.requireRoom(roomId).gmMode;
+  }
+
+  gmPhase(roomId: string): RoomPhase {
+    return this.requireRoom(roomId).phase;
+  }
+
+  /** GM 视角的玩家席（含完整角色卡，只给服务端 GM 运行时/工具用，不广播）。 */
+  gmParty(roomId: string): Array<{ playerId: PlayerId; name: string; seat: 'gm' | 'player'; character?: CharacterCard }> {
+    const room = this.requireRoom(roomId);
+    return [...room.players.values()].map((player) => ({
+      playerId: player.id,
+      name: player.name,
+      seat: player.seat,
+      character: player.character ? structuredClone(player.character) : undefined,
+    }));
+  }
+
+  /** 最近事件（含私密，GM 可见全部），用于组装 GM 上下文。 */
+  gmRecentEvents(roomId: string, limit = 20): GameEvent[] {
+    const room = this.requireRoom(roomId);
+    return room.events.slice(-limit).map((event) => ({ ...event }));
+  }
+
+  gmNarrate(roomId: string, text: string, options: { to?: EventTarget; speakerName?: string } = {}): GameEvent<'narration', NarrationPayload> {
+    const room = this.requireRoom(roomId);
+    const payload: NarrationPayload = {
+      speaker: 'gm',
+      speakerName: options.speakerName ?? 'GM',
+      text: text.trim(),
+    };
+    return this.emit(room, 'narration', options.to ?? 'all', payload);
+  }
+
+  gmSecret(roomId: string, playerId: PlayerId, text: string): GameEvent<'narration', NarrationPayload> {
+    const room = this.requireRoom(roomId);
+    if (!room.players.has(playerId)) throw new RoomError('not-found', '找不到该玩家');
+    return this.emit(room, 'narration', playerId, {
+      speaker: 'gm',
+      speakerName: 'GM（私密）',
+      text: text.trim(),
+    } satisfies NarrationPayload);
+  }
+
+  gmAlert(roomId: string, text: string, level: AlertPayload['level'] = 'info'): GameEvent<'alert', AlertPayload> {
+    const room = this.requireRoom(roomId);
+    return this.emit(room, 'alert', 'all', { level, text } satisfies AlertPayload);
+  }
+
+  /** GM 请求一次自由掷骰（例如伤害骰），走房间种子保证可复现。 */
+  gmRoll(
+    roomId: string,
+    params: { expression: string; label?: string },
+  ): GameEvent<'dice', DicePayload> {
+    const room = this.requireRoom(roomId);
+    room.rollIndex += 1;
+    const rng = createRng(deriveRollSeed(room.seed, room.rollIndex));
+    let rolled;
+    try {
+      rolled = rollDice(params.expression, rng);
+    } catch (error) {
+      throw new RoomError('invalid-expression', error instanceof Error ? error.message : '骰子表达式非法');
+    }
+    return this.emit(room, 'dice', 'all', {
+      expression: rolled.expression,
+      dice: rolled.dice,
+      modifier: rolled.modifier,
+      total: rolled.total,
+      label: params.label,
+      playerId: 'host',
+      rollerName: 'GM',
+      private: false,
+    } satisfies DicePayload);
+  }
+
+  /** GM 对某玩家发起技能/属性检定：引擎掷骰、给出成败，并把骰面广播（或私发）。 */
+  gmCheck(
+    roomId: string,
+    params: { playerId: PlayerId; skill: SkillId; dc: number; label?: string; private?: boolean },
+  ): GameEvent<'dice', DicePayload> {
+    const room = this.requireRoom(roomId);
+    const player = room.players.get(params.playerId);
+    if (!player) throw new RoomError('not-found', '找不到该玩家');
+    if (!player.character) throw new RoomError('conflict', `${player.name} 还没有角色卡，先落座`);
+    room.rollIndex += 1;
+    const rng = createRng(deriveRollSeed(room.seed, room.rollIndex));
+    const result = rollSkillCheck(
+      {
+        proficiency: player.character.proficiency.bonus,
+        skills: player.character.proficiency.skills,
+        saves: player.character.proficiency.saves,
+      },
+      player.character.abilities,
+      params.skill,
+      params.dc,
+      rng,
+    );
+    const target: EventTarget = params.private === true ? player.id : 'all';
+    return this.emit(room, 'dice', target, {
+      expression: 'd20',
+      dice: result.rolls,
+      modifier: result.bonus,
+      total: result.total,
+      label: params.label ?? `${SKILL_NAME[params.skill]}检定`,
+      playerId: player.id,
+      rollerName: player.character.identity.name,
+      private: params.private === true,
+      check: {
+        kind: 'skill',
+        name: SKILL_NAME[params.skill],
+        dc: params.dc,
+        success: result.success,
+      },
+    } satisfies DicePayload);
   }
 
   // -------------------------------------------------------------------------
