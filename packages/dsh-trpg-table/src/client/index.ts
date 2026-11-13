@@ -10,7 +10,16 @@
  * 因此源码里不要 import 'react'（由 ModuleLoader 注入），数据从 workspace 包静态打入。
  */
 import { CARDS, GUIMUYA_MODULE } from '@dsh-trpg/content';
+import {
+  growthToCardPatch,
+  loadGrowth,
+  mergeGrowth,
+  roomToMarkdown,
+  saveGrowth,
+  type GrowthState,
+} from './export.ts';
 import type {
+  AwardPayload,
   CreateRoomResult,
   DicePayload,
   GameEvent,
@@ -177,6 +186,20 @@ function saveSession(session: StoredSession | null): void {
   }
 }
 
+function downloadText(name: string, text: string, mediaType = 'text/plain;charset=utf-8'): void {
+  try {
+    const blob = new Blob([text], { type: mediaType });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch {
+    /* 非浏览器环境忽略 */
+  }
+}
+
 function diceText(payload: DicePayload): string {
   const dice = payload.dice.map((die) => `${die}`).join(' + ');
   const modifier = payload.modifier > 0 ? ` + ${payload.modifier}` : payload.modifier < 0 ? ` - ${Math.abs(payload.modifier)}` : '';
@@ -207,6 +230,8 @@ export function createPlugin(React: any) {
     const [sayPrivate, setSayPrivate] = useState(false);
     const [seatCardId, setSeatCardId] = useState(CARDS[0]?.id ?? '');
     const [busy, setBusy] = useState(false);
+    const [growth, setGrowth] = useState(null as GrowthState | null);
+    const growthRef = useRef(null as GrowthState | null);
     // 真人 GM 控制台
     const [gmText, setGmText] = useState('');
     const [gmPlayerId, setGmPlayerId] = useState('');
@@ -254,9 +279,16 @@ export function createPlugin(React: any) {
           setRoom(null);
           return;
         }
+        if (event.kind === 'award' && session?.playerId && event.to === session.playerId) {
+          const roomId = session.roomId ?? '';
+          const next = mergeGrowth(growthRef.current, roomId, event as GameEvent<'award', AwardPayload>);
+          growthRef.current = next;
+          saveGrowth(roomId, session.playerId, next);
+          setGrowth(next);
+        }
         appendFeed(event);
       },
-      [appendFeed],
+      [appendFeed, session],
     );
 
     const connect = useCallback(
@@ -315,6 +347,11 @@ export function createPlugin(React: any) {
     useEffect(() => {
       if (!open || !session) return;
       lastSeqRef.current = 0;
+      if (session.roomId && session.playerId) {
+        const loaded = loadGrowth(session.roomId, session.playerId);
+        growthRef.current = loaded;
+        setGrowth(loaded);
+      }
       void refreshRoom(session).then(() => connect({ ...session }));
       return () => sourceRef.current?.close();
     }, [open, session, connect, refreshRoom]);
@@ -803,6 +840,40 @@ export function createPlugin(React: any) {
                           h('button', { key: 'roll', type: 'button', style: CSS.button, onClick: () => void roll() }, '掷'),
                         ]),
                         h('span', { key: 'dicehint', style: CSS.muted }, '骰子由房主服务端掷，可复现。'),
+                      ]),
+                      h('div', { key: 'growth', style: { ...CSS.section, display: 'flex', flexDirection: 'column', gap: 6 } }, [
+                        h('strong', { key: 'g' }, '我的成长 / 战报'),
+                        growth
+                          ? h('span', { key: 'xp', style: CSS.muted }, `XP 总计 ${growth.xp}${growth.items.length ? ` · ${growth.items.join('、')}` : ''}`)
+                          : h('span', { key: 'none', style: CSS.muted }, '还没有奖励记录'),
+                        h('div', { key: 'actions', style: CSS.row }, [
+                          h(
+                            'button',
+                            {
+                              key: 'exp',
+                              type: 'button',
+                              style: CSS.button,
+                              onClick: () => {
+                                if (!growth) return;
+                                downloadText(`growth-${room?.title ?? 'trpg'}.json`, JSON.stringify(growthToCardPatch(growth), null, 2), 'application/json;charset=utf-8');
+                              },
+                            },
+                            '导出成长 JSON',
+                          ),
+                          h(
+                            'button',
+                            {
+                              key: 'md',
+                              type: 'button',
+                              style: CSS.button,
+                              onClick: () => {
+                                if (!room) return;
+                                downloadText(`report-${room.title}.md`, roomToMarkdown(room, feedRef.current), 'text/markdown;charset=utf-8');
+                              },
+                            },
+                            '导出战报 MD',
+                          ),
+                        ]),
                       ]),
                       h('div', { key: 'say', style: { ...CSS.section, display: 'flex', flexDirection: 'column', gap: 6 } }, [
                         h('strong', { key: 's' }, '我的行动 / RP'),
