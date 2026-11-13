@@ -11,6 +11,17 @@
  */
 import { CARDS, GUIMUYA_MODULE } from '@dsh-trpg/content';
 import {
+  copyFromPregen,
+  exportCardText,
+  importCard,
+  loadLocalCards,
+  mergeGrowthIntoCard,
+  removeLocalCard,
+  saveLocalCards,
+  upsertLocalCard,
+  type LocalCardRecord,
+} from './cards.ts';
+import {
   growthToCardPatch,
   loadGrowth,
   mergeGrowth,
@@ -229,6 +240,9 @@ export function createPlugin(React: any) {
     const [sayText, setSayText] = useState('');
     const [sayPrivate, setSayPrivate] = useState(false);
     const [seatCardId, setSeatCardId] = useState(CARDS[0]?.id ?? '');
+    const [localCards, setLocalCards] = useState(loadLocalCards() as LocalCardRecord[]);
+    const [selectedLocalId, setSelectedLocalId] = useState('');
+    const fileInputRef = useRef(null as { click?: () => void } | null);
     const [busy, setBusy] = useState(false);
     const [growth, setGrowth] = useState(null as GrowthState | null);
     const growthRef = useRef(null as GrowthState | null);
@@ -414,9 +428,65 @@ export function createPlugin(React: any) {
       }
     }, [base, inviteCode, playerName, enterRoom]);
 
+    const selectedLocalCard = localCards.find((record: LocalCardRecord) => record.card.id === selectedLocalId) ?? null;
+
+    const savePregenCopy = useCallback(() => {
+      const pregen = CARDS.find((entry) => entry.id === seatCardId) ?? CARDS[0];
+      if (!pregen) return;
+      const record = copyFromPregen(pregen);
+      const next = upsertLocalCard(localCards, record);
+      setLocalCards(next);
+      saveLocalCards(next);
+      setSelectedLocalId(record.card.id);
+      setStatus({ kind: 'ok', text: `已保存本地卡：${record.card.identity.name}` });
+    }, [localCards, seatCardId]);
+
+    const importCardFile = useCallback(
+      async (event: { target?: { files?: ArrayLike<File & { text(): Promise<string> }>; value?: string } }) => {
+        const file = event?.target?.files?.[0];
+        if (!file) return;
+        const text = await file.text();
+        const result = importCard(text);
+        if (!result.ok || !result.record) {
+          setStatus({ kind: 'bad', text: `导入失败：${result.errors.join('；')}` });
+          return;
+        }
+        const next = upsertLocalCard(localCards, result.record);
+        setLocalCards(next);
+        saveLocalCards(next);
+        setSelectedLocalId(result.record.card.id);
+        setStatus({ kind: 'ok', text: `已导入角色卡：${result.record.card.identity.name}` });
+        if (event.target) event.target.value = '';
+      },
+      [localCards],
+    );
+
+    const exportSelectedCard = useCallback(() => {
+      if (!selectedLocalCard) return;
+      downloadText(`card-${selectedLocalCard.card.identity.name}.json`, exportCardText(selectedLocalCard.card), 'application/json;charset=utf-8');
+    }, [selectedLocalCard]);
+
+    const deleteSelectedCard = useCallback(() => {
+      if (!selectedLocalCard) return;
+      const next = removeLocalCard(localCards, selectedLocalCard.card.id);
+      setLocalCards(next);
+      saveLocalCards(next);
+      setSelectedLocalId('');
+      setStatus({ kind: 'ok', text: '已删除本地卡' });
+    }, [localCards, selectedLocalCard]);
+
+    const mergeGrowth = useCallback(() => {
+      if (!selectedLocalCard || !growth) return;
+      const merged = mergeGrowthIntoCard(selectedLocalCard.card, growth.items);
+      const next = upsertLocalCard(localCards, { ...selectedLocalCard, card: merged.card, updatedAt: Date.now() });
+      setLocalCards(next);
+      saveLocalCards(next);
+      setStatus({ kind: 'ok', text: `已合并 ${merged.addedItems.length} 件奖励物品到本地卡` });
+    }, [localCards, selectedLocalCard, growth]);
+
     const seat = useCallback(async () => {
       if (!session || !token) return;
-      const card = CARDS.find((entry) => entry.id === seatCardId) ?? CARDS[0];
+      const card = selectedLocalCard?.card ?? CARDS.find((entry) => entry.id === seatCardId) ?? CARDS[0];
       if (!card) return;
       setBusy(true);
       try {
@@ -428,7 +498,7 @@ export function createPlugin(React: any) {
       } finally {
         setBusy(false);
       }
-    }, [session, token, seatCardId]);
+    }, [session, token, seatCardId, selectedLocalCard]);
 
     const roll = useCallback(async () => {
       if (!session || !token) return;
@@ -624,6 +694,16 @@ export function createPlugin(React: any) {
     const seatOptions = CARDS.map((card) =>
       h('option', { key: card.id, value: card.id }, `${card.identity.name}（${card.identity.class} ${card.identity.level} 级）`),
     );
+    const localCardOptions = [
+      h('option', { key: 'none', value: '' }, localCards.length ? '选择我的角色卡' : '（本地卡库为空）'),
+      ...localCards.map((record: LocalCardRecord) =>
+        h(
+          'option',
+          { key: record.card.id, value: record.card.id },
+          `${record.card.identity.name}（${record.card.identity.class} ${record.card.identity.level} 级）`,
+        ),
+      ),
+    ];
 
     return h('div', { style: CSS.dock }, [
       h(
@@ -808,14 +888,50 @@ export function createPlugin(React: any) {
                         ),
                         myCharacter?.characterName
                           ? h('span', { key: 'mine', style: CSS.muted }, `我的角色：${myCharacter.characterName}`)
-                          : h('div', { key: 'seat', style: CSS.row }, [
-                              h('select', {
-                                key: 'seatselect',
-                                style: { ...CSS.input, flex: '1 1 140px' },
-                                value: seatCardId,
-                                onChange: (event: { target: { value: string } }) => setSeatCardId(event.target.value),
-                              }, seatOptions),
-                              h('button', { key: 'seatbtn', type: 'button', style: CSS.button, onClick: () => void seat() }, '落座'),
+                          : h('div', { key: 'seat', style: { display: 'flex', flexDirection: 'column', gap: 6 } }, [
+                              h('div', { key: 'localrow', style: CSS.row }, [
+                                h(
+                                  'select',
+                                  {
+                                    key: 'localselect',
+                                    style: { ...CSS.input, flex: '1 1 140px' },
+                                    value: selectedLocalId,
+                                    onChange: (event: { target: { value: string } }) => setSelectedLocalId(event.target.value),
+                                  },
+                                  localCardOptions,
+                                ),
+                                h('button', { key: 'seat-local', type: 'button', style: CSS.buttonPrimary, onClick: () => void seat() }, '落座'),
+                              ]),
+                              h('div', { key: 'pregenrow', style: CSS.row }, [
+                                h(
+                                  'select',
+                                  {
+                                    key: 'seatselect',
+                                    style: { ...CSS.input, flex: '1 1 140px' },
+                                    value: seatCardId,
+                                    onChange: (event: { target: { value: string } }) => setSeatCardId(event.target.value),
+                                  },
+                                  seatOptions,
+                                ),
+                                h('span', { key: 'pregen-hint', style: CSS.muted }, '或选预制卡'),
+                              ]),
+                              h('div', { key: 'cardbtns', style: CSS.row }, [
+                                h('button', { key: 'import-card', type: 'button', style: CSS.button, onClick: () => fileInputRef.current?.click?.() }, '导入卡 JSON'),
+                                h('button', { key: 'copy-pregen', type: 'button', style: CSS.button, onClick: () => savePregenCopy() }, '存预制为本地卡'),
+                                growth
+                                  ? h('button', { key: 'merge-growth', type: 'button', style: CSS.button, onClick: () => mergeGrowth() }, '合并成长到卡')
+                                  : null,
+                                h('button', { key: 'export-card', type: 'button', style: CSS.button, onClick: () => exportSelectedCard() }, '导出卡'),
+                                h('button', { key: 'delete-card', type: 'button', style: CSS.button, onClick: () => deleteSelectedCard() }, '删除卡'),
+                              ]),
+                              h('input', {
+                                key: 'card-file',
+                                type: 'file',
+                                accept: '.json,application/json',
+                                style: { display: 'none' },
+                                ref: fileInputRef,
+                                onChange: (event: { target: unknown }) => void importCardFile(event),
+                              }),
                             ]),
                       ]),
                       h('div', { key: 'dice', style: { ...CSS.section, display: 'flex', flexDirection: 'column', gap: 6 } }, [
