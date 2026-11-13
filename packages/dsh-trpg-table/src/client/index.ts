@@ -105,6 +105,16 @@ const CSS = {
     color: 'var(--dsw-alias-label-primary)',
     overflow: 'hidden',
   } as Record<string, unknown>,
+  shell: {
+    width: '100%',
+    maxWidth: 1240,
+    margin: '0 auto',
+    boxSizing: 'border-box',
+    flex: 1,
+    minHeight: 0,
+    display: 'flex',
+    flexDirection: 'column',
+  } as Record<string, unknown>,
   head: {
     display: 'flex',
     alignItems: 'center',
@@ -1269,8 +1279,10 @@ export function createPlugin(React: any) {
     ]);
 
     return h('div', { key: 'page', style: CSS.page }, [
-      head,
-      session ? (room ? roomBody : loading) : lobby,
+      h('div', { key: 'shell', style: CSS.shell }, [
+        head,
+        session ? (room ? roomBody : loading) : lobby,
+      ]),
     ]);
   }
 
