@@ -18,6 +18,11 @@ import {
 
 export const name = 'dsh-trpg-table';
 
+/**
+ * agents 是 AI GM 的可选依赖：用 ctx.inject 惰性获取，DSH 没有该服务时
+ * 房间/联机功能照常工作，只是 AI GM 模式会给出「无法启动」提示。
+ */
+
 const DEFAULT_PORT = 45871;
 const DEFAULT_HOST = '0.0.0.0';
 
@@ -32,7 +37,13 @@ export interface TrpgConfig {
 export interface HostCtxLike {
   effect(fn: () => () => void): void;
   on?(event: string, listener: (...args: unknown[]) => void): () => void;
-  agents?: {
+  /** Cordis 的嵌套注入：只在依赖可用时回调，插件本身无需声明硬依赖。 */
+  inject?(deps: string[], callback: (scoped: AgentsScope) => void | (() => void)): () => void;
+  agents?: AgentsScope['agents'];
+}
+
+export interface AgentsScope {
+  agents: {
     create(options: { sessionId: string; setup: (agentCtx: GmAgentCtxLike) => void }): Promise<GmHandleLike>;
   };
 }
@@ -70,9 +81,19 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     return;
   }
 
+  // 惰性获取 agents 服务：插件不声明硬依赖，缺服务时只是 AI GM 起不来。
+  let agentsService: AgentsScope['agents'] | null = null;
+  ctx.inject?.(['agents'], (scoped) => {
+    agentsService = scoped.agents;
+    log('agents service acquired: AI GM enabled');
+    return () => {
+      agentsService = null;
+    };
+  });
+
   const createAgent: GmCreateAgent = async ({ sessionId, setup }) => {
-    if (!ctx.agents) throw new Error('当前 DSH 没有 agents 服务，无法启动 AI GM');
-    return ctx.agents.create({ sessionId, setup });
+    if (!agentsService) throw new Error('当前 DSH 没有 agents 服务，无法启动 AI GM');
+    return agentsService.create({ sessionId, setup });
   };
 
   const manager = new GmManager({
