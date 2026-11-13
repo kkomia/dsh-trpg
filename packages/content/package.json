@@ -1,0 +1,10 @@
+{
+  "name": "@dsh-trpg/content",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "跑团桌内容包：D&D 5e-lite 规则数据、角色卡、世界书、模组",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

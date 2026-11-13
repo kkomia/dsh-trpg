@@ -14,7 +14,9 @@
 
 ## 状态
 
-🚧 **设计阶段**（v0.1 草案）。代码尚未开始，路线图见 [docs/ROADMAP.md](./docs/ROADMAP.md)。
+🚧 **M0 骨架已完成**（2026-11-13）：monorepo、协议/引擎包、DSH bundle（Host 房间服务 + Client 入口）、单测与冒烟验证。路线图见 [docs/ROADMAP.md](./docs/ROADMAP.md)，验收报告见 [docs/milestones/M0.md](./docs/milestones/M0.md)。
+
+当前可用：房主端房间服务（默认 `0.0.0.0:45871`，`/trpg/health`、`/trpg/rooms`）；客户端在对话输入框下方出现「🎲 跑团桌」入口，可探测房主、创建/列出房间。
 
 ## 文档
 
@@ -38,15 +40,17 @@
 
 ## 开发
 
-> 工具链使用 DSH 自带运行时（Node 24 + pnpm 11），无需额外安装。
+> 工具链使用 DSH 自带运行时（Node 24 + pnpm 11），也可用任意 Node 22+ / pnpm 11。
 
 ```bash
-# 之后 M0 落地后：
 pnpm install
-pnpm test          # 引擎/协议单测
-pnpm build         # 打包 DSH bundle
-pnpm pack:plugin   # 生成可安装的 .tgz
+pnpm typecheck     # 四个包的类型检查
+pnpm test          # 引擎/协议单测（node --test，原生跑 TS）
+pnpm build         # 打包 DSH bundle → packages/dsh-trpg-table/lib
+node scripts/smoke-host.mjs   # Host 房间服务冒烟测试
 ```
+
+安装到 DSH（开发模式）：插件页「添加插件」选择本地目录 `packages/dsh-trpg-table`，或在 Agent 里用 `plugin_manager install_bundle` 指定该目录。
 
 ## 仓库结构
 

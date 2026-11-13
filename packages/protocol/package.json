@@ -1,0 +1,10 @@
+{
+  "name": "@dsh-trpg/protocol",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "跑团桌房间协议：消息信封、领域事件、校验",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

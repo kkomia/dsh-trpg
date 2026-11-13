@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "TRPG Table",
+    "description": "LAN multiplayer AI tabletop RPG for DeepSeek Harness: the host opens a room, the AI acts as Keeper/GM with a deterministic D&D 5e-lite engine, and players just role-play.",
+    "detail": "docs/DETAIL.md"
+  }
+}

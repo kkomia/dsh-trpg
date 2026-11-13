@@ -9,19 +9,19 @@
 M0 骨架 ─► M1 引擎+内容 ─► M2 房间+联机 ─► M3 AI GM 端到端 ─► M4 真人 GM+收尾 ─► M5 局域网验收+发布
 ```
 
-## M0 — 工程骨架
+## M0 — 工程骨架 ✅ 2026-11-13
 
 **目标**：能装上、能看到入口、能跑测试。
 
-- [ ] pnpm workspace、tsconfig、esbuild 打包脚本、`node --test`
-- [ ] `@dsh-trpg/protocol`：信封类型、校验、版本协商
-- [ ] `@dsh-trpg/engine`：骨架 + 骰子表达式解析（先不接规则数据）
-- [ ] `dsh-trpg-table` bundle：`cordis.patch.yml`、host 入口、client 入口
-- [ ] Client：左侧/右侧栏出现「跑团桌」入口，能开一个空白房间视图
-- [ ] Host：能创建/销毁房间（内存态），`GET /trpg/health` 可访问
-- [ ] `README.md` / `docs/` 完成
+- [x] pnpm workspace、tsconfig、esbuild 打包脚本、`node --test`
+- [x] `@dsh-trpg/protocol`：信封类型、校验、版本协商
+- [x] `@dsh-trpg/engine`：骨架 + 骰子表达式解析 + 可复现随机数
+- [x] `dsh-trpg-table` bundle：`cordis.patch.yml`、host 入口、client 入口、locale、icon、DETAIL
+- [x] Client：对话输入框下方出现「🎲 跑团桌」dock，可探测房主 / 建房 / 列房
+- [x] Host：创建/列出房间（内存态）、`GET /trpg/health` 可访问
+- [x] `README.md` / `docs/` 完成
 
-**验收**：`pnpm test` 全绿；插件装进 desktop profile 后能在 DSH 里打开「跑团桌」；本机 `curl http://127.0.0.1:45871/trpg/health` 返回 ok。
+**验收**：`pnpm test` 12 项全绿；插件装进 desktop profile 后 bundle 列表含 `dsh-trpg-table`；活体 `GET /trpg/health` 返回 ok；Client 槽位 `conversation.composer.dock` 占用者含 `dsh-trpg-table`（active）。视觉外观待主理人页面确认。详见 `docs/milestones/M0.md`。
 
 ## M1 — 规则引擎 + 内容
 

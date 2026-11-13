@@ -1,0 +1,10 @@
+{
+  "name": "@dsh-trpg/engine",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "跑团桌 D&D 5e-lite 纯函数规则引擎（骰子 / 检定 / 战斗 / 状态）",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

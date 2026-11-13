@@ -1,0 +1,39 @@
+{
+  "name": "dsh-trpg-table",
+  "version": "0.0.1",
+  "description": "跑团桌 · TRPG Table — 局域网多人 AI 跑团：房主建房、AI 当 KP/GM、玩家只负责 RP。",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./lib/host.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "docs",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
