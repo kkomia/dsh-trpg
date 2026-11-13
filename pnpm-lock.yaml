@@ -17,6 +17,9 @@ importers:
       '@dsh-trpg/protocol':
         specifier: workspace:*
         version: link:packages/protocol
+      '@dsh-trpg/rooms':
+        specifier: workspace:*
+        version: link:packages/rooms
       '@types/node':
         specifier: ^24.19.2
         version: 24.19.2
@@ -34,6 +37,15 @@ importers:
   packages/engine: {}
 
   packages/protocol: {}
+
+  packages/rooms:
+    dependencies:
+      '@dsh-trpg/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@dsh-trpg/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
 packages:
 

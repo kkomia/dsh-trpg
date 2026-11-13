@@ -1,0 +1,14 @@
+{
+  "name": "@dsh-trpg/rooms",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "跑团桌房间状态机：账号、玩家席、事件日志、视图投影（零 HTTP 依赖）",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@dsh-trpg/engine": "workspace:*",
+    "@dsh-trpg/protocol": "workspace:*"
+  }
+}

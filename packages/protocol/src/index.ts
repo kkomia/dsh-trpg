@@ -1,107 +1,71 @@
 /**
- * 跑团桌房间协议 v1（M0 骨架）。
+ * 跑团桌房间协议 v1（M2）。
  *
- * 设计约束（见 docs/DESIGN.md §7）：
- * - 房间协议与 DSH 解耦：DSH 客户端、未来的 QQ adapter、网页 adapter 都只认这套消息。
- * - 客户端提交的行动只带 token 与文本；角色绑定由服务端完成（防「扮演劫色混淆」）。
- * - 服务端事件带单调递增 seq；断线重连时客户端带 lastSeq 补发。
- * - 私密事件在服务端投影阶段决定接收者（to），不依赖客户端隐藏。
+ * 约束（见 docs/DESIGN.md §7）：
+ * - 与 DSH 解耦：DSH 客户端、未来 QQ/网页 adapter 都只认这套 RPC + SSE。
+ * - 行动/角色身份由服务端绑定（token → playerId），客户端只提交文本。
+ * - 事件带单调递增 seq；断线重连用 lastSeq 补发。
+ * - 私密事件在服务端投影阶段决定接收者（to），客户端无法伪造。
  */
 
 export const PROTOCOL_VERSION = 1 as const;
 
 export type PlayerId = string;
-export type CharacterId = string;
 export type RoomId = string;
 export type Seq = number;
 
-/** 玩家行动的可选结构化标签；不替代自由 RP 文本，只是给引擎/AI 的提示。 */
-export type ActionTag =
-  | 'attack'
-  | 'cast'
-  | 'check'
-  | 'talk'
-  | 'move'
-  | 'use'
-  | 'other';
-
-export interface JoinRequest {
-  inviteCode: string;
-  playerName: string;
-  clientVersion: string;
-}
-
-export interface HelloRequest {
-  roomId: RoomId;
-  playerToken?: string;
-}
-
-export interface ActionRequest {
-  text: string;
-  tags?: ActionTag[];
-}
-
-/** 客户端 → 服务端 */
-export type ClientMessage =
-  | { v: typeof PROTOCOL_VERSION; type: 'hello'; id: string; payload: HelloRequest }
-  | { v: typeof PROTOCOL_VERSION; type: 'join'; id: string; payload: JoinRequest }
-  | { v: typeof PROTOCOL_VERSION; type: 'action'; id: string; payload: ActionRequest }
-  | { v: typeof PROTOCOL_VERSION; type: 'ping'; id: string; payload: { at: number } };
-
 export type RoomPhase = 'lobby' | 'playing' | 'paused' | 'ended';
-export type AlertLevel = 'info' | 'warning' | 'error';
+export type GMMode = 'ai' | 'human';
 
-/** 服务端 → 客户端的事件种类。 */
-export type EventKind =
-  | 'welcome'
-  | 'room'
-  | 'seat'
-  | 'narration'
-  | 'dice'
-  | 'private'
-  | 'combat'
-  | 'scene'
-  | 'alert';
+/** 事件接收者：全桌 / 仅 GM（含房主）/ 单个玩家。GM 永远能看到所有事件。 */
+export type EventTarget = 'all' | 'gm' | PlayerId;
+
+// ---------------------------------------------------------------------------
+// 视图
+// ---------------------------------------------------------------------------
+
+export interface RoomPlayerView {
+  playerId: PlayerId;
+  displayName: string;
+  seat: 'gm' | 'player';
+  online: boolean;
+  characterName?: string;
+  characterSummary?: string;
+}
+
+export interface RoomView {
+  roomId: RoomId;
+  title: string;
+  phase: RoomPhase;
+  gmMode: GMMode;
+  locked: boolean;
+  /** 只有房主（host 身份）能看到邀请码。 */
+  inviteCode?: string;
+  players: RoomPlayerView[];
+  createdAt: number;
+}
+
+// ---------------------------------------------------------------------------
+// 事件
+// ---------------------------------------------------------------------------
+
+export type EventKind = 'room' | 'narration' | 'dice' | 'alert' | 'scene' | 'combat' | 'private';
 
 export interface GameEvent<K extends EventKind = EventKind, P = unknown> {
   v: typeof PROTOCOL_VERSION;
   kind: K;
   seq: Seq;
   at: number;
-  /** 服务端投影决定：all / gm / 单个 playerId。客户端只读。 */
-  to: 'all' | 'gm' | PlayerId;
+  to: EventTarget;
   payload: P;
 }
 
-export interface WelcomePayload {
-  roomId: RoomId;
-  playerId: PlayerId;
-  playerToken: string;
-  protocol: typeof PROTOCOL_VERSION;
-  displayName: string;
-}
-
-export interface RoomPayload {
-  roomId: RoomId;
-  phase: RoomPhase;
-  title: string;
-  gmMode: 'ai' | 'human';
-  players: Array<{
-    playerId: PlayerId;
-    displayName: string;
-    characterName?: string;
-    online: boolean;
-    seat: 'gm' | 'player';
-  }>;
-}
-
 export interface NarrationPayload {
-  text: string;
-  /** gm = 房主/AI 的旁白；player = 玩家行动；system = 系统提示。 */
+  /** gm = AI/真人 GM 旁白；player = 玩家行动；system = 系统提示。 */
   speaker: 'gm' | 'player' | 'system';
   speakerName?: string;
-  /** 同一段叙事可标记为战斗轮中的行动，用于 UI 分组。 */
-  combatRound?: number;
+  playerId?: PlayerId;
+  text: string;
 }
 
 export interface DicePayload {
@@ -109,30 +73,136 @@ export interface DicePayload {
   dice: number[];
   modifier: number;
   total: number;
-  /** 检定相关（可选）：目标、DC、成败。 */
+  label?: string;
+  rollerName: string;
+  playerId: PlayerId;
+  private: boolean;
+  /** 检定结果（M3 战斗接入后使用）。 */
   check?: {
     kind: 'ability' | 'skill' | 'attack' | 'save';
     name: string;
     dc: number;
     success: boolean;
-    mode?: 'normal' | 'advantage' | 'disadvantage';
   };
-  /** 私骰时服务端会把它投影给单个玩家。 */
-  private?: boolean;
 }
 
 export interface AlertPayload {
+  level: 'info' | 'warning' | 'error';
   text: string;
-  level: AlertLevel;
 }
 
-export type ServerMessage =
-  | { v: typeof PROTOCOL_VERSION; type: 'ack'; id: string }
-  | { v: typeof PROTOCOL_VERSION; type: 'error'; id?: string; code: string; message: string }
-  | { v: typeof PROTOCOL_VERSION; type: 'event'; event: GameEvent };
+// ---------------------------------------------------------------------------
+// RPC
+// ---------------------------------------------------------------------------
+
+export interface RpcRequest {
+  method: RpcMethod;
+  params?: unknown;
+  token?: string;
+  /** 客户端版本，便于以后做兼容性提示。 */
+  clientVersion?: string;
+}
+
+export interface RpcError {
+  code:
+    | 'bad-request'
+    | 'unauthorized'
+    | 'forbidden'
+    | 'not-found'
+    | 'room-locked'
+    | 'invalid-card'
+    | 'invalid-expression'
+    | 'conflict'
+    | 'internal';
+  message: string;
+}
+
+export type RpcResponse<T = unknown> =
+  | { ok: true; result: T }
+  | { ok: false; error: RpcError };
+
+export type RpcMethod =
+  | 'room.create'
+  | 'room.join'
+  | 'room.state'
+  | 'room.seat'
+  | 'room.roll'
+  | 'room.say'
+  | 'room.leave'
+  | 'room.kick'
+  | 'room.lock'
+  | 'room.list'
+  | 'host.session';
+
+export interface CreateRoomParams {
+  title: string;
+  gmMode: GMMode;
+}
+
+export interface CreateRoomResult {
+  room: RoomView;
+  hostToken: string;
+  inviteCode: string;
+}
+
+export interface JoinRoomParams {
+  inviteCode: string;
+  playerName: string;
+  characterCard?: unknown;
+}
+
+export interface JoinRoomResult {
+  room: RoomView;
+  playerId: PlayerId;
+  playerToken: string;
+}
+
+export interface SeatParams {
+  characterCard: unknown;
+}
+
+export interface RollParams {
+  expression: string;
+  label?: string;
+  private?: boolean;
+}
+
+export interface SayParams {
+  text: string;
+  /** true = 悄悄话给 GM，不进公共叙事。 */
+  private?: boolean;
+}
+
+export interface KickParams {
+  playerId: PlayerId;
+}
+
+export interface LockParams {
+  locked: boolean;
+}
+
+export interface HostSessionParams {
+  roomId: RoomId;
+}
+
+export interface RoomStateResult {
+  room: RoomView;
+}
+
+export interface RollResult {
+  event: GameEvent<'dice', DicePayload>;
+}
+
+export interface SayResult {
+  event: GameEvent<'narration', NarrationPayload>;
+}
+
+export interface RoomListResult {
+  rooms: Array<{ roomId: RoomId; title: string; phase: RoomPhase; gmMode: GMMode; players: number }>;
+}
 
 // ---------------------------------------------------------------------------
-// 校验：手写守卫，零依赖，服务端入口与测试共用。
+// 校验（手写守卫，零依赖）
 // ---------------------------------------------------------------------------
 
 export interface ValidationResult<T> {
@@ -150,50 +220,68 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
-export function validateClientMessage(input: unknown): ValidationResult<ClientMessage> {
-  if (!isRecord(input)) return fail('message must be an object');
-  if (input.v !== PROTOCOL_VERSION) return fail(`unsupported protocol version: ${String(input.v)}`);
-  if (!isNonEmptyString(input.type)) return fail('message.type must be a string');
-  if (!isNonEmptyString(input.id)) return fail('message.id must be a string');
-  const payload = input.payload;
-  if (!isRecord(payload)) return fail('message.payload must be an object');
+const METHODS: readonly RpcMethod[] = [
+  'room.create',
+  'room.join',
+  'room.state',
+  'room.seat',
+  'room.roll',
+  'room.say',
+  'room.leave',
+  'room.kick',
+  'room.lock',
+  'room.list',
+  'host.session',
+];
 
-  switch (input.type) {
-    case 'hello':
-      if (!isNonEmptyString(payload.roomId)) return fail('hello.roomId must be a string');
-      if (payload.playerToken !== undefined && typeof payload.playerToken !== 'string') {
-        return fail('hello.playerToken must be a string');
-      }
-      return { ok: true, value: input as unknown as ClientMessage };
-    case 'join':
-      if (!isNonEmptyString(payload.inviteCode)) return fail('join.inviteCode must be a string');
-      if (!isNonEmptyString(payload.playerName)) return fail('join.playerName must be a string');
-      if (!isNonEmptyString(payload.clientVersion)) return fail('join.clientVersion must be a string');
-      return { ok: true, value: input as unknown as ClientMessage };
-    case 'action': {
-      if (!isNonEmptyString(payload.text)) return fail('action.text must be a string');
-      if (payload.text.length > 2000) return fail('action.text exceeds 2000 characters');
-      if (payload.tags !== undefined) {
-        if (!Array.isArray(payload.tags) || payload.tags.some((tag) => !isNonEmptyString(tag))) {
-          return fail('action.tags must be a string array');
-        }
-      }
-      return { ok: true, value: input as unknown as ClientMessage };
-    }
-    case 'ping': {
-      if (typeof payload.at !== 'number' || !Number.isFinite(payload.at)) {
-        return fail('ping.at must be a finite number');
-      }
-      return { ok: true, value: input as unknown as ClientMessage };
-    }
-    default:
-      return fail(`unknown message type: ${input.type}`);
-  }
+export function isRpcMethod(value: unknown): value is RpcMethod {
+  return typeof value === 'string' && (METHODS as readonly string[]).includes(value);
 }
 
-export function isTerminalEvent(event: GameEvent): boolean {
-  return event.kind === 'scene';
+export function validateRpcRequest(input: unknown): ValidationResult<RpcRequest> {
+  if (!isRecord(input)) return fail('RPC 请求必须是对象');
+  if (!isRpcMethod(input.method)) return fail(`未知 RPC 方法：${String(input.method)}`);
+  if (input.token !== undefined && typeof input.token !== 'string') return fail('token 必须是字符串');
+  if (input.params !== undefined && !isRecord(input.params)) return fail('params 必须是对象');
+  return { ok: true, value: input as unknown as RpcRequest };
+}
+
+export function validateCreateRoom(params: unknown): ValidationResult<CreateRoomParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.title)) return fail('房间标题必填');
+  if (params.title.length > 60) return fail('房间标题过长（最多 60 字）');
+  if (params.gmMode !== 'ai' && params.gmMode !== 'human') return fail('gmMode 必须是 ai 或 human');
+  return { ok: true, value: params as unknown as CreateRoomParams };
+}
+
+export function validateJoin(params: unknown): ValidationResult<JoinRoomParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.inviteCode)) return fail('邀请码必填');
+  if (!isNonEmptyString(params.playerName)) return fail('玩家名必填');
+  if (params.playerName.length > 30) return fail('玩家名过长（最多 30 字）');
+  return { ok: true, value: params as unknown as JoinRoomParams };
+}
+
+export function validateRoll(params: unknown): ValidationResult<RollParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.expression)) return fail('骰子表达式必填');
+  if (params.expression.length > 40) return fail('骰子表达式过长');
+  if (params.private !== undefined && typeof params.private !== 'boolean') return fail('private 必须是布尔值');
+  return { ok: true, value: params as unknown as RollParams };
+}
+
+export function validateSay(params: unknown): ValidationResult<SayParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.text)) return fail('内容不能为空');
+  if (params.text.length > 3000) return fail('内容过长（最多 3000 字）');
+  if (params.private !== undefined && typeof params.private !== 'boolean') return fail('private 必须是布尔值');
+  return { ok: true, value: params as unknown as SayParams };
+}
+
+/** 事件的 SSE 线格式。 */
+export function encodeSseEvent(event: GameEvent): string {
+  return `event: game\ndata: ${JSON.stringify(event)}\n\n`;
 }

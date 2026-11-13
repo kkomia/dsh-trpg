@@ -14,9 +14,9 @@
 
 ## 状态
 
-🚧 **M1 完成**（2026-11-13）：M0 骨架（DSH bundle + 局域网房间服务 + 客户端入口）+ M1 规则引擎与内容（D&D 5e-lite、4 角色卡、世界书、首个模组、CLI 战报）。路线图见 [docs/ROADMAP.md](./docs/ROADMAP.md)，里程碑验收报告见 `docs/milestones/`。
+🚧 **M2 完成（协议层）**（2026-11-13）：M0 骨架 → M1 规则引擎与内容 → M2 局域网房间服务（邀请码/token/玩家席/SSE 断线重连/私密投影/踢人锁房）。路线图见 [docs/ROADMAP.md](./docs/ROADMAP.md)，里程碑验收报告见 `docs/milestones/`。
 
-当前可用：房主端房间服务（默认 `0.0.0.0:45871`）；客户端在对话输入框下方出现「🎲 跑团桌」入口；`node scripts/cli-demo.mjs` 可无 UI 跑一场带完整掷骰结算的 Boss 战。AI GM 与多人联机在 M2–M3 接入。
+当前可用：房主在「🎲 跑团桌」面板创建房间 → 朋友填房主局域网地址 + 邀请码加入 → 落座预制角色 → 服务端掷骰（支持私骰）→ 叙事流/悄悄话/踢人/锁房/断线重连。AI GM 在 M3 接入。
 
 ## 文档
 
@@ -44,10 +44,11 @@
 
 ```bash
 pnpm install
-pnpm typecheck     # 四个包的类型检查
-pnpm test          # 引擎/协议单测（node --test，原生跑 TS）
+pnpm typecheck     # 五个包的类型检查
+pnpm test          # 引擎/协议/内容/房间单测（node --test，原生跑 TS）
+pnpm test:e2e      # 真实 HTTP+SSE 的房间端到端冒烟
 pnpm build         # 打包 DSH bundle → packages/dsh-trpg-table/lib
-node scripts/smoke-host.mjs   # Host 房间服务冒烟测试
+pnpm demo          # 无 UI 的 CLI 对局战报（引擎+内容验收）
 ```
 
 安装到 DSH（开发模式）：插件页「添加插件」选择本地目录 `packages/dsh-trpg-table`，或在 Agent 里用 `plugin_manager install_bundle` 指定该目录。
