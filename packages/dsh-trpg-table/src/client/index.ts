@@ -477,6 +477,33 @@ export function createPlugin(React: any) {
           h('span', { key: 'text' }, payload.text),
         ]);
       }
+      if (event.kind === 'combat') {
+        const payload = event.payload as {
+          view?: {
+            round: number;
+            activeName: string;
+            order: Array<{ id: string; name: string; kind: string; hp: number; maxHp: number; downed: boolean; dead: boolean }>;
+          };
+          note?: string;
+        };
+        const view = payload.view;
+        return h(
+          'div',
+          { key: `${event.seq}-${index}`, style: { ...CSS.section, display: 'flex', flexDirection: 'column', gap: 4 } },
+          [
+            h('div', { key: 'head', style: { fontSize: 12, fontWeight: 600 } }, `⚔ 第 ${view?.round ?? '?'} 轮 · 轮到 ${view?.activeName ?? '?'}`),
+            h(
+              'div',
+              { key: 'order', style: { display: 'flex', flexWrap: 'wrap', gap: 6, fontSize: 11 } },
+              (view?.order ?? []).map((entry) =>
+                h('span', { key: entry.id, style: { ...CSS.tag, color: entry.dead ? 'var(--dsw-alias-state-error-primary)' : entry.kind === 'pc' ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-state-warn-primary)' } },
+                  `${entry.name} ${entry.dead ? '阵亡' : entry.downed ? '倒地' : `${entry.hp}/${entry.maxHp}`}`),
+              ),
+            ),
+            payload.note ? h('div', { key: 'note', style: CSS.muted }, payload.note) : null,
+          ],
+        );
+      }
       if (event.kind === 'alert') {
         const payload = event.payload as { level: string; text: string };
         return h('div', { key: `${event.seq}-${index}`, style: { ...CSS.muted, fontStyle: 'italic' } }, `— ${payload.text} —`);

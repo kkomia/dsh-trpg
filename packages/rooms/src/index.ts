@@ -471,6 +471,26 @@ export class RoomService {
     return this.emit(room, 'alert', 'all', { level, text } satisfies AlertPayload);
   }
 
+  /** 房间种子（战斗运行时用于可复现掷骰）。 */
+  gmRoomSeed(roomId: string): number {
+    return this.requireRoom(roomId).seed;
+  }
+
+  /** 广播战斗面板状态（先攻/HP/当前行动者）。 */
+  gmCombat(
+    roomId: string,
+    view: {
+      round: number;
+      activeId: string;
+      activeName: string;
+      order: Array<{ id: string; name: string; kind: 'pc' | 'monster'; hp: number; maxHp: number; ac: number; downed: boolean; dead: boolean }>;
+    },
+    note?: string,
+  ): GameEvent<'combat', { view: typeof view; note?: string }> {
+    const room = this.requireRoom(roomId);
+    return this.emit(room, 'combat', 'all', { view, note });
+  }
+
   /** GM 请求一次自由掷骰（例如伤害骰），走房间种子保证可复现。 */
   gmRoll(
     roomId: string,

@@ -5,6 +5,7 @@
 import { SKILL_ABILITY, SKILL_NAME, type SkillId } from '@dsh-trpg/engine';
 import type { LorebookDef } from '@dsh-trpg/content';
 import type { RoomService } from '@dsh-trpg/rooms';
+import type { CombatRuntime } from './combat.ts';
 
 export interface GmToolDefinition {
   name: string;
@@ -34,8 +35,9 @@ export function createGmTools(options: {
   roomService: RoomService;
   roomId: string;
   lorebook: LorebookDef;
+  combat?: CombatRuntime;
 }): GmToolDefinition[] {
-  const { roomService, roomId, lorebook } = options;
+  const { roomService, roomId, lorebook, combat } = options;
   const render = (_args: Record<string, unknown>, value: { text: string }) => [{ type: 'text' as const, text: value.text }];
   const output = { schema: { type: 'object' }, render };
 
@@ -181,6 +183,80 @@ export function createGmTools(options: {
             })
             .join('\n'),
         };
+      },
+    },
+    {
+      name: 'start_combat',
+      description:
+        '开始一场战斗：玩家方自动取已落座角色，怪物方用 monsterId 指定。引擎会掷先攻并维护轮次；开战后只能用 attack/next_turn 推进，不能跳回合。',
+      parameters: {
+        type: 'object',
+        properties: {
+          monsters: { type: 'string', description: '怪物列表，格式 "shanxiao*2,xueshi*1"；id 见模组遭遇或 list_monsters' },
+          reason: { type: 'string', description: '开战原因（中文短语）' },
+        },
+        required: ['monsters'],
+      },
+      output,
+      execute(args) {
+        if (!combat) throw new Error('战斗系统未初始化');
+        const { text } = combat.start(String(args.monsters ?? ''));
+        return { text };
+      },
+    },
+    {
+      name: 'attack',
+      description:
+        '让当前行动者攻击一个目标（引擎掷命中与伤害）。只能对当前行动者调用；不是它的回合会被拒绝。',
+      parameters: {
+        type: 'object',
+        properties: {
+          attacker: { type: 'string', description: '当前行动者的名字（玩家角色名或怪物名）' },
+          target: { type: 'string', description: '目标名字' },
+          attackName: { type: 'string', description: '使用哪个攻击（可选，默认第一个）' },
+        },
+        required: ['attacker', 'target'],
+      },
+      output,
+      execute(args) {
+        if (!combat) throw new Error('战斗系统未初始化');
+        const { text } = combat.attack(
+          String(args.attacker ?? ''),
+          String(args.target ?? ''),
+          typeof args.attackName === 'string' ? args.attackName : undefined,
+        );
+        return { text };
+      },
+    },
+    {
+      name: 'next_turn',
+      description: '结束当前行动者的回合，轮到先攻顺序里的下一个可行动者。',
+      parameters: { type: 'object', properties: {}, required: [] },
+      output,
+      execute() {
+        if (!combat) throw new Error('战斗系统未初始化');
+        const { text } = combat.nextTurn();
+        return { text };
+      },
+    },
+    {
+      name: 'combat_status',
+      description: '查看当前战斗状态：第几轮、轮到谁、双方 HP。',
+      parameters: { type: 'object', properties: {}, required: [] },
+      output,
+      execute() {
+        if (!combat || !combat.running) return { text: '当前没有进行中的战斗' };
+        return { text: combat.status() };
+      },
+    },
+    {
+      name: 'end_combat',
+      description: '结束当前战斗（玩家逃跑、敌人清空或剧情收尾）。',
+      parameters: { type: 'object', properties: {}, required: [] },
+      output,
+      execute() {
+        if (!combat || !combat.running) throw new Error('当前没有进行中的战斗');
+        return { text: combat.end() };
       },
     },
   ];

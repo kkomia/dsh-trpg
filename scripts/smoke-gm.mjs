@@ -141,7 +141,7 @@ async function main() {
 
     // 等 GM 启动 + 开场
     await new Promise((resolve) => setTimeout(resolve, 120));
-    check('GM 会话已创建并注册工具', captured.tools.length === 6, `tools=${captured.tools.length}`);
+    check('GM 会话已创建并注册工具', captured.tools.length === 11, `tools=${captured.tools.length}`);
     check('GM 系统提示已注入', captured.sections.length === 1 && captured.sections[0].text().includes('硬规则'));
     check('GM 收到开场回合', captured.prompts.some((prompt) => prompt.includes('【开场】')));
 

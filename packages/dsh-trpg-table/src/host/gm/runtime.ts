@@ -11,6 +11,7 @@ import type { GameEvent } from '@dsh-trpg/protocol';
 import type { PlayerActionInfo, RoomService } from '@dsh-trpg/rooms';
 import { buildGmSystemPrompt, buildTurnPrompt, type PromptEvent, type PromptPlayer } from './prompt.ts';
 import { createGmTools } from './tools.ts';
+import { CombatRuntime } from './combat.ts';
 
 /** DSH Agent 的结构化最小面（不 import Harness 包，保持第三方插件可安装）。 */
 export interface GmAgentCtxLike {
@@ -98,6 +99,7 @@ export function eventToPromptEvent(event: GameEvent): PromptEvent | null {
 export class GmRuntime {
   readonly roomId: string;
   readonly sessionId: string;
+  readonly combat: CombatRuntime;
   private handle: GmHandleLike | null = null;
   private queue: Promise<void> = Promise.resolve();
   private disposed = false;
@@ -107,6 +109,7 @@ export class GmRuntime {
     this.options = options;
     this.roomId = options.roomId;
     this.sessionId = randomUUID();
+    this.combat = new CombatRuntime({ roomService: options.roomService, roomId: options.roomId, log: options.log });
   }
 
   /** 创建 GM 会话并注册该 Agent 专属的工具与系统提示。 */
@@ -116,7 +119,7 @@ export class GmRuntime {
     this.handle = await createAgent({
       sessionId: this.sessionId,
       setup: (agentCtx) => {
-        for (const tool of createGmTools({ roomService, roomId, lorebook })) {
+        for (const tool of createGmTools({ roomService, roomId, lorebook, combat: this.combat })) {
           agentCtx.tools.register(tool);
         }
         agentCtx.systemPrompt.section({

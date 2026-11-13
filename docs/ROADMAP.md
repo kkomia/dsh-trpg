@@ -59,8 +59,8 @@ M0 骨架 ─► M1 引擎+内容 ─► M2 房间+联机 ─► M3 AI GM 端到
 - [x] 上下文组装（守则 + 模组 + 世界书 + 场景 + 单行动者绑定 + 最近事件）
 - [x] 输出处理：assistant 文本 → 房间公共叙事；工具副作用 → 骰子/私密事件
 - [x] 反串角回归用例：行动者绑定、单行动者 prompt、私密不越权、工具作用域隔离
+- [x] 战斗工具（start_combat / attack / next_turn / combat_status / end_combat，引擎强制轮次）
 - [ ] 实机联调：重启 DSH 后 `node scripts/probe-live-gm.mjs` 验证真实模型开口（**待主理人重启**）
-- [ ] 战斗工具（start_combat / attack / monster_hp / end_combat），让 AI 跑通模组第二幕遭遇
 - [ ] 叙事流式输出
 
 **验收**：`node --test` 64 项全绿；`node scripts/smoke-gm.mjs` 假 Agent 全链路 14 项检查通过；实机探针待重启后执行。详见 `docs/milestones/M3.md`。

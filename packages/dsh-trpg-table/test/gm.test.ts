@@ -129,8 +129,20 @@ test('runtime: start registers GM tools scoped to the agent and system section',
     createAgent,
   });
   await runtime.start();
-  assert.equal(ctx.tools.length, 6, '应注册 6 个 GM 工具');
-  assert.deepEqual(ctx.tools.map((tool) => tool.name).sort(), ['check_lore', 'list_party', 'reveal_lore', 'roll_check', 'roll_dice', 'secret_note']);
+  assert.equal(ctx.tools.length, 11, '应注册 11 个 GM 工具');
+  assert.deepEqual(ctx.tools.map((tool) => tool.name).sort(), [
+    'attack',
+    'check_lore',
+    'combat_status',
+    'end_combat',
+    'list_party',
+    'next_turn',
+    'reveal_lore',
+    'roll_check',
+    'roll_dice',
+    'secret_note',
+    'start_combat',
+  ]);
   assert.equal(ctx.sections.length, 1);
   assert.equal(ctx.sections[0]?.name, 'trpg-gm');
   assert.ok(ctx.sections[0]?.text().includes('硬规则'));
@@ -262,6 +274,46 @@ test('manager: human GM mode does not start an AI agent', async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(state.calls.length, 0);
   await manager.dispose();
+});
+
+test('combat: engine enforces turn order and broadcasts combat state', async () => {
+  const { roomService, action } = setupRoom();
+  const { CombatRuntime } = await import('../src/host/gm/combat.ts');
+  const combat = new CombatRuntime({ roomService, roomId: action.roomId });
+  const tools = createGmTools({ roomService, roomId: action.roomId, lorebook: GUIMUYA_LOREBOOK, combat });
+  const start = tools.find((tool) => tool.name === 'start_combat');
+  const started = await start?.execute({ monsters: 'shanxiao*1' });
+  assert.ok(started?.text.includes('先攻顺序'));
+  assert.equal(combat.running, true);
+
+  const view = combat.view();
+  const active = view.order.find((entry) => entry.id === view.activeId);
+  const enemies = view.order.filter((entry) => entry.kind === 'monster');
+  const allies = view.order.filter((entry) => entry.kind === 'pc');
+  const attacker = active?.kind === 'monster' ? enemies[0] : allies[0];
+  const target = attacker?.kind === 'monster' ? allies[0] : enemies[0];
+  assert.ok(attacker && target);
+
+  const attackTool = tools.find((tool) => tool.name === 'attack');
+  const attacked = await attackTool?.execute({ attacker: attacker.name, target: target.name });
+  assert.ok(attacked?.text.includes(attacker.name));
+
+  const combatEvent = roomService.gmRecentEvents(action.roomId, 10).find((event) => event.kind === 'combat');
+  assert.ok(combatEvent);
+
+  // 不是行动者的攻击必须被引擎拒绝
+  const wrong = view.order.find((entry) => entry.id !== view.activeId && !entry.dead);
+  assert.ok(wrong);
+  const wrongTarget = wrong.kind === 'monster' ? allies[0] : enemies[0];
+  assert.ok(wrongTarget);
+  await assert.rejects(
+    async () => attackTool?.execute({ attacker: wrong.name, target: wrongTarget.name }),
+    /轮到/,
+  );
+
+  const ended = await tools.find((tool) => tool.name === 'end_combat')?.execute({});
+  assert.ok(ended?.text.includes('战斗结束'));
+  assert.equal(combat.running, false);
 });
 
 test('eventToPromptEvent: formats narration/dice/alert and drops room snapshots', () => {
