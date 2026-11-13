@@ -9,6 +9,7 @@
 import { GUIMUYA_LOREBOOK, GUIMUYA_MODULE } from '@dsh-trpg/content';
 import { RoomService } from '@dsh-trpg/rooms';
 import { createRoomHttpServer, type RoomHttpServer } from './room-http.ts';
+import { RoomPersistence } from './persistence.ts';
 import {
   GmManager,
   type GmAgentCtxLike,
@@ -64,6 +65,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   const bindHost = config.bindHost ?? DEFAULT_HOST;
 
   const managerRef: { current: GmManager | null } = { current: null };
+  const persistence = new RoomPersistence({ log });
+  let restoredRooms: string[] = [];
   const service = new RoomService({
     onRoomCreated: (roomId) => {
       void managerRef.current?.ensureRoom(roomId);
@@ -71,7 +74,20 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     onPlayerAction: (info) => {
       managerRef.current?.onPlayerAction(info);
     },
+    onChanged: () => persistence.schedule(),
   });
+
+  // 续团：先从磁盘恢复上一轮 DSH 的房间，再启动 HTTP 服务。
+  try {
+    const restored = persistence.restoreInto(service);
+    persistence.attach(service);
+    if (restored > 0) {
+      restoredRooms = service.snapshotAll().map((snapshot) => snapshot.room.id);
+      log(`restored ${restored} room(s) from disk`);
+    }
+  } catch (error) {
+    log(`room restore failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   let http: RoomHttpServer;
   try {
@@ -105,6 +121,11 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   });
   managerRef.current = manager;
 
+  // 恢复的 AI 房间要重新拉起 GM 会话（上下文从存档事件继续）。
+  for (const roomId of restoredRooms) {
+    void manager.ensureRoom(roomId);
+  }
+
   const offSessionEvent = ctx.on?.('session/event', (...args: unknown[]) => {
     const session = args[0] as { id?: string } | undefined;
     const event = args[1] as { type?: string; data?: unknown } | undefined;
@@ -123,6 +144,11 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     log('room server stopping');
     try {
       offSessionEvent?.();
+    } catch {
+      /* ignore */
+    }
+    try {
+      persistence.close();
     } catch {
       /* ignore */
     }

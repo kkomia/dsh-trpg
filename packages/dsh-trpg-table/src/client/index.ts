@@ -9,7 +9,7 @@
  * 构建：scripts/build.mjs 打包成 lib/client.js（CJS + ModuleLoader 包装）；
  * 因此源码里不要 import 'react'（由 ModuleLoader 注入），数据从 workspace 包静态打入。
  */
-import { CARDS } from '@dsh-trpg/content';
+import { CARDS, GUIMUYA_MODULE } from '@dsh-trpg/content';
 import type {
   CreateRoomResult,
   DicePayload,
@@ -207,6 +207,14 @@ export function createPlugin(React: any) {
     const [sayPrivate, setSayPrivate] = useState(false);
     const [seatCardId, setSeatCardId] = useState(CARDS[0]?.id ?? '');
     const [busy, setBusy] = useState(false);
+    // 真人 GM 控制台
+    const [gmText, setGmText] = useState('');
+    const [gmPlayerId, setGmPlayerId] = useState('');
+    const [gmSecretText, setGmSecretText] = useState('');
+    const [gmSceneId, setGmSceneId] = useState(GUIMUYA_MODULE.scenes[0]?.id ?? '');
+    const [awardPlayerId, setAwardPlayerId] = useState('');
+    const [awardXp, setAwardXp] = useState('50');
+    const [awardItems, setAwardItems] = useState('');
     const lastSeqRef = useRef(0);
     const sourceRef = useRef(null as { close: () => void } | null);
     const feedRef = useRef([] as GameEvent[]);
@@ -440,8 +448,60 @@ export function createPlugin(React: any) {
       }
     }, [session, token, room]);
 
-    const leave = useCallback(async () => {
-      if (session && token && !session.hostToken) {
+    // 真人 GM 控制台动作
+    const gmNarrate = useCallback(async () => {
+      if (!session || !token || !gmText.trim()) return;
+      setBusy(true);
+      try {
+        const text = gmText;
+        setGmText('');
+        await callRpc(session.base, 'gm.narrate', { text }, token);
+      } catch (error) {
+        setStatus({ kind: 'bad', text: `旁白发送失败：${error instanceof Error ? error.message : String(error)}` });
+      } finally {
+        setBusy(false);
+      }
+    }, [session, token, gmText]);
+
+    const gmSecret = useCallback(async () => {
+      if (!session || !token || !gmPlayerId || !gmSecretText.trim()) return;
+      setBusy(true);
+      try {
+        const text = gmSecretText;
+        setGmSecretText('');
+        await callRpc(session.base, 'gm.secret', { playerId: gmPlayerId, text }, token);
+      } catch (error) {
+        setStatus({ kind: 'bad', text: `私发失败：${error instanceof Error ? error.message : String(error)}` });
+      } finally {
+        setBusy(false);
+      }
+    }, [session, token, gmPlayerId, gmSecretText]);
+
+    const gmScene = useCallback(async () => {
+      if (!session || !token || !gmSceneId) return;
+      const scene = GUIMUYA_MODULE.scenes.find((entry) => entry.id === gmSceneId);
+      try {
+        await callRpc(session.base, 'gm.scene', { sceneId: gmSceneId, title: scene?.title }, token);
+      } catch (error) {
+        setStatus({ kind: 'bad', text: `推进场景失败：${error instanceof Error ? error.message : String(error)}` });
+      }
+    }, [session, token, gmSceneId]);
+
+    const gmAward = useCallback(async () => {
+      if (!session || !token || !gmPlayerId) return;
+      const xp = Number.parseInt(awardXp, 10);
+      const items = awardItems
+        .split(/[,，\s]+/)
+        .map((item: string) => item.trim())
+        .filter(Boolean);
+      try {
+        await callRpc(session.base, 'gm.award', { playerId: gmPlayerId, xp: Number.isFinite(xp) ? xp : 0, items }, token);
+      } catch (error) {
+        setStatus({ kind: 'bad', text: `发放奖励失败：${error instanceof Error ? error.message : String(error)}` });
+      }
+    }, [session, token, gmPlayerId, awardXp, awardItems]);
+
+    const leave = useCallback(async () => {      if (session && token && !session.hostToken) {
         try {
           await callRpc(session.base, 'room.leave', {}, token);
         } catch {
@@ -503,6 +563,19 @@ export function createPlugin(React: any) {
             payload.note ? h('div', { key: 'note', style: CSS.muted }, payload.note) : null,
           ],
         );
+      }
+      if (event.kind === 'scene') {
+        const payload = event.payload as { sceneId: string; title?: string };
+        return h('div', { key: `${event.seq}-${index}`, style: { ...CSS.feedRow, color: 'var(--dsw-alias-brand-primary)' } }, `📍 场景推进：${payload.title ?? payload.sceneId}`);
+      }
+      if (event.kind === 'award') {
+        const payload = event.payload as { xp: number; items: string[]; note?: string };
+        return h('div', { key: `${event.seq}-${index}`, style: { ...CSS.diceCard, borderStyle: 'solid' } }, [
+          h('span', { key: 'title', style: { fontWeight: 600 } }, '🎁 获得奖励'),
+          h('span', { key: 'xp' }, `+${payload.xp} XP`),
+          payload.items.length ? h('span', { key: 'items', style: CSS.muted }, payload.items.join('、')) : null,
+          payload.note ? h('span', { key: 'note', style: CSS.muted }, payload.note) : null,
+        ]);
       }
       if (event.kind === 'alert') {
         const payload = event.payload as { level: string; text: string };
@@ -596,11 +669,80 @@ export function createPlugin(React: any) {
                     h('strong', { key: 'roomtitle' }, room?.title ?? '房间'),
                     h('span', { key: 'phase', style: CSS.tag }, room?.phase ?? 'lobby'),
                     h('span', { key: 'gm', style: CSS.tag }, room?.gmMode === 'human' ? '真人 GM' : 'AI GM'),
+                    room?.scene ? h('span', { key: 'scene', style: CSS.tag }, `场景：${room.scene.title ?? room.scene.sceneId}`) : null,
                     isHost && room?.inviteCode ? h('span', { key: 'invite', style: CSS.tag }, `邀请码 ${room.inviteCode}`) : null,
                     room?.locked ? h('span', { key: 'locked', style: CSS.tag }, '已锁定') : null,
                     h('span', { key: 'count', style: CSS.muted }, `${room?.players.length ?? 0} 人在桌`),
                     isHost ? h('button', { key: 'lock', type: 'button', style: CSS.button, onClick: () => void toggleLock() }, room?.locked ? '解锁' : '锁房') : null,
                   ]),
+                  isHost
+                    ? h('div', { key: 'gmconsole', style: { ...CSS.section, display: 'flex', flexDirection: 'column', gap: 6 } }, [
+                        h('strong', { key: 't' }, 'GM 控制台（仅房主可见）'),
+                        h('div', { key: 'narr', style: CSS.row }, [
+                          h('textarea', {
+                            key: 'txt',
+                            style: { ...CSS.input, minHeight: 42 },
+                            value: gmText,
+                            placeholder: '以 GM 身份向全桌描述…',
+                            onChange: (event: { target: { value: string } }) => setGmText(event.target.value),
+                          }),
+                          h('button', { key: 'send', type: 'button', style: CSS.buttonPrimary, disabled: busy, onClick: () => void gmNarrate() }, '发送旁白'),
+                        ]),
+                        h('div', { key: 'secret', style: CSS.row }, [
+                          h(
+                            'select',
+                            {
+                              key: 'player',
+                              style: { ...CSS.input, flex: '0 0 130px' },
+                              value: gmPlayerId,
+                              onChange: (event: { target: { value: string } }) => setGmPlayerId(event.target.value),
+                            },
+                            [
+                              h('option', { key: 'none', value: '' }, '选择玩家'),
+                              ...(room?.players ?? [])
+                                .filter((entry: RoomView['players'][number]) => entry.playerId !== 'host')
+                                .map((entry: RoomView['players'][number]) => h('option', { key: entry.playerId, value: entry.playerId }, entry.displayName)),
+                            ],
+                          ),
+                          h('input', {
+                            key: 'st',
+                            style: CSS.input,
+                            value: gmSecretText,
+                            placeholder: '私密信息（只有该玩家与 GM 可见）…',
+                            onChange: (event: { target: { value: string } }) => setGmSecretText(event.target.value),
+                          }),
+                          h('button', { key: 'sb', type: 'button', style: CSS.button, disabled: busy, onClick: () => void gmSecret() }, '私发'),
+                        ]),
+                        h('div', { key: 'scene', style: CSS.row }, [
+                          h(
+                            'select',
+                            {
+                              key: 'sceneid',
+                              style: { ...CSS.input, flex: '1 1 160px' },
+                              value: gmSceneId,
+                              onChange: (event: { target: { value: string } }) => setGmSceneId(event.target.value),
+                            },
+                            GUIMUYA_MODULE.scenes.map((scene) => h('option', { key: scene.id, value: scene.id }, scene.title)),
+                          ),
+                          h('button', { key: 'scene-btn', type: 'button', style: CSS.button, disabled: busy, onClick: () => void gmScene() }, '推进场景'),
+                          h('input', {
+                            key: 'xp',
+                            style: { ...CSS.input, flex: '0 0 70px' },
+                            value: awardXp,
+                            placeholder: 'XP',
+                            onChange: (event: { target: { value: string } }) => setAwardXp(event.target.value),
+                          }),
+                          h('input', {
+                            key: 'items',
+                            style: { ...CSS.input, flex: '1 1 110px' },
+                            value: awardItems,
+                            placeholder: '物品,逗号分隔',
+                            onChange: (event: { target: { value: string } }) => setAwardItems(event.target.value),
+                          }),
+                          h('button', { key: 'award', type: 'button', style: CSS.button, disabled: busy, onClick: () => void gmAward() }, '发奖励'),
+                        ]),
+                      ])
+                    : null,
                   h('div', { key: 'body', style: { display: 'flex', gap: 8, flexWrap: 'wrap' } }, [
                     h('div', { key: 'feedbox', style: { ...CSS.section, flex: '2 1 420px', display: 'flex', flexDirection: 'column', gap: 6 } }, [
                       h('strong', { key: 'f' }, '叙事流'),

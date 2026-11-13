@@ -48,6 +48,8 @@ import {
   type RpcError,
   type SayParams,
   type SayResult,
+  type ScenePayload,
+  type AwardPayload,
   type Seq,
 } from '@dsh-trpg/protocol';
 
@@ -61,6 +63,35 @@ export class RoomError extends Error {
     this.name = 'RoomError';
     this.code = code;
   }
+}
+
+/** 存档结构（JSON 可序列化；v1）。 */
+export interface RoomSnapshot {
+  schemaVersion: 1;
+  savedAt: number;
+  room: {
+    id: string;
+    title: string;
+    gmMode: GMMode;
+    phase: RoomPhase;
+    inviteCode: string;
+    hostToken: string;
+    locked: boolean;
+    seed: number;
+    rollIndex: number;
+    seq: Seq;
+    createdAt: number;
+    scene?: { sceneId: string; title?: string };
+    players: Array<{
+      id: string;
+      name: string;
+      token: string;
+      seat: 'gm' | 'player';
+      character?: CharacterCard;
+      joinedAt: number;
+    }>;
+    events: GameEvent[];
+  };
 }
 
 export type Principal =
@@ -97,6 +128,7 @@ interface RoomRecord {
   players: Map<PlayerId, PlayerRecord>;
   listeners: Set<Listener>;
   createdAt: number;
+  scene?: { sceneId: string; title?: string };
 }
 
 export interface PlayerActionInfo {
@@ -118,6 +150,8 @@ export interface RoomServiceOptions {
   onPlayerAction?: (info: PlayerActionInfo) => void;
   /** 房间创建完成回调（启动 AI GM 运行时用）。 */
   onRoomCreated?: (roomId: string) => void;
+  /** 房间状态有任何变更（用于存档 debounce）。 */
+  onChanged?: () => void;
 }
 
 function randomToken(): string {
@@ -146,6 +180,7 @@ export class RoomService {
   private readonly now: () => number;
   private readonly onPlayerAction?: (info: PlayerActionInfo) => void;
   private readonly onRoomCreated?: (roomId: string) => void;
+  private readonly onChanged?: () => void;
 
   constructor(options: RoomServiceOptions = {}) {
     this.maxRooms = options.maxRooms ?? 8;
@@ -153,6 +188,7 @@ export class RoomService {
     this.now = options.now ?? Date.now;
     this.onPlayerAction = options.onPlayerAction;
     this.onRoomCreated = options.onRoomCreated;
+    this.onChanged = options.onChanged;
   }
 
   // -------------------------------------------------------------------------
@@ -491,6 +527,39 @@ export class RoomService {
     return this.emit(room, 'combat', 'all', { view, note });
   }
 
+  /** 真人 GM：推进场景，广播 scene 事件并更新房间视图。 */
+  gmScene(roomId: string, sceneId: string, title?: string): GameEvent<'scene', ScenePayload> {
+    const room = this.requireRoom(roomId);
+    room.scene = { sceneId, ...(title ? { title } : {}) };
+    const event = this.emit(room, 'scene', 'all', { sceneId, title, by: 'host' } satisfies ScenePayload);
+    this.emit(room, 'room', 'all', this.publicView(room));
+    return event;
+  }
+
+  /** 真人 GM：把经验/物品奖励私发（并留一条公开提示）给某位玩家。 */
+  gmAward(
+    roomId: string,
+    playerId: PlayerId,
+    award: { xp: number; items?: string[]; note?: string },
+  ): GameEvent<'award', AwardPayload> {
+    const room = this.requireRoom(roomId);
+    const player = room.players.get(playerId);
+    if (!player) throw new RoomError('not-found', '找不到该玩家');
+    const payload: AwardPayload = {
+      playerId,
+      playerName: player.name,
+      xp: award.xp,
+      items: award.items ?? [],
+      note: award.note,
+      private: true,
+    };
+    this.emit(room, 'alert', 'all', {
+      level: 'info',
+      text: `${player.name} 获得了奖励（详情见私信）`,
+    } satisfies AlertPayload);
+    return this.emit(room, 'award', playerId, payload);
+  }
+
   /** GM 请求一次自由掷骰（例如伤害骰），走房间种子保证可复现。 */
   gmRoll(
     roomId: string,
@@ -591,6 +660,84 @@ export class RoomService {
     };
   }
 
+  /** 存档：整间房的权威状态（含 token 与角色卡），用于 DSH 重启后续团。 */
+  snapshotAll(): RoomSnapshot[] {
+    return [...this.rooms.values()].map((room) => ({
+      schemaVersion: 1,
+      savedAt: this.now(),
+      room: {
+        id: room.id,
+        title: room.title,
+        gmMode: room.gmMode,
+        phase: room.phase,
+        inviteCode: room.inviteCode,
+        hostToken: room.hostToken,
+        locked: room.locked,
+        seed: room.seed,
+        rollIndex: room.rollIndex,
+        seq: room.seq,
+        createdAt: room.createdAt,
+        ...(room.scene ? { scene: room.scene } : {}),
+        players: [...room.players.values()].map((player) => ({
+          id: player.id,
+          name: player.name,
+          token: player.token,
+          seat: player.seat,
+          ...(player.character ? { character: player.character } : {}),
+          joinedAt: player.joinedAt,
+        })),
+        events: room.events.map((event) => ({ ...event })),
+      },
+    }));
+  }
+
+  /** 载入存档：重建房间与 token，在线状态清零，等待客户端重连。 */
+  restore(snapshot: RoomSnapshot): boolean {
+    if (!snapshot || snapshot.schemaVersion !== 1) return false;
+    const source = snapshot.room;
+    if (!source || typeof source.id !== 'string' || this.rooms.has(source.id)) return false;
+    const players = new Map<PlayerId, PlayerRecord>();
+    for (const player of source.players ?? []) {
+      players.set(player.id, {
+        id: player.id,
+        name: player.name,
+        token: player.token,
+        seat: player.seat,
+        ...(player.character ? { character: player.character } : {}),
+        joinedAt: player.joinedAt,
+        connections: 0,
+      });
+    }
+    const room: RoomRecord = {
+      id: source.id,
+      title: source.title,
+      gmMode: source.gmMode,
+      phase: source.phase,
+      inviteCode: source.inviteCode,
+      hostToken: source.hostToken,
+      locked: source.locked,
+      seed: source.seed,
+      rollIndex: source.rollIndex,
+      seq: source.seq,
+      events: (source.events ?? []).map((event) => ({ ...event })),
+      players,
+      listeners: new Set(),
+      createdAt: source.createdAt,
+      ...(source.scene ? { scene: source.scene } : {}),
+    };
+    this.rooms.set(room.id, room);
+    this.tokens.set(room.hostToken, { kind: 'host', roomId: room.id });
+    for (const player of players.values()) {
+      this.tokens.set(player.token, { kind: 'player', roomId: room.id, playerId: player.id });
+    }
+    return true;
+  }
+
+  /** 房间数（存档/诊断）。 */
+  roomCount(): number {
+    return this.rooms.size;
+  }
+
   /** 当前在线人数（测试/诊断用）。 */
   diagnostics(): { rooms: number; events: number; tokens: number; listeners: number } {
     let events = 0;
@@ -654,6 +801,7 @@ export class RoomService {
       phase: room.phase,
       gmMode: room.gmMode,
       locked: room.locked,
+      ...(room.scene ? { scene: room.scene } : {}),
       players: [...room.players.values()].map((player) => ({
         playerId: player.id,
         displayName: player.name,
@@ -691,6 +839,11 @@ export class RoomService {
           /* 单个连接异常不影响广播 */
         }
       }
+    }
+    try {
+      this.onChanged?.();
+    } catch {
+      /* 存档回调失败不影响广播 */
     }
     return event as GameEvent<K, P>;
   }

@@ -142,6 +142,22 @@ async function main() {
     const replay = await sse(`${BASE}/trpg/events?token=${bailu.playerToken}&lastSeq=${lastSeen}`, (event) => event.seq === before.result.event.seq, 2000);
     check('重连补发错过的事件', replay.some((event) => event.seq === before.result.event.seq), `lastSeq=${lastSeen}`);
 
+    // 8.5 真人 GM 指令（host 权限）
+    const gmNarrate = await rpc('gm.narrate', { text: '夜色更深了，风里有股血腥味。' }, hostToken);
+    check('房主可发 GM 旁白', gmNarrate.ok === true);
+    const aqingGm = await sse(`${BASE}/trpg/events?token=${aqing.playerToken}&lastSeq=${gmNarrate.result.event.seq - 1}`, (event) => event.seq === gmNarrate.result.event.seq, 2000);
+    check('玩家收到 GM 旁白', aqingGm.some((event) => event.seq === gmNarrate.result.event.seq));
+    const playerGm = await rpc('gm.narrate', { text: '假 GM' }, aqing.playerToken);
+    check('玩家不能发 GM 旁白', playerGm.ok === false && playerGm.error.code === 'forbidden');
+    const sceneSet = await rpc('gm.scene', { sceneId: 'scene_shendong', title: '古洞深处' }, hostToken);
+    check('房主推进场景', sceneSet.ok === true);
+    const stateScene = await rpc('room.state', {}, aqing.playerToken);
+    check('场景写进房间视图', stateScene.result.room.scene?.sceneId === 'scene_shendong');
+    const award = await rpc('gm.award', { playerId: aqing.playerId, xp: 50, items: ['镇魂符'] }, hostToken);
+    check('房主发奖励', award.ok === true);
+    const bailuAward = await sse(`${BASE}/trpg/events?token=${bailu.playerToken}&lastSeq=${award.result.event.seq - 1}`, (event) => event.seq === award.result.event.seq, 1200);
+    check('奖励私密（其他玩家收不到）', !bailuAward.some((event) => event.seq === award.result.event.seq));
+
     // 9. 踢人 + 锁房
     const kicked = await rpc('room.kick', { playerId: bailu.playerId }, hostToken);
     check('房主踢人成功', kicked.ok === true);

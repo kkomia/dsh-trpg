@@ -15,6 +15,10 @@ import { RoomError, RoomService, type Principal } from '@dsh-trpg/rooms';
 import {
   encodeSseEvent,
   PROTOCOL_VERSION,
+  validateGmAward,
+  validateGmNarrate,
+  validateGmScene,
+  validateGmSecret,
   validateRpcRequest,
   type RpcResponse,
   type RpcRequest,
@@ -93,6 +97,13 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
     }
 
     const principal: Principal = service.login(rpc.token);
+    const take = <T>(report: { ok: boolean; value?: T; error?: string }): T => {
+      if (!report.ok || report.value === undefined) throw new RoomError('bad-request', report.error ?? '参数非法');
+      return report.value;
+    };
+    const requireHost = (): void => {
+      if (principal.kind !== 'host') throw new RoomError('forbidden', '只有房主能执行该操作');
+    };
     switch (rpc.method) {
       case 'room.state':
         return service.state(principal);
@@ -108,6 +119,30 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
         return service.kick(principal, rpc.params);
       case 'room.lock':
         return service.lock(principal, rpc.params);
+      case 'gm.narrate': {
+        requireHost();
+        const params = take(validateGmNarrate(rpc.params));
+        if (principal.kind !== 'host') throw new RoomError('forbidden', '只有房主能发 GM 旁白');
+        return { event: service.gmNarrate(principal.roomId, params.text) };
+      }
+      case 'gm.secret': {
+        requireHost();
+        const params = take(validateGmSecret(rpc.params));
+        if (principal.kind !== 'host') throw new RoomError('forbidden', '只有房主能发私密信息');
+        return { event: service.gmSecret(principal.roomId, params.playerId, params.text) };
+      }
+      case 'gm.scene': {
+        requireHost();
+        const params = take(validateGmScene(rpc.params));
+        if (principal.kind !== 'host') throw new RoomError('forbidden', '只有房主能推进场景');
+        return { event: service.gmScene(principal.roomId, params.sceneId, params.title) };
+      }
+      case 'gm.award': {
+        requireHost();
+        const params = take(validateGmAward(rpc.params));
+        if (principal.kind !== 'host') throw new RoomError('forbidden', '只有房主能发奖励');
+        return { event: service.gmAward(principal.roomId, params.playerId, { xp: params.xp, items: params.items, note: params.note }) };
+      }
       default:
         throw new RoomError('bad-request', `未知方法：${rpc.method}`);
     }

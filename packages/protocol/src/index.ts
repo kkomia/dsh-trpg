@@ -41,6 +41,8 @@ export interface RoomView {
   locked: boolean;
   /** 只有房主（host 身份）能看到邀请码。 */
   inviteCode?: string;
+  /** 当前场景进度（真人 GM / AI 推进后可显示）。 */
+  scene?: { sceneId: string; title?: string };
   players: RoomPlayerView[];
   createdAt: number;
 }
@@ -49,7 +51,7 @@ export interface RoomView {
 // 事件
 // ---------------------------------------------------------------------------
 
-export type EventKind = 'room' | 'narration' | 'dice' | 'alert' | 'scene' | 'combat' | 'private';
+export type EventKind = 'room' | 'narration' | 'dice' | 'alert' | 'scene' | 'combat' | 'private' | 'award';
 
 export interface GameEvent<K extends EventKind = EventKind, P = unknown> {
   v: typeof PROTOCOL_VERSION;
@@ -132,7 +134,11 @@ export type RpcMethod =
   | 'room.kick'
   | 'room.lock'
   | 'room.list'
-  | 'host.session';
+  | 'host.session'
+  | 'gm.narrate'
+  | 'gm.secret'
+  | 'gm.scene'
+  | 'gm.award';
 
 export interface CreateRoomParams {
   title: string;
@@ -179,6 +185,47 @@ export interface KickParams {
 
 export interface LockParams {
   locked: boolean;
+}
+
+/** 真人 GM：向全桌发一段旁白。 */
+export interface GmNarrateParams {
+  text: string;
+}
+
+/** 真人 GM：给某位玩家发私密信息。 */
+export interface GmSecretParams {
+  playerId: PlayerId;
+  text: string;
+}
+
+/** 真人 GM：推进场景（模组场景 id + 标题，端上用于展示进度）。 */
+export interface GmSceneParams {
+  sceneId: string;
+  title?: string;
+}
+
+/** 真人 GM：结算奖励（经验/物品），只在该玩家的视图里展示。 */
+export interface GmAwardParams {
+  playerId: PlayerId;
+  xp: number;
+  items?: string[];
+  note?: string;
+}
+
+export interface ScenePayload {
+  sceneId: string;
+  title?: string;
+  /** 由谁推进的场景（host = 真人 GM）。 */
+  by: 'host' | 'ai';
+}
+
+export interface AwardPayload {
+  playerId: PlayerId;
+  playerName: string;
+  xp: number;
+  items: string[];
+  note?: string;
+  private: true;
 }
 
 export interface HostSessionParams {
@@ -235,6 +282,10 @@ const METHODS: readonly RpcMethod[] = [
   'room.lock',
   'room.list',
   'host.session',
+  'gm.narrate',
+  'gm.secret',
+  'gm.scene',
+  'gm.award',
 ];
 
 export function isRpcMethod(value: unknown): value is RpcMethod {
@@ -279,6 +330,40 @@ export function validateSay(params: unknown): ValidationResult<SayParams> {
   if (params.text.length > 3000) return fail('内容过长（最多 3000 字）');
   if (params.private !== undefined && typeof params.private !== 'boolean') return fail('private 必须是布尔值');
   return { ok: true, value: params as unknown as SayParams };
+}
+
+export function validateGmNarrate(params: unknown): ValidationResult<GmNarrateParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.text)) return fail('旁白不能为空');
+  if (params.text.length > 3000) return fail('旁白过长（最多 3000 字）');
+  return { ok: true, value: params as unknown as GmNarrateParams };
+}
+
+export function validateGmSecret(params: unknown): ValidationResult<GmSecretParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.playerId)) return fail('缺少 playerId');
+  if (!isNonEmptyString(params.text)) return fail('私密内容不能为空');
+  if (params.text.length > 2000) return fail('私密内容过长（最多 2000 字）');
+  return { ok: true, value: params as unknown as GmSecretParams };
+}
+
+export function validateGmScene(params: unknown): ValidationResult<GmSceneParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.sceneId)) return fail('缺少 sceneId');
+  if (params.title !== undefined && typeof params.title !== 'string') return fail('title 必须是字符串');
+  return { ok: true, value: params as unknown as GmSceneParams };
+}
+
+export function validateGmAward(params: unknown): ValidationResult<GmAwardParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.playerId)) return fail('缺少 playerId');
+  if (typeof params.xp !== 'number' || !Number.isFinite(params.xp) || params.xp < 0 || params.xp > 100000) {
+    return fail('xp 必须是 0-100000 的数字');
+  }
+  if (params.items !== undefined && (!Array.isArray(params.items) || params.items.some((item) => typeof item !== 'string'))) {
+    return fail('items 必须是字符串数组');
+  }
+  return { ok: true, value: params as unknown as GmAwardParams };
 }
 
 /** 事件的 SSE 线格式。 */

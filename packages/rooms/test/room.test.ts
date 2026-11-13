@@ -150,3 +150,32 @@ test('invalid input: empty text and bad dice expression are rejected with codes'
     (error: unknown) => error instanceof RoomError && error.code === 'invalid-expression',
   );
 });
+
+test('snapshot/restore: 存档恢复后 token、角色卡、事件序号与场景保持', () => {
+  const { service, created, player, joined } = setup();
+  service.roll(player, { expression: 'd20' });
+  service.gmScene(created.room.roomId, 'scene_guimuya', '枯木崖·古洞');
+  const snapshots = service.snapshotAll();
+  assert.equal(snapshots.length, 1);
+  const snapshot = snapshots[0];
+  assert.ok(snapshot);
+  const restored = new RoomService();
+  assert.equal(restored.restore(snapshot), true);
+  const hostPrincipal = restored.login(created.hostToken);
+  const view = restored.state(hostPrincipal).room;
+  assert.equal(view.scene?.sceneId, 'scene_guimuya');
+  assert.equal(view.players.length, 2);
+  assert.ok(restored.login(joined.playerToken), '玩家 token 也要能恢复');
+  const events = restored.eventsSince(hostPrincipal, 0);
+  assert.ok(events.length > 2);
+  assert.equal(events[events.length - 1]?.seq, snapshot.room.seq);
+});
+
+test('gm.award: 奖励只发给目标玩家，GM 可见，其他玩家不可见', () => {
+  const { service, host, player, player2, joined2 } = setup();
+  const award = service.gmAward(host.roomId, joined2.playerId, { xp: 50, items: ['镇魂符'] });
+  assert.equal(award.to, joined2.playerId);
+  assert.equal(service.eventsSince(host, 0).some((event) => event.seq === award.seq), true);
+  assert.equal(service.eventsSince(player2, 0).some((event) => event.seq === award.seq), true);
+  assert.equal(service.eventsSince(player, 0).some((event) => event.seq === award.seq), false, '奖励不能泄漏给其他玩家');
+});
