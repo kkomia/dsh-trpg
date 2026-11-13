@@ -15,6 +15,7 @@ import { RoomError, RoomService, type Principal } from '@dsh-trpg/rooms';
 import {
   encodeSseEvent,
   PROTOCOL_VERSION,
+  validateBindSession,
   validateGmAward,
   validateGmNarrate,
   validateGmScene,
@@ -29,6 +30,10 @@ export interface RoomHttpOptions {
   bindHost: string;
   log?: (message: string) => void;
   service?: RoomService;
+  /** 临时诊断入口（仅 loopback；TEMP-PROBE，会话改造验证完即移除）。 */
+  debug?: (method: string, params: unknown) => unknown | Promise<unknown>;
+  /** 把房间绑定到 DSH 会话（房主本机；host/index 注入实现）。 */
+  bindSession?: (roomId: string, sessionId: string | null) => unknown | Promise<unknown>;
 }
 
 export interface RoomHttpServer {
@@ -77,7 +82,11 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
   const service = options.service ?? new RoomService();
   const startedAt = Date.now();
 
-  const dispatch = (request: IncomingMessage, rpc: RpcRequest): unknown => {
+  const dispatch = async (request: IncomingMessage, rpc: RpcRequest): Promise<unknown> => {
+    if (rpc.method.startsWith('debug.') && options.debug) {
+      if (!isLoopback(request)) throw new RoomError('forbidden', '诊断入口只允许本机');
+      return options.debug(rpc.method, rpc.params);
+    }
     if (rpc.method === 'room.create') {
       if (!isLoopback(request)) throw new RoomError('forbidden', '只有房主本机可以创建房间');
       return service.createRoom(rpc.params);
@@ -123,6 +132,13 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
         return service.kick(principal, rpc.params);
       case 'room.lock':
         return service.lock(principal, rpc.params);
+      case 'room.bind': {
+        requireHost();
+        const params = take(validateBindSession(rpc.params));
+        const sessionId = typeof params.sessionId === 'string' && params.sessionId.trim().length > 0 ? params.sessionId.trim() : null;
+        if (options.bindSession) return await options.bindSession(principal.roomId, sessionId);
+        return { room: service.bindSession(principal.roomId, sessionId) };
+      }
       case 'room.close': {
         requireHost();
         return service.closeRoom(principal.roomId);
@@ -176,7 +192,7 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
       return;
     }
     try {
-      const result = dispatch(request, parsed.value);
+      const result = await dispatch(request, parsed.value);
       sendJson(response, 200, { ok: true, result } satisfies RpcResponse);
     } catch (error) {
       if (error instanceof RoomError) {

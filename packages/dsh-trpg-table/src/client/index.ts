@@ -73,6 +73,8 @@ interface ClientContext {
 const MAIN_PANEL_ID = 'trpg';
 const DEFAULT_BASE = 'http://127.0.0.1:45871';
 const STORAGE_KEY = 'dsh-trpg:session:v1';
+/** 当前打开的 DSH 会话 id（顶栏按钮写入，开团时作为牌桌会话绑定）。 */
+const ACTIVE_SESSION_KEY = 'dsh-trpg:active-session.v1';
 const MAX_FEED = 300;
 
 interface StoredSession {
@@ -441,13 +443,21 @@ export function createPlugin(React: any) {
     );
   }
 
-  /** 对话顶栏快捷入口。 */
-  function OpenTableButton(props: { onOpen?: () => void }) {
+  /** 对话顶栏快捷入口：同时记住当前会话 id，开团时把牌桌绑定到这个会话。 */
+  function OpenTableButton(props: { onOpen?: () => void; sessionId?: string }) {
+    useEffect(() => {
+      if (typeof props?.sessionId !== 'string') return;
+      try {
+        globalThis.localStorage?.setItem(ACTIVE_SESSION_KEY, props.sessionId);
+      } catch {
+        /* 隐私模式忽略 */
+      }
+    }, [props?.sessionId]);
     return h(
       'button',
       {
         type: 'button',
-        title: '打开跑团桌',
+        title: '打开跑团桌（开团时绑定到当前会话）',
         style: { ...CSS.button, padding: '3px 8px', fontSize: 11 },
         onClick: () => props?.onOpen?.(),
       },
@@ -620,13 +630,30 @@ export function createPlugin(React: any) {
       setStatus({ kind: 'idle', text: '创建房间中…' });
       try {
         const normalizedBase = base.trim().replace(/\/+$/, '');
-        const created = await callRpc<CreateRoomResult>(normalizedBase, 'room.create', { title, gmMode });
+        // 牌桌会话：顶栏按钮记住的当前 DSH 会话（仅 AI GM 模式需要；没有就不绑定，走旧通道）。
+        let sessionId: string | undefined;
+        try {
+          const stored = globalThis.localStorage?.getItem(ACTIVE_SESSION_KEY);
+          if (typeof stored === 'string' && stored.trim().length > 0) sessionId = stored.trim();
+        } catch {
+          /* 隐私模式忽略 */
+        }
+        const created = await callRpc<CreateRoomResult>(normalizedBase, 'room.create', {
+          title,
+          gmMode,
+          ...(sessionId ? { sessionId } : {}),
+        });
         lastSeqRef.current = 0;
         feedRef.current = [];
         setFeed([]);
         setRoom(created.room);
         enterRoom({ base: normalizedBase, hostToken: created.hostToken, roomId: created.room.roomId, inviteCode: created.inviteCode });
-        setStatus({ kind: 'ok', text: `房间已创建，邀请码 ${created.inviteCode}` });
+        setStatus({
+          kind: 'ok',
+          text: created.room.sessionId
+            ? `房间已创建并绑定到当前会话（邀请码 ${created.inviteCode}）`
+            : `房间已创建，邀请码 ${created.inviteCode}`,
+        });
       } catch (error) {
         setStatus({ kind: 'bad', text: `创建失败：${error instanceof Error ? error.message : String(error)}（创建房间需要在房主本机）` });
       } finally {

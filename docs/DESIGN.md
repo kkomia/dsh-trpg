@@ -339,6 +339,30 @@ type Envelope =
 - 玩家端与 GM 端是同一个 Client 插件，按房间角色显示不同面板；不替换应用根、不使用 iframe。
 - 手机/平板浏览器（dsh-pocket 场景）响应式：叙事区全宽、面板折叠成抽屉。
 
+> **v3 修订（主理人拍板，取代 v2）**：跑团桌**不再自绘聊天界面**，直接复用 DSH 原生 AI 对话：
+> 房主当前打开的 DSH 会话就是牌桌；AI GM 就是这个会话的 Agent；玩家行动作为用户消息注入会话，
+> GM 的原生回复（markdown/流式）与 GM 工具（roll_check 等）的工具卡片天然复用聊天框架。
+> 插件只保留**顶栏控件 + 右侧栏常驻卡片 + 建房/加入最小弹层**；自绘主区域页面下线（玩家端镜像另做）。
+>
+> 关键实现与约束（`host/table-session.ts`）：
+> - `room.create` 带 `sessionId`（或 `room.bind`）把房间绑到会话；Host 在会话 Agent 的 ctx 上注册
+>   `systemPrompt.section`（GM 人格/模组/硬规则）与 `tools.register`（roll_check 等 GM 工具）。
+> - 玩家行动 → `sessionController.prompt({mode:'queue', content:[{type:'text', text:'【角色】行动'}]})`；
+>   会话里 AI 的 `assistant/message` 再作为 GM 旁白广播回房间（玩家端/战报用）。
+> - **本机实测约束**：只有被 DSH 页面驱动（live）的会话才能完成模型请求；插件新建/`resolveAgent` 恢复的会话
+>   一律 `DeepSeek Messages transport failed [TRANSPORT]`（5 次重试后整轮失败）。所以绑定要求会话已打开，
+>   未打开时回可读错误提示。
+> - 已实测：绑定当前会话后，玩家行动以 `user/message` 进入会话 inbox，系统提示出现 GM 人格与工具注册。
+
+| 区域 | 槽位 | 内容 |
+|---|---|---|
+| 对话（原生） | — | AI GM 的原生回复；玩家行动注入为 user/message；GM 工具走原生工具卡片 |
+| 对话顶栏 | `conversation.session.header.actions` | 开团/绑定当前会话、邀请码、锁房、GM 模式 |
+| 右侧栏常驻卡片 | `sidebar.right.pane.tab`（新 kind） | 队伍、我的角色卡、骰子、GM 控制台、成长/战报 |
+| 建房/加入 | 顶栏按钮 + 最小弹层 | 邀请码、玩家地址、落座 |
+| 玩家端 | 待定（会话事件镜像） | 只渲染会话事件、不跑模型 |
+
+
 ---
 
 ## 10. 里程碑与验收

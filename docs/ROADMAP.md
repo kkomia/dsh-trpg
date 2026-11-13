@@ -86,6 +86,23 @@ M0 骨架 ─► M1 引擎+内容 ─► M2 房间+联机 ─► M3 AI GM 端到
 
 **验收**：真实局域网跑完一局；仓库上线 GitHub（已达成：https://github.com/kkomia/dsh-trpg）。
 
+## M6 — 对话原生牌桌（复用 DSH 会话）🔨 进行中 2026-11-13
+
+主理人反馈：不要自绘聊天界面，直接复用 DSH 的 AI 对话框架；控件放顶栏 + 右侧栏常驻卡片。
+
+- [x] 协议/服务：`room.create` 可带 `sessionId`、新增 `room.bind`、`RoomView.sessionId`、存档携带会话绑定
+- [x] Host 桥 `host/table-session.ts`：房主会话即牌桌——在会话 Agent 上注册 GM 提示段与 GM 工具；玩家行动 → `sessionController.prompt` 注入会话；AI 的 assistant 文本 → 房间 GM 旁白广播
+- [x] 单元测试 5 项（table-session.test.ts），全套 **87 passed / 0 failed**
+- [x] 实机验证（运行中的 DSH）：建房绑定当前会话 → 玩家行动以 user/message 注入会话 inbox；本会话系统提示出现 GM 人格与工具（roll_check 等），即 AI GM 就是会话 Agent
+- [ ] 实测 AI GM 原生回复 + 工具卡片（等下一轮对话验证）
+- [ ] 顶栏控件（开团/邀请码/落座）+ 右侧栏常驻卡片（队伍/角色卡/骰子/GM 控制台）；下线自绘主区域页
+- [ ] 玩家端镜像：把会话事件写进玩家本机会话（只渲染不跑模型），待验证
+- [ ] 清理临时诊断入口 `debug.*`
+
+**关键约束（本机实测）**：只有**正在被 DSH 页面驱动（live）**的会话才能完成模型请求；插件新建/恢复的会话一律 `DeepSeek Messages transport failed [TRANSPORT]`。所以牌桌必须绑定房主已打开的会话。
+
+**验收**：房主在自己的会话里看到玩家行动的注入消息与 AI GM 的原生回复（含工具卡片），插件不再自绘叙事流。
+
 ## 检查点汇报模板
 
 每个 M 结束时给主理人：

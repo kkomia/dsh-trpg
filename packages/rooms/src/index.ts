@@ -80,6 +80,8 @@ export interface RoomSnapshot {
     seed: number;
     rollIndex: number;
     seq: Seq;
+    /** 绑定为牌桌的 DSH 会话 id。 */
+    sessionId?: string;
     createdAt: number;
     scene?: { sceneId: string; title?: string };
     players: Array<{
@@ -129,6 +131,8 @@ interface RoomRecord {
   listeners: Set<Listener>;
   createdAt: number;
   scene?: { sceneId: string; title?: string };
+  /** 绑定为牌桌的 DSH 会话 id（原生对话即牌桌）。 */
+  sessionId?: string;
 }
 
 export interface PlayerActionInfo {
@@ -148,8 +152,10 @@ export interface RoomServiceOptions {
   now?: () => number;
   /** 玩家提交行动/发言时回调（AI GM 编排用）。 */
   onPlayerAction?: (info: PlayerActionInfo) => void;
-  /** 房间创建完成回调（启动 AI GM 运行时用）。 */
-  onRoomCreated?: (roomId: string) => void;
+  /** 房间创建完成回调（启动 AI GM 运行时用）；建房时带上的会话 id 一并回调。 */
+  onRoomCreated?: (roomId: string, sessionId?: string) => void;
+  /** 房间关闭回调（释放会话绑定等资源）。 */
+  onRoomClosed?: (roomId: string) => void;
   /** 房间状态有任何变更（用于存档 debounce）。 */
   onChanged?: () => void;
 }
@@ -179,7 +185,8 @@ export class RoomService {
   private readonly maxEvents: number;
   private readonly now: () => number;
   private readonly onPlayerAction?: (info: PlayerActionInfo) => void;
-  private readonly onRoomCreated?: (roomId: string) => void;
+  private readonly onRoomCreated?: (roomId: string, sessionId?: string) => void;
+  private readonly onRoomClosed?: (roomId: string) => void;
   private readonly onChanged?: () => void;
 
   constructor(options: RoomServiceOptions = {}) {
@@ -188,6 +195,7 @@ export class RoomService {
     this.now = options.now ?? Date.now;
     this.onPlayerAction = options.onPlayerAction;
     this.onRoomCreated = options.onRoomCreated;
+    this.onRoomClosed = options.onRoomClosed;
     this.onChanged = options.onChanged;
   }
 
@@ -204,6 +212,9 @@ export class RoomService {
       id: randomUUID(),
       title: params.title,
       gmMode: params.gmMode,
+      ...(typeof params.sessionId === 'string' && params.sessionId.trim().length > 0
+        ? { sessionId: params.sessionId.trim() }
+        : {}),
       phase: 'lobby',
       inviteCode: this.uniqueInviteCode(),
       hostToken: randomToken(),
@@ -221,7 +232,7 @@ export class RoomService {
     const event = this.emit(room, 'room', 'all', this.publicView(room));
     void event;
     try {
-      this.onRoomCreated?.(room.id);
+      this.onRoomCreated?.(room.id, room.sessionId);
     } catch {
       /* 房间创建回调失败不影响建房 */
     }
@@ -232,6 +243,26 @@ export class RoomService {
   hostSession(roomId: string): { hostToken: string; room: RoomView } {
     const room = this.requireRoom(roomId);
     return { hostToken: room.hostToken, room: this.viewFor(room, { kind: 'host', roomId: room.id }) };
+  }
+
+  /**
+   * 把房间绑定到（或解绑）一个 DSH 会话：绑定后这就是「原生对话即牌桌」的会话。
+   * @param roomId - 房间 id。
+   * @param sessionId - 会话 id；null/空串解绑。
+   * @returns 更新后的房间视图（host 视角）。
+   */
+  bindSession(roomId: string, sessionId: string | null | undefined): RoomView {
+    const room = this.requireRoom(roomId);
+    const next = typeof sessionId === 'string' && sessionId.trim().length > 0 ? sessionId.trim() : undefined;
+    if (next) room.sessionId = next;
+    else delete room.sessionId;
+    this.emit(room, 'room', 'all', this.publicView(room));
+    return this.viewFor(room, { kind: 'host', roomId: room.id });
+  }
+
+  /** 房间当前绑定的会话 id（未绑定返回 undefined）。 */
+  sessionOf(roomId: string): string | undefined {
+    return this.requireRoom(roomId).sessionId;
   }
 
   join(rawParams: unknown): JoinRoomResult {
@@ -696,6 +727,11 @@ export class RoomService {
     room.listeners.clear();
     this.rooms.delete(roomId);
     try {
+      this.onRoomClosed?.(roomId);
+    } catch {
+      /* 关闭回调失败不影响关房 */
+    }
+    try {
       this.onChanged?.();
     } catch {
       /* ignore */
@@ -720,6 +756,7 @@ export class RoomService {
         rollIndex: room.rollIndex,
         seq: room.seq,
         createdAt: room.createdAt,
+        ...(room.sessionId ? { sessionId: room.sessionId } : {}),
         ...(room.scene ? { scene: room.scene } : {}),
         players: [...room.players.values()].map((player) => ({
           id: player.id,
@@ -766,6 +803,7 @@ export class RoomService {
       players,
       listeners: new Set(),
       createdAt: source.createdAt,
+      ...(source.sessionId ? { sessionId: source.sessionId } : {}),
       ...(source.scene ? { scene: source.scene } : {}),
     };
     this.rooms.set(room.id, room);
@@ -841,6 +879,7 @@ export class RoomService {
     return {
       roomId: room.id,
       title: room.title,
+      ...(room.sessionId ? { sessionId: room.sessionId } : {}),
       phase: room.phase,
       gmMode: room.gmMode,
       locked: room.locked,

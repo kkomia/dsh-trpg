@@ -36,6 +36,8 @@ export interface RoomPlayerView {
 export interface RoomView {
   roomId: RoomId;
   title: string;
+  /** 绑定为牌桌的 DSH 会话 id（原生对话即牌桌）。 */
+  sessionId?: string;
   phase: RoomPhase;
   gmMode: GMMode;
   locked: boolean;
@@ -140,11 +142,31 @@ export type RpcMethod =
   | 'gm.scene'
   | 'gm.award'
   | 'room.close'
-  | 'room.closeAll';
+  | 'room.closeAll'
+  | 'room.bind'
+  // TEMP-PROBE：会话原生 GM 尖刀测试（验证后删除）
+  | 'debug.sessions'
+  | 'debug.create'
+  | 'debug.gateway'
+  | 'debug.fetch'
+  | 'debug.tail'
+  | 'debug.prompt';
 
 export interface CreateRoomParams {
   title: string;
   gmMode: GMMode;
+  /** 开局即绑定的 DSH 会话 id（房主当前打牌的会话）；缺省为不绑定。 */
+  sessionId?: string;
+}
+
+/** 把房间绑定到（或解绑）一个 DSH 会话。 */
+export interface BindSessionParams {
+  /** 要作为牌桌的会话 id；传 null / 空串表示解绑。 */
+  sessionId?: string | null;
+}
+
+export interface BindSessionResult {
+  room: RoomView;
 }
 
 export interface CreateRoomResult {
@@ -290,6 +312,14 @@ const METHODS: readonly RpcMethod[] = [
   'gm.award',
   'room.close',
   'room.closeAll',
+  'room.bind',
+  // TEMP-PROBE（与 RpcMethod 同步，验证后删除）
+  'debug.sessions',
+  'debug.create',
+  'debug.gateway',
+  'debug.fetch',
+  'debug.tail',
+  'debug.prompt',
 ];
 
 export function isRpcMethod(value: unknown): value is RpcMethod {
@@ -309,7 +339,17 @@ export function validateCreateRoom(params: unknown): ValidationResult<CreateRoom
   if (!isNonEmptyString(params.title)) return fail('房间标题必填');
   if (params.title.length > 60) return fail('房间标题过长（最多 60 字）');
   if (params.gmMode !== 'ai' && params.gmMode !== 'human') return fail('gmMode 必须是 ai 或 human');
+  if (params.sessionId !== undefined && !isNonEmptyString(params.sessionId)) return fail('sessionId 必须是非空字符串');
   return { ok: true, value: params as unknown as CreateRoomParams };
+}
+
+export function validateBindSession(params: unknown): ValidationResult<BindSessionParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  const sessionId = params.sessionId;
+  if (sessionId !== undefined && sessionId !== null && !isNonEmptyString(sessionId)) {
+    return fail('sessionId 必须是非空字符串或 null');
+  }
+  return { ok: true, value: params as unknown as BindSessionParams };
 }
 
 export function validateJoin(params: unknown): ValidationResult<JoinRoomParams> {
