@@ -33,11 +33,15 @@ function findPlayer(roomService: RoomService, roomId: string, playerName: string
 
 export function createGmTools(options: {
   roomService: RoomService;
-  roomId: string;
+  /** 固定房间 id，或解析器（subagent 模式按 childId 动态解析）。 */
+  roomId: string | (() => string);
   lorebook: LorebookDef;
-  combat?: CombatRuntime;
+  combat?: CombatRuntime | (() => CombatRuntime | undefined);
 }): GmToolDefinition[] {
-  const { roomService, roomId, lorebook, combat } = options;
+  const { roomService, lorebook } = options;
+  const combat = options.combat;
+  const roomOf = (): string => (typeof options.roomId === 'string' ? options.roomId : options.roomId());
+  const combatOf = (): CombatRuntime | undefined => (typeof combat === 'function' ? combat() : combat);
   const render = (_args: Record<string, unknown>, value: { text: string }) => [{ type: 'text' as const, text: value.text }];
   const output = { schema: { type: 'object' }, render };
 
@@ -59,12 +63,12 @@ export function createGmTools(options: {
       },
       output,
       async execute(args) {
-        const player = findPlayer(roomService, roomId, String(args.playerName ?? ''));
+        const player = findPlayer(roomService, roomOf(), String(args.playerName ?? ''));
         if (!player.character) throw new Error(`${player.name} 还没有角色卡，先让玩家落座`);
         const skill = String(args.skill ?? '') as SkillId;
         if (!SKILL_IDS.includes(skill)) throw new Error(`未知技能：${skill}`);
         const dc = Number(args.dc);
-        const event = roomService.gmCheck(roomId, {
+        const event = roomService.gmCheck(roomOf(), {
           playerId: player.playerId,
           skill,
           dc,
@@ -91,7 +95,7 @@ export function createGmTools(options: {
       },
       output,
       execute(args) {
-        const event = roomService.gmRoll(roomId, {
+        const event = roomService.gmRoll(roomOf(), {
           expression: String(args.expression ?? ''),
           label: typeof args.label === 'string' ? args.label : undefined,
         });
@@ -112,8 +116,8 @@ export function createGmTools(options: {
       },
       output,
       execute(args) {
-        const player = findPlayer(roomService, roomId, String(args.playerName ?? ''));
-        roomService.gmSecret(roomId, player.playerId, String(args.text ?? ''));
+        const player = findPlayer(roomService, roomOf(), String(args.playerName ?? ''));
+        roomService.gmSecret(roomOf(), player.playerId, String(args.text ?? ''));
         return { text: `已私发 ${player.name}：${String(args.text ?? '')}` };
       },
     },
@@ -131,7 +135,7 @@ export function createGmTools(options: {
       execute(args) {
         const entry = lorebook.entries.find((item) => item.id === String(args.entryId ?? ''));
         if (!entry) throw new Error(`世界书没有条目：${String(args.entryId ?? '')}；可用条目：${lorebook.entries.map((item) => item.id).join('、')}`);
-        roomService.gmNarrate(roomId, entry.content);
+        roomService.gmNarrate(roomOf(), entry.content);
         return { text: `已揭示「${entry.title ?? entry.id}」：${entry.content}` };
       },
     },
@@ -172,7 +176,7 @@ export function createGmTools(options: {
       parameters: { type: 'object', properties: {}, required: [] },
       output,
       execute() {
-        const party = roomService.gmParty(roomId);
+        const party = roomService.gmParty(roomOf());
         if (party.length === 0) return { text: '还没有玩家落座' };
         return {
           text: party
@@ -199,8 +203,9 @@ export function createGmTools(options: {
       },
       output,
       execute(args) {
-        if (!combat) throw new Error('战斗系统未初始化');
-        const { text } = combat.start(String(args.monsters ?? ''));
+        const currentCombat = combatOf();
+        if (!currentCombat) throw new Error('战斗系统未初始化');
+        const { text } = currentCombat.start(String(args.monsters ?? ''));
         return { text };
       },
     },
@@ -219,8 +224,9 @@ export function createGmTools(options: {
       },
       output,
       execute(args) {
-        if (!combat) throw new Error('战斗系统未初始化');
-        const { text } = combat.attack(
+        const currentCombat = combatOf();
+        if (!currentCombat) throw new Error('战斗系统未初始化');
+        const { text } = currentCombat.attack(
           String(args.attacker ?? ''),
           String(args.target ?? ''),
           typeof args.attackName === 'string' ? args.attackName : undefined,
@@ -234,8 +240,9 @@ export function createGmTools(options: {
       parameters: { type: 'object', properties: {}, required: [] },
       output,
       execute() {
-        if (!combat) throw new Error('战斗系统未初始化');
-        const { text } = combat.nextTurn();
+        const currentCombat = combatOf();
+        if (!currentCombat) throw new Error('战斗系统未初始化');
+        const { text } = currentCombat.nextTurn();
         return { text };
       },
     },
@@ -245,8 +252,9 @@ export function createGmTools(options: {
       parameters: { type: 'object', properties: {}, required: [] },
       output,
       execute() {
-        if (!combat || !combat.running) return { text: '当前没有进行中的战斗' };
-        return { text: combat.status() };
+        const currentCombat = combatOf();
+        if (!currentCombat || !currentCombat.running) return { text: '当前没有进行中的战斗' };
+        return { text: currentCombat.status() };
       },
     },
     {
@@ -255,8 +263,9 @@ export function createGmTools(options: {
       parameters: { type: 'object', properties: {}, required: [] },
       output,
       execute() {
-        if (!combat || !combat.running) throw new Error('当前没有进行中的战斗');
-        return { text: combat.end() };
+        const currentCombat = combatOf();
+        if (!currentCombat || !currentCombat.running) throw new Error('当前没有进行中的战斗');
+        return { text: currentCombat.end() };
       },
     },
   ];

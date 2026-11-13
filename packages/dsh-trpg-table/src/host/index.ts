@@ -13,12 +13,8 @@ import { GUIMUYA_LOREBOOK, GUIMUYA_MODULE } from '@dsh-trpg/content';
 import { RoomService } from '@dsh-trpg/rooms';
 import { createRoomHttpServer, type RoomHttpServer } from './room-http.ts';
 import { RoomPersistence } from './persistence.ts';
-import {
-  GmManager,
-  type GmAgentCtxLike,
-  type GmCreateAgent,
-  type GmHandleLike,
-} from './gm/runtime.ts';
+import { GmManager, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike } from './gm/runtime.ts';
+import { SubagentGmManager, type SubagentsLike } from './gm/subagent-gm.ts';
 
 export const name = 'dsh-trpg-table';
 
@@ -45,6 +41,14 @@ export interface HostCtxLike {
   on?(event: string, listener: (...args: unknown[]) => void): () => void;
   /** Cordis 的嵌套注入：只在依赖可用时回调，插件本身无需声明硬依赖。 */
   inject?(deps: string[], callback: (scoped: unknown) => void | (() => void)): () => void;
+}
+
+export interface ToolsScope {
+  tools: { register(definition: unknown): unknown };
+}
+
+export interface SubagentsScope {
+  subagents: SubagentsLike;
 }
 
 export interface SessionControllerScope {
@@ -108,15 +112,18 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   const bindHost = config.bindHost ?? DEFAULT_HOST;
 
   const managerRef: { current: GmManager | null } = { current: null };
+  const subagentRef: { current: SubagentGmManager | null } = { current: null };
   const persistence = new RoomPersistence({ log });
   let restoredRooms: string[] = [];
   const service = new RoomService({
     maxRooms: config.maxRooms ?? 8,
     onRoomCreated: (roomId) => {
-      void managerRef.current?.ensureRoom(roomId);
+      if (subagentRef.current) subagentRef.current.ensureRoom(roomId);
+      else void managerRef.current?.ensureRoom(roomId);
     },
     onPlayerAction: (info) => {
-      managerRef.current?.onPlayerAction(info);
+      if (subagentRef.current) subagentRef.current.onPlayerAction(info);
+      else managerRef.current?.onPlayerAction(info);
     },
     onChanged: () => persistence.schedule(),
   });
@@ -145,6 +152,22 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   let agentsService: AgentsScope['agents'] | null = null;
   let defaultModel: ModelScope['agentDefaultModel'] | null = null;
   let sessionController: SessionControllerScope['sessionController'] | null = null;
+  let toolsService: ToolsScope['tools'] | null = null;
+  let subagentsService: SubagentsLike | null = null;
+  ctx.inject?.(['tools'], (scoped) => {
+    toolsService = (scoped as ToolsScope).tools ?? null;
+    queueMicrotask(() => setupSubagentGm());
+    return () => {
+      toolsService = null;
+    };
+  });
+  ctx.inject?.(['subagents'], (scoped) => {
+    subagentsService = (scoped as SubagentsScope).subagents ?? null;
+    queueMicrotask(() => setupSubagentGm());
+    return () => {
+      subagentsService = null;
+    };
+  });
   ctx.inject?.(['agents'], (scoped) => {
     agentsService = (scoped as AgentsScope).agents;
     log('agents service acquired: AI GM enabled');
@@ -182,13 +205,22 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       }
       const reason = (event.data as { reason?: { kind?: string; error?: { message?: string } } } | undefined)?.reason;
       if (reason && reason.kind !== 'completed') {
-        managerRef.current?.onSessionEvent(session.id, {
-          type: 'gm-error',
-          data: { message: `回合结束原因：${reason.kind}${reason.error?.message ? `（${reason.error.message}）` : ''}` },
-        });
+        forwardSessionError(session.id, `回合结束原因：${reason.kind}${reason.error?.message ? `（${reason.error.message}）` : ''}`);
       }
     }
     managerRef.current?.onSessionEvent(session.id, { type: event.type, data: event.data, seq: event.seq });
+  };
+
+  /** 同一会话短时间内的重复错误只播报一次（根监听 + agent.ctx 监听可能各收到一份）。 */
+  const recentErrorKeys = new Map<string, number>();
+  const forwardSessionError = (sessionId: string, message: string): void => {
+    const key = `${sessionId}:${message}`;
+    const now = Date.now();
+    const last = recentErrorKeys.get(key) ?? 0;
+    if (now - last < 5000) return;
+    recentErrorKeys.set(key, now);
+    if (recentErrorKeys.size > 200) recentErrorKeys.clear();
+    managerRef.current?.onSessionEvent(sessionId, { type: 'gm-error', data: { message } });
   };
 
   const attachSessionListener = (agentCtx: unknown): (() => void) => {
@@ -305,6 +337,30 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     };
   };
 
+  /**
+   * 首选 AI GM 后端：DSH subagent 通道（子 Agent 继承宿主会话的模型请求上下文）。
+   * 依赖 tools/subagents/agents 三个服务都就绪后才会启用。
+   */
+  function setupSubagentGm(): void {
+    if (subagentRef.current || !subagentsService || !toolsService || !agentsService) return;
+    const subagentManager: SubagentGmManager = new SubagentGmManager({
+      subagents: subagentsService,
+      roomService: service,
+      module: GUIMUYA_MODULE,
+      lorebook: GUIMUYA_LOREBOOK,
+      getParents: (): Array<{ id: string }> => {
+        const live: Array<{ id: string }> = agentsService?.list?.() ?? [];
+        return live.filter((agent) => !gmSessionIds.has(agent.id) && !subagentManager.isChild(agent.id));
+      },
+      log,
+      registerTool: (definition) => toolsService?.register(definition),
+    });
+    subagentManager.registerTools();
+    subagentRef.current = subagentManager;
+    log('subagent GM channel ready');
+    for (const roomId of restoredRooms) subagentManager.ensureRoom(roomId, { opening: false });
+  }
+
   const manager = new GmManager({
     roomService: service,
     module: GUIMUYA_MODULE,
@@ -313,8 +369,9 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     log,
   });
   managerRef.current = manager;
+  setupSubagentGm();
 
-  // 恢复的 AI 房间要重新拉起 GM 会话（上下文从存档事件继续）。
+  // 恢复的 AI 房间：subagent 通道优先，否则拉起 GM 会话。
   for (const roomId of restoredRooms) {
     void manager.ensureRoom(roomId);
   }
@@ -366,6 +423,7 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     } catch {
       /* ignore */
     }
+    void subagentRef.current?.dispose();
     void manager.dispose();
     void http.close();
   });
