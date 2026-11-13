@@ -83,7 +83,7 @@
 | GM 工具 | `ctx.tools.register()` 注册 `roll_check` / `combat_attack` 等 | 已有 Tool Registry 与 guard/restrict 机制 |
 | 提示词注入 | `ctx.systemPrompt.section()` / `ctx.systemPrompt.context()` | 已有 |
 | 持久化 | DSH `storageDomain` / 插件数据目录下的 JSON + 事件日志 append-only | 已有 storage 服务；事件日志同时是可回放存档 |
-| UI | Client 插件：`conversation.view`（对话区整块视图）、`sidebar.right.pane.tab`（右侧栏页签）、`conversation.session.header.actions`（顶栏按钮）、`conversation.composer`（输入框替换） | 已通过 Slots inspection 确认这些槽位可注册；不替换 app root、不用 iframe |
+| UI | Client 插件：**主区域面板 `main`（key=`trpg`，整块对话区变跑团桌）** + `sidebar.panellist`（侧边栏图标）+ `conversation.session.header.actions`（对话顶栏「🎲 跑团桌」按钮）；页面内自带叙事对话流与行动输入框 | 已通过 Slots inspection 确认可注册；主区域面板不依赖 Session，空白会话也能进；不再占用 `conversation.composer.dock`（那只是输入框下方的一条） |
 | 发布 | DSH bundle（`dsh.bundle.patch` + `dsh.client`），单包 `dsh-trpg-table` | 与 dsh-tavern / dsh-lora 同款形态 |
 
 ### 3.3 仓库结构（monorepo）
@@ -322,13 +322,19 @@ type Envelope =
 
 用户确认的布局：**对话区 = AI GM 叙事流（可滚动历史）；顶栏 = 房间状态/场景/开战；右侧栏 = 角色卡/骰子/队伍；输入框 = 发行动。**
 
+> v2 修订（主理人反馈）：不要把跑团 UI 塞进输入框下方的 dock 条。跑团桌升级为**主区域整页面板**（`main`，key=`trpg`）：
+> 打开后整块主区域就是「跑团桌」页面 —— 中间是叙事对话流（GM 气泡/玩家气泡/骰子卡片），
+> 底部是行动输入框（Enter 发送、Shift+Enter 换行、悄悄话开关），右侧是队伍/角色卡/掷骰/成长/GM 控制台。
+> 入口 = 侧边栏「跑团桌」图标 + 对话顶栏「🎲 跑团桌」按钮；页面右上「返回对话」回默认会话。
+> 没有房间时同一页面显示大厅（建房/加入/本地角色卡库）。
+
 | 区域 | 槽位 | 内容 |
 |---|---|---|
-| 对话区主视图 | `conversation.view`（「跑团桌」页签） | 叙事流（公共事件）+ 骰子卡片 + 战斗轮次条 + 私密消息 |
-| 顶栏 | `conversation.session.header.actions` | 房间码/在线人数/当前场景/开始战斗/GM 面板开关 |
-| 右侧栏 | `sidebar.right.pane.tab`（新页签 kind） | 「我的角色」「骰子」「队伍」「日志」四个页签 |
-| 输入框 | `conversation.composer`（按场景替换） | 「我的角色要做什么」+ 可选意图标签（攻击/施法/检定/对话/其他）+ 发送 |
-| 设置 | `settings.section` | 房间服务端口、绑定地址、GM 模式、可见性偏好、模型选择 |
+| 主区域（整页） | `main`（key=`trpg`） | 叙事对话流 + 行动输入框 + 右侧队伍/角色卡/骰子/成长/GM 控制台；无房间时显示大厅 |
+| 侧边栏入口 | `sidebar.panellist`（id=`trpg`） | 面板图标（骰子），点开整块主区域 |
+| 对话顶栏入口 | `conversation.session.header.actions` | 「🎲 跑团桌」按钮 → `ctx.layout.selectPanel('trpg')` |
+| 返回对话 | 页面内按钮 | `ctx.layout.selectPanel(null)` |
+| 设置 | `settings.section`（预留） | 房间服务端口、绑定地址、GM 模式、可见性偏好、模型选择 |
 
 - 玩家端与 GM 端是同一个 Client 插件，按房间角色显示不同面板；不替换应用根、不使用 iframe。
 - 手机/平板浏览器（dsh-pocket 场景）响应式：叙事区全宽、面板折叠成抽屉。
