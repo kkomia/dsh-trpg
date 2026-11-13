@@ -8,7 +8,7 @@
  * 工具以全局注册、按 childId→roomId 路由（AsyncLocalStorage 传递当前 child）。
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { LorebookDef, ModuleDef } from '@dsh-trpg/content';
 import type { PlayerActionInfo, RoomService } from '@dsh-trpg/rooms';
 import { buildGmSystemPrompt, buildTurnPrompt, type PromptEvent, type PromptPlayer } from './prompt.ts';
@@ -109,6 +109,16 @@ export class SubagentGmManager {
   private readonly als = new AsyncLocalStorage<ActivationRoomContext>();
   private readonly activeActivations = new Set<() => void | Promise<void>>();
   private toolsRegistered = false;
+  /**
+   * 工具名加世代后缀：HMR 热重载时旧世代的同名工具可能仍留在注册表里，
+   * 后缀保证模型调用的是本轮注册、绑定当前房间服务的那个包装器。
+   */
+  private readonly toolSuffix = `_${randomBytes(3).toString('hex')}`;
+  private readonly toolNames: Record<string, string> = Object.fromEntries(
+    ['roll_check', 'roll_dice', 'secret_note', 'reveal_lore', 'check_lore', 'list_party', 'start_combat', 'attack', 'next_turn', 'combat_status', 'end_combat'].map(
+      (name) => [name, `${name}${this.toolSuffix}`],
+    ),
+  );
 
   constructor(options: SubagentGmOptions) {
     this.options = options;
@@ -133,6 +143,7 @@ export class SubagentGmManager {
     for (const definition of definitions) {
       const wrapped = {
         ...definition,
+        name: `${definition.name}${this.toolSuffix}`,
         execute: (args: Record<string, unknown>, exec?: { agent?: { session?: { id?: string } } }) => {
           const childId = exec?.agent?.session?.id;
           const globalRooms = childRoomRegistry();
@@ -169,7 +180,7 @@ export class SubagentGmManager {
     this.options.roomService.gmNarrate(roomId, `AI 主持人已就位。《${this.options.module.title}》即将开始。`);
     if (options.opening === false) return;
     const opening = [
-      buildGmSystemPrompt(this.options.module, this.options.lorebook),
+      buildGmSystemPrompt(this.options.module, this.options.lorebook, this.toolNames),
       '',
       '---',
       '',
@@ -212,7 +223,7 @@ export class SubagentGmManager {
       party,
       recent,
     });
-    return `${buildGmSystemPrompt(module, this.options.lorebook)}\n\n---\n\n${turn}`;
+    return `${buildGmSystemPrompt(module, this.options.lorebook, this.toolNames)}\n\n---\n\n${turn}`;
   }
 
   private enqueue(roomId: string, promptText: string): void {
@@ -244,6 +255,9 @@ export class SubagentGmManager {
       const childId = randomUUID();
       const calledChildIds: string[] = [childId];
       this.childRoom.set(childId, roomId);
+      // 关键：子 Agent 在 startActivation 返回前就可能开始执行工具调用，
+      // 所以映射必须在调用**之前**写入进程级注册表。
+      childRoomRegistry().set(childId, roomId);
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 180000);

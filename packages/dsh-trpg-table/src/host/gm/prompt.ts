@@ -47,8 +47,11 @@ function lorebookLines(lorebook: LorebookDef): string {
     .join('\n');
 }
 
+export type ToolNameMap = Record<string, string>;
+
 /** 系统提示：GM 守则 + 模组 + 世界书。每个房间的 GM 会话常驻一份。 */
-export function buildGmSystemPrompt(module: ModuleDef, lorebook: LorebookDef): string {
+export function buildGmSystemPrompt(module: ModuleDef, lorebook: LorebookDef, toolNames: ToolNameMap = {}): string {
+  const n = (name: string): string => toolNames[name] ?? name;
   const scenes = module.scenes
     .map((scene) => `- 【${scene.title}】${scene.entry}`)
     .join('\n');
@@ -64,12 +67,11 @@ export function buildGmSystemPrompt(module: ModuleDef, lorebook: LorebookDef): s
     '1. 绝不替玩家角色写行动、台词或心理活动；玩家角色说过什么、做过什么，只以玩家提交的内容为准。',
     '2. 每次只回应「本次行动者」一个人提交的行动；其他玩家没有动作时，不要替他们行动或发言。',
     '3. 骰子、检定、伤害数值只能来自工具结果；不要自己编造数值，也不要假装掷骰。',
-    '3b. 以下行动一律必须先调用 roll_check 工具再叙述结果：观察/偷听/搜索/调查/识破谎言/威吓/说服/潜行/攀爬/辨认符文/任何有失败可能的尝试。工具报错就如实告诉玩家“判定失败”，不得用文字替代掷骰。',
-    '3c. 战斗相关一律走 start_combat / attack / next_turn 工具，不要用叙事直接决定命中或伤害。',
+    `3b. 以下行动一律必须先调用 ${n('roll_check')} 工具再叙述结果：观察/偷听/搜索/调查/识破谎言/威吓/说服/潜行/攀爬/辨认符文/任何有失败可能的尝试。工具报错就如实告诉玩家“判定失败”，不得用文字替代掷骰。`,
+    `3c. 战斗相关一律走 ${n('start_combat')} / ${n('attack')} / ${n('next_turn')} 工具，不要用叙事直接决定命中或伤害。`,
     '4. 一次回复 2–6 句，节奏紧凑，中文第二人称（“你”指行动者），结尾留出下一步的选择或问题。',
-    '5. 标〔GM 秘密〕的内容不得直接说破；只有调用 reveal_lore 揭示给全桌后，才可以作为公开信息使用。',
-    '6. 只想让某一位玩家知道的信息，用 secret_note 工具私发，不要写进公共叙事。',
-    '7. 不要向玩家解释规则术语或工具机制，用世界内的语言描述结果。',
+    `5. 标〔GM 秘密〕的内容不得直接说破；只有调用 ${n('reveal_lore')} 揭示给全桌后，才可以作为公开信息使用。`,
+    `6. 只想让某一位玩家知道的信息，用 ${n('secret_note')} 工具私发，不要写进公共叙事。`,    '7. 不要向玩家解释规则术语或工具机制，用世界内的语言描述结果。',
     '',
     '## 模组概要',
     module.synopsis,
@@ -86,12 +88,13 @@ export function buildGmSystemPrompt(module: ModuleDef, lorebook: LorebookDef): s
     lorebookLines(lorebook),
     '',
     '## 可用工具',
-    '- roll_check：对指定玩家做技能/属性检定（引擎掷骰，返回成败）。',
-    '- roll_dice：自由掷骰（伤害、随机表等）。',
-    '- secret_note：给某位玩家发私密信息。',
-    '- reveal_lore：把某条世界书内容揭示给全桌。',
-    '- list_party：查看队伍角色卡摘要。',
-    '- check_lore：按关键词查世界书。',
+    `- ${n('roll_check')}：对指定玩家做技能/属性检定（引擎掷骰，返回成败）。`,
+    `- ${n('roll_dice')}：自由掷骰（伤害、随机表等）。`,
+    `- ${n('secret_note')}：给某位玩家发私密信息。`,
+    `- ${n('reveal_lore')}：把某条世界书内容揭示给全桌。`,
+    `- ${n('check_lore')}：按关键词查世界书。`,
+    `- ${n('list_party')}：查看队伍角色卡摘要。`,
+    `- ${n('start_combat')} / ${n('attack')} / ${n('next_turn')} / ${n('combat_status')} / ${n('end_combat')}：战斗结算（先攻、攻击、轮次）。`,
   ]
     .filter((line) => line !== '')
     .join('\n');

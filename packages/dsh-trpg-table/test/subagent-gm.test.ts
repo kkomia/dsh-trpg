@@ -55,7 +55,7 @@ test('subagent GM: 开场回合与玩家行动都通过 spawn 激活，叙事广
         : String(spec.prompt);
       calls.push({ prompt: promptText, parent: spec.parent, childId: String(spec.childId) });
       // 模拟子 Agent 调用一次 roll_check 工具（验证 childId→room 路由）
-      const tool = tools.find((entry) => entry.name === 'roll_check');
+      const tool = tools.find((entry) => entry.name.startsWith('roll_check'));
       if (tool && spec.childId) {
         await tool.execute({ playerName: '阿青', skill: 'perception', dc: 10 }, { agent: { session: { id: String(spec.childId) } } });
       }
