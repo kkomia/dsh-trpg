@@ -11,8 +11,9 @@
   },
   "scripts": {
     "typecheck": "tsc -p packages/protocol && tsc -p packages/engine && tsc -p packages/content && tsc -p packages/dsh-trpg-table",
-    "test": "node --test \"packages/engine/test/*.test.ts\" \"packages/protocol/test/*.test.ts\"",
-    "build": "node scripts/build.mjs"
+    "test": "node --test \"packages/engine/test/*.test.ts\" \"packages/protocol/test/*.test.ts\" \"packages/content/test/*.test.ts\"",
+    "build": "node scripts/build.mjs",
+    "demo": "node scripts/cli-demo.mjs"
   },
   "devDependencies": {
     "@dsh-trpg/content": "workspace:*",

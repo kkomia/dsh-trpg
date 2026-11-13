@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "card_xuanzhen",
+  "identity": {
+    "name": "玄真",
+    "race": "山民",
+    "class": "方士",
+    "level": 1,
+    "background": "游方道人，欠了青石镇药铺一吊钱，于是留下来替人看病。"
+  },
+  "owner": { "playerId": null, "displayName": "未分配" },
+  "abilities": { "str": 10, "dex": 12, "con": 14, "int": 12, "wis": 16, "cha": 12 },
+  "proficiency": { "bonus": 2, "skills": ["medicine", "religion", "insight"], "saves": ["wis", "cha"] },
+  "combat": {
+    "ac": 13,
+    "hpMax": 10,
+    "initiativeBonus": 1,
+    "attacks": [
+      { "name": "桃木剑", "ability": "wis", "proficient": true, "damage": "1d6", "range": "near", "damageType": "钝击" }
+    ]
+  },
+  "spells": {
+    "ability": "wis",
+    "slots": { "1": 2 },
+    "known": ["zhiyu", "liaoshang", "tiejiazhou", "hushenfu", "jingxinzhou"]
+  },
+  "inventory": [
+    { "name": "桃木剑", "qty": 1, "effect": "1d6 钝击" },
+    { "name": "道袍", "qty": 1, "effect": "AC 13" },
+    { "name": "止血草", "qty": 3, "effect": "恢复 1d4 生命" },
+    { "name": "镇魂符", "qty": 2, "effect": "对邪物攻击劣势一回合" }
+  ],
+  "publicSummary": "背桃木剑的游方道人，笑起来有点苦。",
+  "appearance": "洗得发白的道袍，袖口补丁摞着补丁。",
+  "personality": "嘴碎心软，见不得人受伤。",
+  "source": { "ruleId": "dnd5e-lite", "ruleVersion": "1.0", "moduleId": "guimuya" }
+}

@@ -14,9 +14,9 @@
 
 ## 状态
 
-🚧 **M0 骨架已完成**（2026-11-13）：monorepo、协议/引擎包、DSH bundle（Host 房间服务 + Client 入口）、单测与冒烟验证。路线图见 [docs/ROADMAP.md](./docs/ROADMAP.md)，验收报告见 [docs/milestones/M0.md](./docs/milestones/M0.md)。
+🚧 **M1 完成**（2026-11-13）：M0 骨架（DSH bundle + 局域网房间服务 + 客户端入口）+ M1 规则引擎与内容（D&D 5e-lite、4 角色卡、世界书、首个模组、CLI 战报）。路线图见 [docs/ROADMAP.md](./docs/ROADMAP.md)，里程碑验收报告见 `docs/milestones/`。
 
-当前可用：房主端房间服务（默认 `0.0.0.0:45871`，`/trpg/health`、`/trpg/rooms`）；客户端在对话输入框下方出现「🎲 跑团桌」入口，可探测房主、创建/列出房间。
+当前可用：房主端房间服务（默认 `0.0.0.0:45871`）；客户端在对话输入框下方出现「🎲 跑团桌」入口；`node scripts/cli-demo.mjs` 可无 UI 跑一场带完整掷骰结算的 Boss 战。AI GM 与多人联机在 M2–M3 接入。
 
 ## 文档
 

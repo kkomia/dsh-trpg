@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "card_aqing",
+  "identity": {
+    "name": "阿青",
+    "race": "山民",
+    "class": "武者",
+    "level": 1,
+    "background": "青石镇铁匠铺的学徒，一把横刀使得比锤子好。"
+  },
+  "owner": { "playerId": null, "displayName": "未分配" },
+  "abilities": { "str": 17, "dex": 14, "con": 15, "int": 10, "wis": 12, "cha": 8 },
+  "proficiency": { "bonus": 2, "skills": ["athletics", "intimidation"], "saves": ["str", "con"] },
+  "combat": {
+    "ac": 16,
+    "hpMax": 12,
+    "initiativeBonus": 2,
+    "attacks": [
+      { "name": "横刀", "ability": "str", "proficient": true, "damage": "1d8", "range": "engaged", "damageType": "挥砍" }
+    ]
+  },
+  "inventory": [
+    { "name": "横刀", "qty": 1, "effect": "1d8 挥砍" },
+    { "name": "铁甲", "qty": 1, "effect": "AC 16" },
+    { "name": "火折子", "qty": 1, "effect": "照明" },
+    { "name": "止血草", "qty": 2, "effect": "恢复 1d4 生命" }
+  ],
+  "publicSummary": "背刀的山民少女，话不多，眼睛很亮。",
+  "appearance": "短打劲装，右手虎口有常年握刀的旧茧。",
+  "personality": "护短、认死理，对镇上的孩子很好。",
+  "source": { "ruleId": "dnd5e-lite", "ruleVersion": "1.0", "moduleId": "guimuya" }
+}

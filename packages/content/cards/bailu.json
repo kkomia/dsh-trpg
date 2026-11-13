@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "card_bailu",
+  "identity": {
+    "name": "白露",
+    "race": "灵裔",
+    "class": "游侠",
+    "level": 1,
+    "background": "在昆仑山外围长大的猎户，追着一头白鹿下了山。"
+  },
+  "owner": { "playerId": null, "displayName": "未分配" },
+  "abilities": { "str": 10, "dex": 17, "con": 12, "int": 12, "wis": 14, "cha": 10 },
+  "proficiency": { "bonus": 2, "skills": ["stealth", "perception", "survival"], "saves": ["dex", "wis"] },
+  "combat": {
+    "ac": 14,
+    "hpMax": 11,
+    "initiativeBonus": 3,
+    "attacks": [
+      { "name": "柳叶刀", "ability": "dex", "proficient": true, "damage": "1d8", "range": "near", "damageType": "挥砍" },
+      { "name": "猎弓", "ability": "dex", "proficient": true, "damage": "1d8", "range": "far", "damageType": "穿刺" }
+    ]
+  },
+  "inventory": [
+    { "name": "柳叶刀", "qty": 1, "effect": "1d8 挥砍" },
+    { "name": "猎弓", "qty": 1, "effect": "1d8 穿刺，远距" },
+    { "name": "皮甲", "qty": 1, "effect": "AC 14" },
+    { "name": "麻绳", "qty": 1, "effect": "10 米" },
+    { "name": "铜镜", "qty": 1, "effect": "照见邪祟真形" }
+  ],
+  "publicSummary": "肩上趴着一只白耳狐的猎手，总在屋顶和树杈上。",
+  "appearance": "轻甲绑腿，腰间挂着满满一袋小石子。",
+  "personality": "谨慎、话密，先观察再出手。",
+  "source": { "ruleId": "dnd5e-lite", "ruleVersion": "1.0", "moduleId": "guimuya" }
+}

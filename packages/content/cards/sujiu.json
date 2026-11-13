@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "card_sujiu",
+  "identity": {
+    "name": "苏九",
+    "race": "半妖",
+    "class": "术士",
+    "level": 2,
+    "background": "被柳掌柜捡回来的半妖孤儿，在茶馆后院偷偷练符。"
+  },
+  "owner": { "playerId": null, "displayName": "未分配" },
+  "abilities": { "str": 8, "dex": 14, "con": 12, "int": 12, "wis": 10, "cha": 17 },
+  "proficiency": { "bonus": 2, "skills": ["arcana", "insight", "deception"], "saves": ["con", "cha"] },
+  "combat": {
+    "ac": 13,
+    "hpMax": 10,
+    "initiativeBonus": 2,
+    "attacks": [
+      { "name": "灵符", "ability": "cha", "proficient": true, "damage": "1d6", "range": "far", "damageType": "灵能" }
+    ]
+  },
+  "spells": {
+    "ability": "cha",
+    "slots": { "1": 3, "2": 1 },
+    "known": ["yinhuo", "kuangyan", "zhuoyan", "dingshen", "jingju", "huoqiu"]
+  },
+  "inventory": [
+    { "name": "灵符", "qty": 8, "effect": "1d6 灵能，远距" },
+    { "name": "道袍", "qty": 1, "effect": "AC 13" },
+    { "name": "灵酒", "qty": 1, "effect": "恢复 1 个 1 环法术位" },
+    { "name": "迷烟", "qty": 2, "effect": "遮蔽视线一回合" }
+  ],
+  "publicSummary": "总缩在角落画符的半妖少年，耳朵会动。",
+  "appearance": "过大的旧袍子，袖子里塞满黄纸符。",
+  "personality": "敏感、嘴硬，怕被人当妖怪。",
+  "source": { "ruleId": "dnd5e-lite", "ruleVersion": "1.0", "moduleId": "guimuya" }
+}

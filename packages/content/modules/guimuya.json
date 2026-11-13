@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 1,
+  "id": "guimuya",
+  "title": "鬼木崖·异光",
+  "ruleId": "dnd5e-lite",
+  "level": [1, 2],
+  "playerCount": [1, 4],
+  "durationMinutes": 45,
+  "synopsis": "青石镇西边的枯木崖夜夜泛绿光，镇长重金悬赏。玩家循着线索进入古洞，撞破一桩以镇民生魂续命的邪阵，并在洞底面对布阵的赤目道人。",
+  "gmNotes": "一幕三场，节奏：打听（社交）→ 探洞（探索+小遭遇）→ 守关（Boss）。老猎户之子阿满的线索贯穿全程，是玩家救人的动机；赤目道人首次倒地化血雾，只有破坏阵眼后才能真杀死。",
+  "npcs": [
+    {
+      "id": "liu_zhanggui",
+      "name": "柳掌柜",
+      "description": "清风茶馆掌柜，消息灵通，实际是昆仑剑宗眼线。说话爱绕弯子，但会在关键时刻点一句。"
+    },
+    {
+      "id": "wang_laohan",
+      "name": "采药人老王",
+      "description": "六十多岁的老猎户，口吃。看见过古洞里的黑影，儿子阿满三天前失踪。"
+    },
+    {
+      "id": "zhenzhang",
+      "name": "镇长",
+      "description": "悬赏的发布者，面色蜡黄，对「绿光」的事避而不谈。"
+    },
+    {
+      "id": "chishan",
+      "name": "赤目道人",
+      "description": "古洞深处的邪修，双目赤红，以镇民生魂续命。"
+    }
+  ],
+  "scenes": [
+    {
+      "id": "scene_qingshi",
+      "title": "青石镇·悬赏",
+      "entry": "逢五的集市刚散，镇口告示墙前还围着人。悬赏是新的，墨迹未干：查明枯木崖异光者，赏银百两。清风茶馆里，柳掌柜正在擦一只永远擦不干净的杯子。老猎户老王缩在角落，面前的热茶早就凉了。",
+      "npcs": ["liu_zhanggui", "wang_laohan", "zhenzhang"],
+      "lore": ["qingshi", "bounty", "guimuya", "liuzhanggui", "laolieren"],
+      "checks": [
+        {
+          "when": "向柳掌柜打听绿光的细节",
+          "skill": "persuasion",
+          "dc": 12,
+          "success": "柳掌柜说漏了嘴：绿光起于子时，持续一炷香，形状像「有人拿血喂阵」。他让你别在镇上声张。",
+          "failure": "柳掌柜只是笑，把话头引到茶价上。你得换个人问。"
+        },
+        {
+          "when": "观察老猎户的异常",
+          "skill": "insight",
+          "dc": 10,
+          "success": "你看出他不只是害怕——他的眼神在躲「镇长」那两个字。他手里攥着半块吃剩的麦饼，是给两个人留的。",
+          "failure": "老王只是发抖，一句话也说不完整。",
+          "private": true
+        },
+        {
+          "when": "直接质问镇长关于旧袍的事",
+          "skill": "intimidation",
+          "dc": 14,
+          "success": "镇长脸色一变，挥手让人退下，低声说：「三十年前，他和我一起下过崖。」说完就不再开口。",
+          "failure": "镇长冷笑：「外乡人别管闲事」，招呼护院把你们请了出去。"
+        }
+      ],
+      "beats": [
+        { "id": "beat_accept", "trigger": "玩家接下悬赏或承诺救人", "effect": "进入 scene_guimuya" }
+      ],
+      "rewards": [{ "xp": 20, "items": [] }]
+    },
+    {
+      "id": "scene_guimuya",
+      "title": "枯木崖·古洞",
+      "entry": "出镇往西三里，枯木崖像一截烧焦的手指戳在暮色里。崖顶枯松下，绿光正从崖脚的石缝中渗出来。洞口的杂草被踩倒了一片——有人比你们先到。",
+      "lore": ["guimuya", "dongfu"],
+      "checks": [
+        {
+          "when": "检查洞口的痕迹",
+          "skill": "perception",
+          "dc": 13,
+          "success": "你发现三组不同的鞋印：两双草鞋、一双官靴；官靴的印子很新，进洞后没有出来。",
+          "failure": "杂草太乱，你只看出有人来过。"
+        },
+        {
+          "when": "辨认石壁上的符文",
+          "skill": "arcana",
+          "dc": 14,
+          "success": "符文是「太阴续命阵」的外围阵脚，刻法出自同一个人的手笔——而且还在渗血。",
+          "failure": "符文歪歪扭扭，你只能确定它们不是装饰。"
+        },
+        {
+          "when": "在洞口阴影里搜索",
+          "skill": "investigation",
+          "dc": 12,
+          "success": "你在石缝里摸到半枚符文石，温的，像刚从人身上摘下来。",
+          "failure": "除了碎石和苔藓，你什么也没摸到。"
+        }
+      ],
+      "encounters": [
+        {
+          "id": "enc_guihuo",
+          "monsters": [
+            { "monsterId": "guihuo", "count": 2 },
+            { "monsterId": "zhiren", "count": 2 }
+          ],
+          "note": "选择 1：惊动洞口的守卫。鬼火远距骚扰，纸人贴身。"
+        },
+        {
+          "id": "enc_shanzei",
+          "monsters": [{ "monsterId": "shanzei", "count": 2 }, { "monsterId": "yegou", "count": 2 }],
+          "note": "选择 2：撞见抢先摸洞的山贼，双方都以为对方要抢赏金。"
+        }
+      ],
+      "beats": [
+        { "id": "beat_enter", "trigger": "进入洞中深处或找到阵眼", "effect": "进入 scene_shendong" }
+      ],
+      "rewards": [{ "xp": 30, "items": ["fuwen"] }]
+    },
+    {
+      "id": "scene_shendong",
+      "title": "古洞深处·赤目道人",
+      "entry": "洞壁越往里越湿，绿光在石壁上跳动，像整面墙都在呼吸。密室门半开，里面是一个刻满符文的圆阵，阵心躺着个瘦小的少年——老猎户的儿子阿满。阵眼旁，一个穿旧袍的人背对着你们，缓缓回过头来，眼睛红得像要滴血。",
+      "lore": ["dongfu", "gm_zhenfa", "gm_chishan"],
+      "checks": [
+        {
+          "when": "靠近密室时观察地面",
+          "skill": "perception",
+          "dc": 14,
+          "success": "你看清了地上的三枚阵眼符文石，也看清了它们之间连着、并不断延伸向阿满的细线。",
+          "failure": "脚下碎石响了一声，洞里的绿光猛地亮了一瞬。"
+        },
+        {
+          "when": "尝试辨认阵法核心",
+          "skill": "arcana",
+          "dc": 15,
+          "success": "你意识到必须先破坏三枚阵眼，否则赤目道人死不了，阿满也会被抽干。",
+          "failure": "阵法太乱，你只看出它和赤目道人命脉相连。"
+        }
+      ],
+      "encounters": [
+        {
+          "id": "enc_boss",
+          "monsters": [{ "monsterId": "chishan", "count": 1 }, { "monsterId": "xueshi", "count": 1 }],
+          "note": "Boss 战：赤目道人 + 血尸。阵眼可被玩家用动作破坏（GM 裁定：每枚一次 DC 13 力量/奥秘检定）。"
+        }
+      ],
+      "beats": [
+        { "id": "beat_break", "trigger": "三枚阵眼全部破坏", "effect": "赤目道人血遁失效；阿满获救，进入收尾叙事" }
+      ],
+      "rewards": [
+        { "xp": 100, "items": ["zhaohunling", "zhenhunfu"] },
+        { "xp": 0, "items": ["fuwen"], "note": "若已获得符文石则改发铜镜" }
+      ]
+    }
+  ],
+  "secrets": [
+    {
+      "id": "secret_aman",
+      "content": "老猎户的儿子阿满被摄入阵中，还活着，最多撑到明晨。",
+      "revealWhen": "场景 3 进入密室时揭示"
+    },
+    {
+      "id": "secret_old_friend",
+      "content": "镇长与赤目道人三十年前是同门，一起下过崖。镇长对绿光知情且隐瞒。",
+      "revealWhen": "恐吓镇长 DC 14 成功，或玩家在古洞内发现旧袍时"
+    },
+    {
+      "id": "secret_liu",
+      "content": "柳掌柜是昆仑剑宗眼线；玩家表现好会获得荐书。",
+      "revealWhen": "散团时，GM 视表现决定是否揭露"
+    }
+  ]
+}
