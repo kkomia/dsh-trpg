@@ -151,6 +151,15 @@ test('invalid input: empty text and bad dice expression are rejected with codes'
   );
 });
 
+test('closeRoom: 房主关房后房间消失、token 失效', () => {
+  const { service, created } = setup();
+  assert.equal(service.roomCount(), 1);
+  assert.equal(service.closeRoom(created.room.roomId).closed, true);
+  assert.equal(service.roomCount(), 0);
+  assert.throws(() => service.login(created.hostToken), /令牌无效/);
+  assert.throws(() => service.state({ kind: 'host', roomId: created.room.roomId }), /房间不存在/);
+});
+
 test('snapshot/restore: 存档恢复后 token、角色卡、事件序号与场景保持', () => {
   const { service, created, player, joined } = setup();
   service.roll(player, { expression: 'd20' });

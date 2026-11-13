@@ -6,6 +6,9 @@
  * - AI GM：建房后创建 DSH Agent 会话，玩家行动串行喂给 GM，GM 的叙事广播回房间；
  *   GM 的工具在这里执行引擎结算（掷骰/检定/私密消息/世界书）。
  */
+import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { GUIMUYA_LOREBOOK, GUIMUYA_MODULE } from '@dsh-trpg/content';
 import { RoomService } from '@dsh-trpg/rooms';
 import { createRoomHttpServer, type RoomHttpServer } from './room-http.ts';
@@ -32,6 +35,8 @@ export interface TrpgConfig {
   port?: number;
   /** 监听地址；默认 0.0.0.0（局域网可访问）。 */
   bindHost?: string;
+  /** 同时存在的房间上限；默认 8。 */
+  maxRooms?: number;
 }
 
 /** DSH Host 上下文的结构化最小面（不 import Harness 包，保持插件可独立安装）。 */
@@ -39,8 +44,34 @@ export interface HostCtxLike {
   effect(fn: () => () => void): void;
   on?(event: string, listener: (...args: unknown[]) => void): () => void;
   /** Cordis 的嵌套注入：只在依赖可用时回调，插件本身无需声明硬依赖。 */
-  inject?(deps: string[], callback: (scoped: AgentsScope) => void | (() => void)): () => void;
-  agents?: AgentsScope['agents'];
+  inject?(deps: string[], callback: (scoped: unknown) => void | (() => void)): () => void;
+}
+
+export interface SessionControllerScope {
+  sessionController: {
+    create(request: { cwd?: string; agentPreset?: string }): Promise<{ sessionId: string }>;
+    resolveAgent(sessionId: string): Promise<{
+      agent?: {
+        id: string;
+        ctx: GmAgentCtxLike;
+        followup?(input: { content: Array<{ type: string; text: string }>; source: { kind: string } }): void | Promise<void>;
+        whenIdle?(): Promise<void>;
+      };
+    } | { error?: unknown }>;
+    prompt?(request: {
+      requestId: string;
+      sessionId: string;
+      mode: 'queue' | 'steer';
+      content: Array<{ type: string; text: string }>;
+    }): Promise<{ accepted: boolean }>;
+    selectModel?(request: {
+      sessionId: string;
+      provider: string;
+      model: string;
+      reasoningEffort?: string;
+    }): Promise<{ selected?: unknown }>;
+    cancel?(request: { sessionId: string }): unknown;
+  };
 }
 
 export interface AgentsScope {
@@ -49,7 +80,9 @@ export interface AgentsScope {
       sessionId: string;
       setup: (agentCtx: GmAgentCtxLike) => void;
       agentOptions?: { provider: string; model: string; reasoningEffort?: string };
+      meta?: { cwd?: string; parentSession?: string; isSeeded?: boolean; origin?: 'subagent'; delegationDepth?: number; agentPreset?: string };
     }): Promise<GmHandleLike>;
+    list?(): Array<{ id: string }>;
   };
 }
 
@@ -78,6 +111,7 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   const persistence = new RoomPersistence({ log });
   let restoredRooms: string[] = [];
   const service = new RoomService({
+    maxRooms: config.maxRooms ?? 8,
     onRoomCreated: (roomId) => {
       void managerRef.current?.ensureRoom(roomId);
     },
@@ -107,29 +141,168 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     return;
   }
 
-  // 惰性获取 agents / 默认模型服务：插件不声明硬依赖，缺服务时只是 AI GM 起不来。
+  // 惰性获取 agents / 默认模型 / 会话控制器：插件不声明硬依赖，缺服务时只是 AI GM 起不来。
   let agentsService: AgentsScope['agents'] | null = null;
   let defaultModel: ModelScope['agentDefaultModel'] | null = null;
+  let sessionController: SessionControllerScope['sessionController'] | null = null;
   ctx.inject?.(['agents'], (scoped) => {
-    agentsService = scoped.agents;
+    agentsService = (scoped as AgentsScope).agents;
     log('agents service acquired: AI GM enabled');
     return () => {
       agentsService = null;
     };
   });
   ctx.inject?.(['agentDefaultModel'], (scoped) => {
-    defaultModel = (scoped as unknown as ModelScope).agentDefaultModel ?? null;
+    defaultModel = (scoped as ModelScope).agentDefaultModel ?? null;
     return () => {
       defaultModel = null;
     };
   });
+  ctx.inject?.(['sessionController'], (scoped) => {
+    sessionController = (scoped as SessionControllerScope).sessionController ?? null;
+    log('sessionController acquired: GM 会话将走普通会话通道');
+    return () => {
+      sessionController = null;
+    };
+  });
 
+  const gmSessionIds = new Set<string>();
+  const turnWaiters = new Map<string, Array<() => void>>();
+
+  /** 统一的会话事件处理：drerelease waiters、上报错误、转发给对应 GM 房间。 */
+  const forwardSessionEvent = (args: unknown[]): void => {
+    const session = args[0] as { id?: string } | undefined;
+    const event = args[1] as { type?: string; data?: unknown; seq?: number } | undefined;
+    if (!session?.id || !event?.type) return;
+    if (event.type === 'turn/end') {
+      const waiters = turnWaiters.get(session.id);
+      if (waiters) {
+        turnWaiters.delete(session.id);
+        for (const resolve of waiters) resolve();
+      }
+      const reason = (event.data as { reason?: { kind?: string; error?: { message?: string } } } | undefined)?.reason;
+      if (reason && reason.kind !== 'completed') {
+        managerRef.current?.onSessionEvent(session.id, {
+          type: 'gm-error',
+          data: { message: `回合结束原因：${reason.kind}${reason.error?.message ? `（${reason.error.message}）` : ''}` },
+        });
+      }
+    }
+    managerRef.current?.onSessionEvent(session.id, { type: event.type, data: event.data, seq: event.seq });
+  };
+
+  const attachSessionListener = (agentCtx: unknown): (() => void) => {
+    const ctxLike = agentCtx as { on?: (event: string, listener: (...args: unknown[]) => void) => () => void } | undefined;
+    try {
+      return ctxLike?.on?.('session/event', (...args: unknown[]) => forwardSessionEvent(args)) ?? (() => {});
+    } catch {
+      return () => {};
+    }
+  };
   const createAgent: GmCreateAgent = async ({ sessionId, setup }) => {
-    if (!agentsService) throw new Error('当前 DSH 没有 agents 服务，无法启动 AI GM');
+    const debugDir = process.env.DSH_TRPG_DEBUG_DIR ?? 'D:\\gitlab\\dsh-trpg\\.tmp';
+    const forceOff = existsSync(join(debugDir, 'gm-effort-off.flag'));
+    const providerOverrideFile = join(debugDir, 'gm-provider.flag');
+    const providerOverride = existsSync(providerOverrideFile)
+      ? (await import('node:fs')).readFileSync(providerOverrideFile, 'utf8').trim()
+      : '';
     const selection = defaultModel?.currentSelection?.();
-    const agentOptions = selection ? { provider: selection.provider, model: selection.model, ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}) } : undefined;
-    // 不显式传模型时，DSH 可能拒绝发起第一次请求（没有 model selection），所以优先用宿主默认模型。
-    return agentsService.create({ sessionId, setup, ...(agentOptions ? { agentOptions } : {}) });
+    const effective = selection
+      ? { provider: providerOverride || selection.provider, model: selection.model }
+      : providerOverride
+        ? { provider: providerOverride, model: 'deepseek-flash' }
+        : undefined;
+    const effort = forceOff ? 'off' : selection?.reasoningEffort;
+    const routeBase = effective
+      ? `${effective.provider}/${effective.model}${effort ? `@${effort}` : ''}${forceOff ? ' [debug-off]' : ''}`
+      : 'default';
+
+    // 首选：走 Web UI 同款的普通会话通道（sessionController），模型请求上下文完整。
+    if (sessionController) {
+      const created = await sessionController.create({});
+      const resolved = await sessionController.resolveAgent(created.sessionId);
+      const agent = (resolved as { agent?: { id: string; ctx: GmAgentCtxLike; followup?: unknown; whenIdle?: () => Promise<void> } }).agent;
+      if (!agent) throw new Error('sessionController 无法解析 GM 会话的 Agent');
+      // UI 新建会话的流程：先显式选模型，再注册工具/提示词，再 prompt。
+      if (effective && sessionController.selectModel) {
+        try {
+          await sessionController.selectModel({
+            sessionId: created.sessionId,
+            provider: effective.provider,
+            model: effective.model,
+            ...(effort ? { reasoningEffort: effort } : {}),
+          });
+        } catch (error) {
+          log(`GM selectModel failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      setup(agent.ctx);
+      const offAgentSession = attachSessionListener(agent.ctx);
+      const controller = sessionController;
+      const sid = created.sessionId;
+      const liveAgent = agent as unknown as {
+        followup?: (input: { content: Array<{ type: string; text: string }>; source: { kind: string } }) => void | Promise<void>;
+        whenIdle?: () => Promise<void>;
+      };
+      gmSessionIds.add(sid);
+      return {
+        sessionId: sid,
+        route: `${routeBase} [sessionController]`,
+        agent: {
+          followup: async (input) => {
+            if (typeof liveAgent.followup === 'function') {
+              await liveAgent.followup(input);
+              return;
+            }
+            if (controller.prompt) {
+              await controller.prompt({ requestId: randomUUID(), sessionId: sid, mode: 'queue', content: input.content });
+            }
+          },
+          whenIdle: async () => {
+            if (typeof liveAgent.whenIdle === 'function') {
+              await liveAgent.whenIdle();
+              return;
+            }
+            await new Promise<void>((resolve) => {
+              const list = turnWaiters.get(sid) ?? [];
+              list.push(resolve);
+              turnWaiters.set(sid, list);
+              setTimeout(resolve, 90000);
+            });
+          },
+        },
+        dispose: () => {
+          turnWaiters.delete(sid);
+          try {
+            offAgentSession();
+          } catch {
+            /* ignore */
+          }
+          try {
+            sessionController?.cancel?.({ sessionId: sid });
+          } catch {
+            /* ignore */
+          }
+        },
+      };
+    }
+
+    // 回退：直接创建 Agent（旧路径；模型传输可能不可用，故仅作兜底）。
+    if (!agentsService) throw new Error('当前 DSH 没有可用的 Agent 服务，无法启动 AI GM');
+    const agentOptions = effective
+      ? { provider: effective.provider, model: effective.model, ...(effort ? { reasoningEffort: effort } : {}) }
+      : undefined;
+    const handle = await agentsService.create({ sessionId, setup, ...(agentOptions ? { agentOptions } : {}) });
+    gmSessionIds.add(sessionId);
+    const offAgentSession = attachSessionListener((handle.agent as { ctx?: unknown }).ctx);
+    return {
+      ...handle,
+      route: `${routeBase} [agents]`,
+      dispose: async () => {
+        offAgentSession();
+        await handle.dispose();
+      },
+    };
   };
 
   const manager = new GmManager({
@@ -147,10 +320,7 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   }
 
   const offSessionEvent = ctx.on?.('session/event', (...args: unknown[]) => {
-    const session = args[0] as { id?: string } | undefined;
-    const event = args[1] as { type?: string; data?: unknown } | undefined;
-    if (!session?.id || !event?.type) return;
-    manager.onSessionEvent(session.id, { type: event.type, data: event.data });
+    forwardSessionEvent(args);
   });
 
   const offAgentError = ctx.on?.('agent/error', (...args: unknown[]) => {
@@ -168,6 +338,12 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     manager.broadcastAlert('DeepSeek 账号需要重新登录（设置 → 账号），登录后 AI GM 才能继续。', 'error');
   });
 
+  const offSessionError = ctx.on?.('api-session/error', (...args: unknown[]) => {
+    const sessionId = args[0] as string | undefined;
+    const message = String(args[1] ?? 'unknown');
+    if (sessionId) manager.onSessionEvent(sessionId, { type: 'gm-error', data: { message } });
+  });
+
   http.server.on('error', (error: NodeJS.ErrnoException) => {
     log(`room server error on ${bindHost}:${port}: ${error.code ?? ''} ${error.message}`);
   });
@@ -181,6 +357,7 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       offSessionEvent?.();
       offAgentError?.();
       offSignIn?.();
+      offSessionError?.();
     } catch {
       /* ignore */
     }

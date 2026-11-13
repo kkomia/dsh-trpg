@@ -74,6 +74,13 @@ async function main() {
   const gmNarrations = events.filter((event) => event.kind === 'narration');
   const hasOpening = gmNarrations.some((event) => event.payload.text && !event.payload.text.includes('AI 主持人已就位'));
   console.log(`[probe] events=${events.length} gmNarrations=${gmNarrations.length} hasOpening=${hasOpening}`);
+  // 自清理：关闭本次探针创建的房间
+  try {
+    await rpc('room.close', {}, hostToken);
+    console.log('[probe] room closed');
+  } catch {
+    /* ignore */
+  }
   if (!hasOpening) {
     console.error('[probe] AI GM 没有开口：确认 DSH 已重启并加载 M3 版插件，且模型可用。');
     process.exit(2);

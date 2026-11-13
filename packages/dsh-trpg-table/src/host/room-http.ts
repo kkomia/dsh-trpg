@@ -119,6 +119,10 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
         return service.kick(principal, rpc.params);
       case 'room.lock':
         return service.lock(principal, rpc.params);
+      case 'room.close': {
+        requireHost();
+        return service.closeRoom(principal.roomId);
+      }
       case 'gm.narrate': {
         requireHost();
         const params = take(validateGmNarrate(rpc.params));

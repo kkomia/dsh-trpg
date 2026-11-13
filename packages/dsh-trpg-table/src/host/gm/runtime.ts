@@ -6,6 +6,8 @@
  * 因此可以用假 Agent 在单测里跑完整编排，而真实实现在 host/index.ts 里对接 DSH。
  */
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { LorebookDef, ModuleDef } from '@dsh-trpg/content';
 import type { GameEvent } from '@dsh-trpg/protocol';
 import type { PlayerActionInfo, RoomService } from '@dsh-trpg/rooms';
@@ -30,6 +32,10 @@ export interface GmAgentLike {
 export interface GmHandleLike {
   agent: GmAgentLike;
   dispose(): void | Promise<void>;
+  /** 实际使用的模型路线（诊断用，例如 deepseek-account/deepseek-flash）。 */
+  route?: string;
+  /** 真实会话 id（平台可能自己创建会话，例如 sessionController 路径）。 */
+  sessionId?: string;
 }
 
 export type GmCreateAgent = (options: {
@@ -98,37 +104,46 @@ export function eventToPromptEvent(event: GameEvent): PromptEvent | null {
 
 export class GmRuntime {
   readonly roomId: string;
-  readonly sessionId: string;
+  private _sessionId: string;
   readonly combat: CombatRuntime;
   private handle: GmHandleLike | null = null;
   private queue: Promise<void> = Promise.resolve();
   private disposed = false;
   private readonly options: GmRuntimeOptions;
+  private lastEventSeq = 0;
+
+  get sessionId(): string {
+    return this._sessionId;
+  }
 
   constructor(options: GmRuntimeOptions) {
     this.options = options;
     this.roomId = options.roomId;
-    this.sessionId = randomUUID();
+    this._sessionId = randomUUID();
     this.combat = new CombatRuntime({ roomService: options.roomService, roomId: options.roomId, log: options.log });
   }
 
   /** 创建 GM 会话并注册该 Agent 专属的工具与系统提示。 */
   async start(): Promise<void> {
     const { module, lorebook, createAgent, roomService, roomId, log } = this.options;
+    const debugDir = process.env.DSH_TRPG_DEBUG_DIR ?? 'D:\\gitlab\\dsh-trpg\\.tmp';
+    const bare = existsSync(join(debugDir, 'gm-bare.flag'));
     const systemPrompt = buildGmSystemPrompt(module, lorebook);
     this.handle = await createAgent({
       sessionId: this.sessionId,
       setup: (agentCtx) => {
-        for (const tool of createGmTools({ roomService, roomId, lorebook, combat: this.combat })) {
-          agentCtx.tools.register(tool);
+        if (!bare) {
+          for (const tool of createGmTools({ roomService, roomId, lorebook, combat: this.combat })) {
+            agentCtx.tools.register(tool);
+          }
+          agentCtx.systemPrompt.section({
+            name: 'trpg-gm',
+            order: 900,
+            complete: true,
+            interpolate: false,
+            text: () => systemPrompt,
+          });
         }
-        agentCtx.systemPrompt.section({
-          name: 'trpg-gm',
-          order: 900,
-          complete: true,
-          interpolate: false,
-          text: () => systemPrompt,
-        });
         try {
           agentCtx.systemPrompt.suppressRuntimeContext?.();
         } catch {
@@ -136,7 +151,20 @@ export class GmRuntime {
         }
       },
     });
-    log?.(`GM agent started for room ${roomId} (session ${this.sessionId})`);
+    if (bare) {
+      try {
+        roomService.gmAlert(roomId, '调试模式：裸 GM Agent（无工具/无系统提示）', 'warning');
+      } catch {
+        /* ignore */
+      }
+    }
+    if (this.handle.sessionId) this._sessionId = this.handle.sessionId;
+    log?.(`GM agent started for room ${roomId} (session ${this.sessionId})${this.handle.route ? ` model=${this.handle.route}` : ''}`);
+    try {
+      this.options.roomService.gmAlert(this.roomId, `GM 会话已就绪${this.handle.route ? `（模型 ${this.handle.route}）` : '（未取到默认模型）'}`, 'info');
+    } catch {
+      /* ignore */
+    }
   }
 
   /** 开局：让 GM 朗读场景一开头（AI GM 模式下建房后自动触发）。 */
@@ -210,8 +238,12 @@ export class GmRuntime {
   }
 
   /** DSH 会话事件 → 把 GM 的叙事广播到房间。 */
-  onSessionEvent(event: { type: string; data?: unknown }): void {
+  onSessionEvent(event: { type: string; data?: unknown; seq?: number }): void {
     if (this.disposed) return;
+    if (event.type !== 'gm-error' && typeof event.seq === 'number') {
+      if (event.seq <= this.lastEventSeq) return;
+      this.lastEventSeq = event.seq;
+    }
     if (event.type === 'gm-error') {
       const data = event.data as { message?: string } | undefined;
       const message = data?.message ?? 'unknown';
@@ -327,7 +359,7 @@ export class GmManager {
     runtime.notifyPlayerAction(info);
   }
 
-  onSessionEvent(sessionId: string, event: { type: string; data?: unknown }): void {
+  onSessionEvent(sessionId: string, event: { type: string; data?: unknown; seq?: number }): void {
     this.bySession.get(sessionId)?.onSessionEvent(event);
   }
 

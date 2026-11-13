@@ -138,7 +138,8 @@ export type RpcMethod =
   | 'gm.narrate'
   | 'gm.secret'
   | 'gm.scene'
-  | 'gm.award';
+  | 'gm.award'
+  | 'room.close';
 
 export interface CreateRoomParams {
   title: string;
@@ -286,6 +287,7 @@ const METHODS: readonly RpcMethod[] = [
   'gm.secret',
   'gm.scene',
   'gm.award',
+  'room.close',
 ];
 
 export function isRpcMethod(value: unknown): value is RpcMethod {

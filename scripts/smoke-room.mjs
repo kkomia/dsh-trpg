@@ -182,6 +182,14 @@ async function main() {
     const list = await rpc('room.list', {});
     check('房间列表可用且不含邀请码', list.ok === true && !JSON.stringify(list).includes(inviteCode));
 
+    // 12. 房主关房：房间消失、玩家 token 失效
+    const closed = await rpc('room.close', {}, hostToken);
+    check('房主关房成功', closed.ok === true);
+    const afterClose = await rpc('room.state', {}, aqing.playerToken);
+    check('关房后玩家 token 失效', afterClose.ok === false && afterClose.error.code === 'unauthorized');
+    const listAfter = await rpc('room.list', {});
+    check('关房后房间列表为空', listAfter.ok === true && listAfter.result.rooms.length === 0);
+
     console.log(`[smoke] 房间 ${room.roomId.slice(0, 8)} 全流程完成`);
   } finally {
     await http.close();

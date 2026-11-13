@@ -660,6 +660,36 @@ export class RoomService {
     };
   }
 
+  /** 房主关闭房间（M4/M5：释放内存与存档文件）。 */
+  closeRoom(roomId: string): { closed: true } {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new RoomError('not-found', '房间不存在或已关闭');
+    for (const player of room.players.values()) this.tokens.delete(player.token);
+    this.tokens.delete(room.hostToken);
+    for (const listener of room.listeners) {
+      try {
+        listener.notify({
+          v: PROTOCOL_VERSION,
+          kind: 'alert',
+          seq: room.seq,
+          at: this.now(),
+          to: 'all',
+          payload: { level: 'warning', text: '房主关闭了房间', close: true } as unknown as AlertPayload,
+        });
+      } catch {
+        /* ignore */
+      }
+    }
+    room.listeners.clear();
+    this.rooms.delete(roomId);
+    try {
+      this.onChanged?.();
+    } catch {
+      /* ignore */
+    }
+    return { closed: true };
+  }
+
   /** 存档：整间房的权威状态（含 token 与角色卡），用于 DSH 重启后续团。 */
   snapshotAll(): RoomSnapshot[] {
     return [...this.rooms.values()].map((room) => ({
