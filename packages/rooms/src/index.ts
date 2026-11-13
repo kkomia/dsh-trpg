@@ -660,6 +660,19 @@ export class RoomService {
     };
   }
 
+  /** 关闭所有房间（仅本机 loopback 运维入口；用于清场/测试）。 */
+  closeAll(): { closed: number } {
+    const ids = [...this.rooms.keys()];
+    for (const roomId of ids) {
+      try {
+        this.closeRoom(roomId);
+      } catch {
+        /* 单个失败继续 */
+      }
+    }
+    return { closed: ids.length };
+  }
+
   /** 房主关闭房间（M4/M5：释放内存与存档文件）。 */
   closeRoom(roomId: string): { closed: true } {
     const room = this.rooms.get(roomId);

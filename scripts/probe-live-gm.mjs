@@ -20,6 +20,13 @@ async function rpc(method, params = {}, token) {
 async function main() {
   const health = await (await fetch(`${BASE}/trpg/health`)).json();
   console.log('[probe] health:', JSON.stringify(health));
+  // 清场：关掉历史测试房间（仅 loopback 可调用）
+  try {
+    const cleared = await rpc('room.closeAll', {});
+    if (cleared.ok) console.log(`[probe] cleared stale rooms: ${cleared.result.closed}`);
+  } catch {
+    /* 忽略 */
+  }
   const created = await rpc('room.create', { title: 'M3 实机自检', gmMode: 'ai' });
   if (!created.ok) {
     console.error('[probe] create failed:', JSON.stringify(created));

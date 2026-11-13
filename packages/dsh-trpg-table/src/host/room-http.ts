@@ -95,6 +95,10 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
     if (rpc.method === 'room.list') {
       return service.list();
     }
+    if (rpc.method === 'room.closeAll') {
+      if (!isLoopback(request)) throw new RoomError('forbidden', '只有房主本机可以清空房间');
+      return service.closeAll();
+    }
 
     const principal: Principal = service.login(rpc.token);
     const take = <T>(report: { ok: boolean; value?: T; error?: string }): T => {
