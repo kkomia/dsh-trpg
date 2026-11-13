@@ -38,6 +38,20 @@
 └──────────────────────────────┘
 ```
 
+## 安装（给朋友）
+
+插件以 DSH bundle 形式分发，需要 DSH Desktop（开发时用 profile 的本地链接）。
+
+**方式一：本地 tgz（推荐）**
+1. 克隆仓库并构建：`pnpm install && pnpm build`
+2. 打包：`pnpm pack:plugin` → 生成 `dist/dsh-trpg-table-0.0.1.tgz`（约 51 KB）
+3. 把 tgz 发给朋友；对方在 DSH「插件 → 添加插件」选择该文件（或 `dsh plugin add <tgz 路径>`），启用后重启 DSH。
+
+**方式二：本地目录（开发）**
+在「插件 → 添加插件」里选择包目录 `packages/dsh-trpg-table`，或让 Agent 用 `plugin_manager install_bundle` 指定该目录。
+
+> 房主和每位玩家都需要安装（玩家端不需要配置模型，AI 只在房主机器上跑）。
+
 ## 开发
 
 > 工具链使用 DSH 自带运行时（Node 24 + pnpm 11），也可用任意 Node 22+ / pnpm 11。

@@ -16,6 +16,7 @@
     "test:gm": "node scripts/smoke-gm.mjs",
     "probe:gm": "node scripts/probe-live-gm.mjs",
     "build": "node scripts/build.mjs",
+    "pack:plugin": "node scripts/build.mjs && node scripts/pack-plugin.mjs",
     "demo": "node scripts/cli-demo.mjs"
   },
   "devDependencies": {
