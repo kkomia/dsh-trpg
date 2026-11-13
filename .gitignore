@@ -1,0 +1,21 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# build output
+lib/
+dist/
+*.tgz
+
+# test / coverage
+coverage/
+*.log
+
+# local scratch
+.tmp/
+.DS_Store
+Thumbs.db
+
+# dsh local data
+*.local.json
+.dsh-trpg/
