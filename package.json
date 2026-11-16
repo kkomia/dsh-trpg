@@ -10,8 +10,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc -p packages/protocol && tsc -p packages/engine && tsc -p packages/content && tsc -p packages/rooms && tsc -p packages/dsh-trpg-table && tsc -p packages/rules",
-    "test": "node --test \"packages/engine/test/*.test.ts\" \"packages/protocol/test/*.test.ts\" \"packages/content/test/*.test.ts\" \"packages/rooms/test/*.test.ts\" \"packages/dsh-trpg-table/test/*.test.ts\" \"packages/rules/test/*.test.ts\"",
+    "typecheck": "tsc -p packages/protocol && tsc -p packages/engine && tsc -p packages/content && tsc -p packages/rooms && tsc -p packages/dsh-trpg-table && tsc -p packages/rules && tsc -p packages/assets",
+    "test": "node --test \"packages/engine/test/*.test.ts\" \"packages/protocol/test/*.test.ts\" \"packages/content/test/*.test.ts\" \"packages/rooms/test/*.test.ts\" \"packages/dsh-trpg-table/test/*.test.ts\" \"packages/rules/test/*.test.ts\" \"packages/assets/test/*.test.ts\"",
     "test:e2e": "node scripts/smoke-room.mjs",
     "test:gm": "node scripts/smoke-gm.mjs",
     "probe:gm": "node scripts/probe-live-gm.mjs",

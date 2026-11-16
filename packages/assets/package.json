@@ -1,0 +1,10 @@
+{
+  "name": "@dsh-trpg/assets",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "跑团桌资产地基库：纯 Node 的 PNG/SVG 编解码、SVG 白名单净化、归一化与 trpg.assets/1 清单（零外部依赖）",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
