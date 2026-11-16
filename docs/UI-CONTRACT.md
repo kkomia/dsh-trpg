@@ -1,7 +1,7 @@
 # UI 与资产契约 v1：三屏（人物 / 装备 / 背包）+ 三条图标获取路径
 
-> 状态：**已拍板（2026-11-16），M9.5 实现**｜决策来源：[DECISIONS.md](./DECISIONS.md) 第九轮 #27｜关联：[RULES-MODEL.md](./RULES-MODEL.md) §3/§4/§8/§13、[CONTENT-MODEL.md](./CONTENT-MODEL.md) §2（`assets/` 与 zip 上限）、[ROADMAP.md](./ROADMAP.md) M9.5。
-> 一句话：跑团桌第一优先级是**三个数据界面**（人物 / 装备 / 背包），**图标是一等公民**（不内置图标库，来自本地导入 / AI 生成 SVG / AI 生图三条路径），落盘前**内部强制标准化**，客户端只渲染 host 投影与 `iconRef`。本文是实现依据（契约，不是提案）；结论冲突回 DECISIONS.md 改，不在这里漂移。
+> 状态：**已拍板（2026-11-16），M9.5 实现；地图与战棋视图见 M9.4/M9.5e**｜决策来源：[DECISIONS.md](./DECISIONS.md) 第九轮 #27（三屏三路径）；**战斗空间/地图与战棋视图见第十轮 #28**｜关联：[RULES-MODEL.md](./RULES-MODEL.md) §3/§4/§6/§8/§13、[CONTENT-MODEL.md](./CONTENT-MODEL.md) §2（`assets/` 与 zip 上限）、[ROADMAP.md](./ROADMAP.md) M9.5。
+> 一句话：跑团桌第一优先级是**三个数据界面**（人物 / 装备 / 背包），**图标是一等公民**（不内置图标库，来自本地导入 / AI 生成 SVG / AI 生图三条路径），落盘前**内部强制标准化**，客户端只渲染 host 投影与 `iconRef`；三屏之外主区域另有**世界地图页**（插画底图 + zone 热点/连线）与**战棋战斗视图**（底图 + 网格 + token + 行动经济条），地图由 AI 出结构草稿 + 程序校验 + AI 底图，**结构数据才是权威**。本文是实现依据（契约，不是提案）；结论冲突回 DECISIONS.md 改，不在这里漂移。
 
 ## 0. 摘要与已确认决策
 
@@ -17,6 +17,8 @@
 | 8 | **玩家资产走 host 或自备接口** | 头像/立绘可走 host 生图服务（host 可开关+限流），也可玩家自备 OpenAI 兼容接口；默认推荐 host | 不强制玩家配 key、不代保管第三方 key |
 | 9 | **立绘 768×1024 够用** | 立绘/表情/动作变体统一 768×1024 档 | 不做超大立绘、不做动态立绘 |
 | 10 | **预览确认才落盘 + 内部强制限制** | 导入/生成先预览，确认才写盘；尺寸/格式/体积由我们内部拒绝 | 不做「先落盘再清理」、不靠模型自觉 |
+| 11 | **世界地图 = 主区域独立页** | 世界/区域层 = AI 2D 插画底图 + zone 热点/连线（与图标同一思路：美术底图 + 数据叠加）；右栏只显示当前区域名，不塞地图画布 | 不在右栏塞地图、不做手绘世界图 |
+| 12 | **战棋战斗视图 = 底图 + 半透明网格 + token** | 战斗图由 AI 出结构化草稿 → 程序校验 → AI 底图 → 预览叠加；**结构数据权威、底图只是皮肤**；离线时程序化兜底 | 不手绘战斗图、不拿底图当判定依据 |
 
 三屏都是 host 投影的纯渲染（#26 结论 3），不新增规则计算；装备/背包的**规则语义**（槽位、词条、可用动作、堆叠）来自 [RULES-MODEL.md](./RULES-MODEL.md) 的 `sheet.equipment` / `items[]`，本文只定 UI 与资产契约。
 
@@ -189,7 +191,7 @@ POST {baseUrl}/v1/images/generations     Authorization: Bearer <apiKey>
 
 ## 5. 三个界面的布局契约
 
-前提：三屏都吃 [RULES-MODEL.md §8](./RULES-MODEL.md) 的投影（`SheetView` / `EquipmentView` / `InventoryView`）；**客户端不算规则**，所有数值与「计算过程 trace」由 host 算好下发。位置：右栏「跑团桌」tab 内新增「人物 / 装备 / 背包」三个**紧凑版**子页签（320–420px 单列，与现有卡片并列）；主区域工具页（M9.6）为**详细版**（双列）；同组件两档密度。
+前提：三屏都吃 [RULES-MODEL.md §8](./RULES-MODEL.md) 的投影（`SheetView` / `EquipmentView` / `InventoryView`）；**客户端不算规则**，所有数值与「计算过程 trace」由 host 算好下发。位置：右栏「跑团桌」tab 内新增「人物 / 装备 / 背包」三个**紧凑版**子页签（320–420px 单列，与现有卡片并列）；主区域工具页（M9.6）为**详细版**（双列）；同组件两档密度。**世界地图是主区域独立页（§5.4），战棋战斗视图是主区域独立视图（§5.5）；右栏只显示当前区域名 / 回合与行动经济条紧凑版，不塞地图画布。**
 
 ### 5.1 人物界面
 
@@ -256,6 +258,48 @@ POST {baseUrl}/v1/images/generations     Authorization: Bearer <apiKey>
 - 详情动作：装备（走 §5.2 预览确认）/ 使用（`useItem`，host 结算）/ 拆分（`splitStack`）/ 丢弃（二次确认）。
 - 容量条：仅当规则定义了 `capacity` 才显示，未定义时整块隐藏（不显示假上限）。掉落/奖励新物品进包给一次性高亮（纯视觉，不写状态）。
 
+### 5.4 世界地图页（主区域，M9.4 渲染壳 + M9.5e 真底图）
+
+```
+┌ 世界地图 ─ 青石镇周边 ────────────────── ◉当前：洞口 ┐
+│                                                      │
+│   [AI 2D 插画底图（无网格）]                          │
+│      ○ 枯木崖                                        │
+│        ╲                                             │
+│         ● 洞口 ← 当前区域（脉冲描边）                 │
+│         │ 道路                                        │
+│   ● 青石镇（已探索）── ○ 古洞（未探索）               │
+│                                                      │
+│ [图例] [缩放 − +] [回到当前区域] [仅看已探索]          │
+└──────────────────────────────────────────────────────┘
+```
+
+- 数据：`space.world`（底图）+ `space.zones[]`（热点 `hotspot.x/y`）/ `connections[]`（连线）；投影 = `WorldMapView`（§6）。**世界地图不参与格子级判定**，只负责展示、导航与进入区域。
+- 渲染：底图铺满；zone 热点 = 图标（`hotspot.icon`，无图 → 几何徽记 §1.5）+ 名称；连线按 `kind` 样式（道路实线 / 河流蓝 / 楼梯虚线）；当前区域高亮 + 脉冲；未探索区域静态灰显（v1 **不做视野迷雾**）。
+- 交互：**左键点热点 = 查看 + 请求进入**（发 `move` 命令由 host 判定，客户端不自行切区域）；**右键点热点 = 详情**（名称/描述/已知风险/关联遭遇，只显示已公开内容）；滚轮/按钮缩放；图例常驻；底图加载失败 → 程序化底图 + 热点/连线照常。
+- 右栏分工：右栏「跑团桌」卡片**只显示当前区域名 + 一句描述 + 快捷入口**（「打开世界地图」），不渲染地图画布；回合/先攻/行动经济留给战棋视图与右栏紧凑条。
+
+### 5.5 战棋战斗视图（主区域，M9.4）
+
+```
+┌ 战斗 · 洞口 ── 第 3/10 回合 ── 行动者：阿青 ─────────┐
+│ [底图（俯视 2D / 像素风） + 半透明网格 + 地形/障碍图标]│
+│   ▓▓▓▓ 岩壁   ░░ 碎石   [🧙阿青]   [👹血尸]          │
+│   移动范围 = 蓝格；悬停显示距离（3 格 / 4.5 m）       │
+│                                                       │
+│ 行动经济：[●动作 1/1][○附赠 1/1][●反应 1/1][移动 4.5/6m]│
+│ 回合：[结束回合]  先攻：●阿青 ○血尸                   │
+└───────────────────────────────────────────────────────┘
+```
+
+- 图层顺序（下→上）：底图 → 地形/障碍图标（`terrain[][]` + `obstacles[]`）→ 半透明网格（`ui.battleGrid.gridOpacity`）→ 移动/攻击范围 → token（头像/图标 + 当前行动者描边）→ 距离/掩体标记。
+- token：优先头像 `media.avatar`，缺省职业/种族图标，再缺省几何徽记；大小 `ui.battleGrid.tokenSize`（auto = 随格宽）；同格重叠按偏移绘制，不隐藏。
+- 交互：**左键 = 选目标/选格**（提交 `move` / `useAction` 命令，host 判定）；**右键 = 详情**（单位卡/地形说明/掩体加成）；悬停显示距离（host 按 `distanceMode` 算好下发，**客户端不算**）；当前行动者的可达格/移动范围由 host 预计算（`CombatView.moveRange`）。
+- 行动经济条：完全由 `turn.resources[]` 生成（图标 + 名称 + 剩余/上限），可用高亮、不可用置灰并显示原因；**不是硬编码「动作/附赠」**。
+- 回合栏：`round/maxRounds` + 先攻序列（当前行动者高亮）+ `[结束回合]`（= `endTurn` 命令）；到 `maxRounds` 按 `onRoundLimit` 展示「战斗结束 / 平局 / 加时」。
+- 战斗面板与右栏分工：**主区域 = 完整地图 + 交互 + 行动经济条**；右栏紧凑版 = 当前区域名 + 回合/先攻 + 行动经济 + 结束回合按钮，**不画地图**。
+- 降级：底图缺失/加载失败 → 程序化底图（按地形矩阵绘色块）+ 网格照常；底图与网格未对齐（无 `calibration`）→ 只显示网格模式并提示作者去 M9.6 地图工坊对齐。
+
 ## 6. 投影 DTO 与命令
 
 ```ts
@@ -280,6 +324,30 @@ export interface SheetView {
   progression?: { xp: number; level: number; history: Array<{ at: string; text: string }> };
   traces: TraceView[] }                    // 属性/资源/词条的计算过程（点击展开）
 export interface EquipPreview { slotId: string; adds: ItemCardView; removes?: ItemCardView; deltas: Array<{ statId: string; name: string; before: number; after: number; delta: number }>; warnings: string[]; trace: EquipmentView['trace'] }
+// 地图与战棋投影（M9.4；数据形状见 RULES-MODEL §3 的 space）
+export interface WorldMapView {
+  mapId?: string;                                       // 世界/区域图标识
+  backgroundRef?: AssetRef;                             // 缺省/加载失败 → 程序化底图
+  calibration?: { offsetX: number; offsetY: number; scale: number };
+  zones: Array<{ zoneId: string; name: string; parentZoneId?: string;
+                 hotspot: { x: number; y: number; icon?: IconRef };
+                 explored: boolean; current: boolean; battleMapId?: string;
+                 connections: Array<{ to: string; kind: string; distance?: number }> }>;
+  currentZoneId?: string;
+}
+export interface CombatView {
+  mapId: string; zoneId?: string; cols: number; rows: number; cellMeters: number; distanceMode: 'chebyshev'|'manhattan'|'dnd5e'|'euclid';
+  backgroundRef?: AssetRef; calibration?: { offsetX: number; offsetY: number; cellPx: number };
+  terrain: string[][];                                  // 地形 id 矩阵（权威；底图只是皮肤）
+  obstacles: Array<{ x: number; y: number; w: number; h: number; terrain: string; coverId?: string }>;
+  tokens: Array<{ actorId: string; name: string; side: 'player'|'enemy'|'neutral'; x: number; y: number;   // x/y = 当前占位（positions）
+                  icon?: IconRef; avatar?: AssetRef; hp?: { current: number; max: number }; active: boolean; conditions?: string[] }>;
+  initiative: Array<{ actorId: string; name: string; value: number; active: boolean }>;
+  round: number; maxRounds?: number; onRoundLimit?: 'end'|'draw'|'overtime';
+  actionEconomy: Array<{ id: string; name: string; icon?: IconRef; current: number; max: number; unit?: string }>;  // 由 turn.resources[] 生成
+  moveRange?: Array<{ x: number; y: number; cost: number }>;   // 仅当前行动者，host 预计算
+  terrainLegend: Array<{ id: string; name: string; icon?: IconRef; blocksMove?: boolean; blocksSight?: boolean }>;
+}
 ```
 
 | 命令（RPC） | 参数 | 返回/回推 | 说明 |
@@ -289,9 +357,13 @@ export interface EquipPreview { slotId: string; adds: ItemCardView; removes?: It
 | `unequip` | `{slotId, instanceId}` | 同上 | 卸下 → 词条聚合重算 |
 | `useItem` | `{instanceId, targetId?}` | 回推投影 + `dice`/`effect` 事件 | 效果走规则钩子，客户端只发意图 |
 | `splitStack` | `{instanceId, count}` | 回推 `inventory` | 生成新实例，上限/堆叠由 host 判 |
+| `move` | `{role, to:{zoneId?\|x,y?}, path?}` | 回推 `worldMap.view`/`combat.view` | host 校验移动力/地形/连通性；跨区域走 §5.4 |
+| `useAction` | `{actionId, targetId?, options?}` | 回推 `sheet.view`/`combat.view` + `dice`/`effect` 事件 | 动作定义来自规则包 `actions[]`；客户端只发意图 |
+| `endTurn` | `{}` | 回推 `combat.view` | host 推进先攻；到 `maxRounds` 触发 `onRoundLimit` |
+| `combatStart` / `combatEnd` | `{monsters?, battleMapId?, reason?}` / `{result?}` | 回推 `combat.view` | 开战/收场；GM 或当前行动者（房间权限） |
 | `assets.*`（**作者侧工坊，仅 host**） | `import`/`generateSvg`/`generateImage`/`commit`/`discard`/`list`/`remove`/`batchGenerate` | 预览或落盘结果 | 走 `{data: base64}`（单图 ≤512 KiB，loopback + host token），**不开放给玩家** |
 
-**规则类变更一律 host 算后回推**（`previewEquip` 也只是 host 算的只读结果）；客户端零规则计算、零本地预测，`available=false` 置灰并显示 `reason`。事件沿用 SSE（`seq` + `lastSeq` 补发），新增 `assets` 事件（包内资产变更，客户端失效对应缓存）。
+**规则类变更一律 host 算后回推**（`previewEquip` 也只是 host 算的只读结果）；客户端零规则计算、零本地预测，`available=false` 置灰并显示 `reason`。`move`/`useAction`/`endTurn`/`combatStart` 同理：**玩家 UI 按钮 = 发命令给 host 结算**，AI GM 侧走通用工具（泛化规则见 [RULES-MODEL.md](./RULES-MODEL.md) §7.1），**RP 文字仍走原生会话**（两条通道分开）。事件沿用 SSE（`seq` + `lastSeq` 补发），新增 `assets` 事件（包内资产变更，客户端失效对应缓存）。
 
 ## 7. 工坊里的图标工作台（M9.5b）与玩家侧入口
 
@@ -353,8 +425,9 @@ export interface EquipPreview { slotId: string; adds: ItemCardView; removes?: It
 | 动画播放（精灵动画循环） | 只做静态帧切换/表情切换 |
 | 图标编辑器（画布绘图） | 用外部工具或 AI 生成，不自研绘图 |
 | 在线图标搜索/图库下载 | 版权与信任面不可控 |
+| 视野迷雾 / 动态地形 | v1 世界地图只做未探索静态灰显、战斗图只按结构数据渲染；动态视野/地形变化留给 v2 或钩子 |
 
-## 10. 分阶段落地（M9.5 内）
+## 10. 分阶段落地（M9.5 内，a–e）
 
 | 阶段 | 目标 | 交付 | 验收标准 |
 |---|---|---|---|
@@ -362,8 +435,9 @@ export interface EquipPreview { slotId: string; adds: ItemCardView; removes?: It
 | **M9.5b** 工坊图标工作台 | 三 tab + 预览 + 批量 + 历史 + 原子落盘 | 工坊「图标」tab；预览画布/多候选/重生成/手动裁剪；批量给整库生成 + 待重试列表；manifest 历史与替换；落盘前后 `validatePack()` | 不改源码给内置物品库批量生成图标并确认落盘；导出 `.trpgpack` 后另一台机器图标正常显示；坏 SVG/超限资产被拒且原因可读；孤立资产只 warning |
 | **M9.5c** 开发用 shim（仅验证） | ComfyUI → OpenAI 协议（`scripts/dev/`，**不打包**） | `scripts/dev/comfyui-openai-shim.mjs`：`/v1/images/generations`（+ 可选 `/v1/chat/completions`）兼容层，b64 返回、seed 映射、轮询与超时 | 本机 ComfyUI 出图 → 走工坊生图 → 归一化 → 预览落盘；关掉 shim 插件给可读错误（**无 shim 依赖**）；`pnpm pack:plugin` 产物不含 shim |
 | **M9.5d** 玩家资产与落座上传 | 头像/立绘/变体/帧表 + 上传展示资产（三屏接真图） | 玩家侧生成入口（host 服务或自备接口）；IndexedDB 私卡资产；`room.seat` 扩展 `assets[]`；`GET /trpg/room-assets/…`；三屏渲染 `media` 与图标 | 双实例：玩家本地生成立绘 → 落座 → 队友端看到立绘；断线重连不重复上传（sha256 去重）；超 8 文件/8 MiB 被拒；抓包断言私密字段未上传 |
+| **M9.5e** 地图与战棋生成工作台 | AI 结构草稿 + 程序校验 + AI 底图 + 预览叠加对齐 + 离线兜底 | 工坊「地图」tab（生成/校验/预览/对齐/批量/待重试）；**地图结构校验器**（尺寸/边界/连通性/出生点/token/引用/图例，与 [RULES-MODEL.md](./RULES-MODEL.md) §3 生成小节同口径）；AI 底图 prompt 模板（世界图 `2d-illustration` / 战斗图 `topdown-2d`·`pixel-topdown` 两档）；程序化底图渲染器；`calibration` 对齐参数；离线模式（无 AI 时纯程序生成结构 + 背景） | 给「洞口」生成一张 ≤32×32 战棋图；校验器拒绝断连/越界/出生点重叠各 1 例且报错定位到格；AI 不可用时程序兜底仍可导出可玩；导出 `.trpgpack` 后另一台机器世界地图与战棋底图/网格对齐正常；预览结构与落盘一致（sha256/pack 校验） |
 
-**编号与依赖**：M9 内新增 **M9.5 资产与图标管线**（本节 a–d），原「M9.5 规则编辑器」顺延为 **M9.6**（工坊页壳与规则 tab 在 M9.6，图标工作台 tab 在 M9.5b 先落）；三屏骨架随 M9.4 的投影先落地（无真图时用几何徽记），M9.5d 才接真图；装备/背包命令（§6）依赖 M9.1/M9.2 的规则执行器，**不在客户端算任何数值**。
+**编号与依赖**：M9 内新增 **M9.5 资产、图标与地图生成管线**（本节 a–e），原「M9.5 规则编辑器」顺延为 **M9.6**（工坊页壳、规则 tab 与**地图工坊**在 M9.6，图标工作台 tab 在 M9.5b、地图生成工作台 tab 在 M9.5e 先落）；三屏骨架与地图视图壳随 M9.4 的投影先落地（无真图/无底图时用几何徽记与程序化底图），M9.5d 才接真图、M9.5e 才接真底图；**M9.5e 依赖 M9.1 的 `space` schema + M9.5a 的资产生图/归一化 + M9.4 的战棋视图壳**；装备/背包/移动/战棋命令（§6）依赖 M9.1/M9.2 的规则执行器，**不在客户端算任何数值**。
 
 ## 11. 风险与对策
 
@@ -377,4 +451,8 @@ export interface EquipPreview { slotId: string; adds: ItemCardView; removes?: It
 | host 生图服务被玩家滥用 | **默认关闭**、房主显式开启、按玩家限流（建议 10 张/时、100 张/天，可配）、超限 429 + 中文提示；玩家自备接口则自担费用 |
 | 归一化跨端不一致 | 纯 JS 无 Canvas，host 与客户端跑同一份代码；输出字节确定（同输入同 sha256），以此做缓存与去重 |
 | manifest 与 `pack.json` 引用漂移 | 落盘即 `validatePack()`；引用缺失报错、孤立资产 warning；导出前再校验一次 |
+| AI 结构草稿与底图不一致（画的墙和矩阵不同） | **结构数据权威**：判定只读 `terrain[][]`/`obstacles`/`spawns`，底图仅皮肤、可替换重生成；预览叠加人工确认；不一致以结构为准并提示重生成底图（RULES-MODEL §3 生成小节） |
+| 网格与底图对齐偏差 | 落盘 `calibration`（`offsetX/offsetY/cellPx`）由预览手工对齐；未对齐 → 退回纯网格模式（可玩优先）；像素风用整数倍格子尺寸，避免缩放糊边 |
+| 地图体积膨胀（多张图 × 底图） | 结构 ≤32×32（文本很小）、单场 token ≤20、包内地图 ≤64；底图按 §3.1 资产上限（≤512 KiB/张）与整包 ≤64 MiB；落盘前拒绝超限 |
+| 校验器误判（过严/过松） | 硬约束显式列举并报错定位到格/行；只校验尺寸/边界/连通/出生点/token/引用，审美不校验；校验器与程序兜底生成器共用同一套约束定义；作者可手改后重校验 |
 | zip 上限与资产上限冲突 | M8.1 常量待办（§3.1）：整包 16→64 MiB、解压总量 32→64 MiB、条目数 512→520，单条仍 8 MiB |
