@@ -51,7 +51,7 @@
 
 - 导出文件名固定 `<packId>-<version>.trpgpack`（如 `core-guimuya-1.0.0.trpgpack`）；MIME `application/zip`；导入入口校验扩展名 + magic `PK\x03\x04`。
 - `packId` 为小写 slug（`^[a-z0-9][a-z0-9-]*$`），内置包保留 `core-` 前缀；`version` 为 semver。
-- 一个 pack 只带 1 个模组、1 本世界书（v1 约定）：`modules` 以数组承载、长度恒 1，`defaultModuleId` 必须等于 `modules[0].moduleId`；规则数据（种族/职业/法术/怪物/物品）不内联，只以 `ruleSystem.id`（规则标识）+ `ruleSystem.name`（规则名）引用（D1）；规则版本 v1 不单独记录，随插件/pack 版本走。
+- 一个 pack 只带 1 个模组、1 本世界书（v1 约定）：`modules` 以数组承载、长度恒 1，`defaultModuleId` 必须等于 `modules[0].moduleId`；规则数据（种族/职业/法术/怪物/物品）不内联，只以 `ruleSystem.id`（规则标识）+ `ruleSystem.name`（规则名）引用（D1）；规则版本记录在 pack 的 `rules` 段（`schemaVersion: 'trpg.rules/1'` + `rulesVersion`，见 [RULES-MODEL.md](./RULES-MODEL.md) §3/§9）。
 - `contentHash = sha256(规范化 pack.json 字节)`：键排序、无多余空白、不含 zip 元数据；供房间快照做变更检测。实现可另算整包 `packHash = sha256(zip 字节)` 用于断言「导出可复现」（同 pack 同版本必须字节一致）。
 - 仓库内内置包由 `packages/content/src/packs/core-guimuya.ts` 从现有源码 JSON（`cards/`、`modules/`、`lorebooks/`，旧形状、便于 diff/评审）经 `migratePack()` 组装为 `CORE_GUIMUYA_PACK`（注册在 `CORE_PACKS`）；用同一编码器产出 `.trpgpack` 才是分发/导入形态（CLI `export`，内置包暂不带 `assets/`）。源码 JSON 不是分发形态，`.trpgpack` 才是。
 
@@ -129,7 +129,7 @@
 | pack | `packId` / `version` | slug / semver 必填 | 导出名 `<packId>-<version>.trpgpack`；用于房间记录、导入冲突与 contentHash；内置包保留 `core-` 前缀 |
 | pack | `name` / `description` / `author` | 必填 | 展示与归属；旧草案字段 `title` → `name`，迁移期兼容读 `title`，导出只写 `name` |
 | pack | `license` / `icon` | 可选 | `icon` 走 `assets/**` 相对路径，也接受内联 SVG 小图标；v1 二进制素材一律进 `assets/` |
-| pack | `ruleSystem` | `{ id, name }` 必填 | 只引用不内联（D1）：`id` 为规则标识（如 `dnd5e-lite`）、`name` 为规则名（如 `D&D 5e-lite`）；旧 `{ ruleId, ruleVersion }` 由 `migratePack()` 归一为 `{ id, name }`（缺 `name` 时以 id 兜底），旧 `rules` / 模组 `ruleId` 也迁移到这里；**v1 不单独记录规则版本**（随插件/pack 版本）；导出后模块内不再带 `ruleId` |
+| pack | `ruleSystem` | `{ id, name }` 必填 | 只引用不内联（D1）：`id` 为规则标识（如 `dnd5e-lite`）、`name` 为规则名（如 `D&D 5e-lite`）；旧 `{ ruleId, ruleVersion }` 由 `migratePack()` 归一为 `{ id, name }`（缺 `name` 时以 id 兜底），旧 `rules` / 模组 `ruleId` 也迁移到这里；**规则版本**：pack 内 `rules` 段自带 `schemaVersion: 'trpg.rules/1'` 与规则内容指纹；房间快照记录 `rulesVersion/rulesHash`（见 [RULES-MODEL.md](./RULES-MODEL.md) §9）；pack 整体版本仍为 `pack.version`；导出后模块内不再带 `ruleId` |
 | pack | `defaultModuleId` | 必填 | 必须是 `modules[].moduleId` 之一；v1 等于 `modules[0].moduleId` |
 | pack | `modules[]` | 必填，v1 长度 1 | 模组对象数组；多模组是 v2 的事，v1 校验器直接拒绝长度 ≠ 1 |
 | module | `moduleId` / `startSceneId` | 必填 | `startSceneId` 必须是本模组场景之一 |
@@ -148,7 +148,7 @@
 | `modules/guimuya.json` + `GUIMUYA_MODULE`（3 幕 4 NPC 3 秘密） | `pack.modules[0]` | 模组 `id` → `moduleId`；`scenes[].id` → `sceneId`；`npcs[].id` → `npcId`；`secrets[].id` → `secretId` |
 | 场景内联 encounters / checks / rewards | 模组级 `encounters[]` + 场景 `encounterIds`；checks/rewards 补 id | 遭遇值（`enc_guihuo` 等）不变；checks/rewards 原本无 id → 一次性手写补 `checkId/rewardId` |
 | `scene.lore: ["qingshi", …]` | `scene.loreIds: ["entry_qingshi", …]` | **现有值缺 `entry_` 前缀，全部对不上**；M8.1 已由 `migratePack()` 自动补齐并纳入 `validatePack()` 挡回归 |
-| `CONTENT_VERSION` / `RULE_ID` / `RULE_VERSION` / 模组 `ruleId` | `pack.version` / `ruleSystem.id`（+ 规则名 `ruleSystem.name`） | `CONTENT_VERSION` → `pack.version`；`RULE_ID` → `ruleSystem.id`；规则名（`RULE_SYSTEM_NAME`）→ `ruleSystem.name`；**v1 不单独记录规则版本**：`RULE_VERSION` 与模组 `ruleId` 不再进入 pack（随插件/pack 版本；兼容导出时由 `ruleSystem.id` 回填模组 `ruleId`）；`GUIMUYA_*` 旧导出保持不变（D12） |
+| `CONTENT_VERSION` / `RULE_ID` / `RULE_VERSION` / 模组 `ruleId` | `pack.version` / `ruleSystem.id`（+ 规则名 `ruleSystem.name`） | `CONTENT_VERSION` → `pack.version`；`RULE_ID` → `ruleSystem.id`；规则名（`RULE_SYSTEM_NAME`）→ `ruleSystem.name`；`RULE_VERSION` 与模组 `ruleId` 不再进入 pack 顶层（规则版本记录在 `rules.rulesVersion`，见 [RULES-MODEL.md](./RULES-MODEL.md)；兼容导出时由 `ruleSystem.id` 回填模组 `ruleId`）；`GUIMUYA_*` 旧导出保持不变（D12） |
 | 文件位置 `packages/content/{cards,modules,lorebooks}/*.json` | `packages/content/src/packs/core-guimuya.ts`（组装 `CORE_GUIMUYA_PACK`） | 旧源码 JSON 仍在仓库内（便于 diff），由 TS 模块经 `migratePack()` 组装；导出产物 `core-guimuya-<version>.trpgpack` 才是分发/导入形态（host 已接 pack registry：M8.2） |
 | 玩家本地卡 `dsh-trpg:cards:v1`；DiceFrame `schema_version: 2` | pack card | 旧卡启动时一次性迁移（`id` → `cardId`，值不变），落座前转 `CharacterCard`（engine 校验不变）；DiceFrame 后置 M8.5 适配器，属性/技能/装备映射，`source.ruleId = "diceframe:freeform_wuxia"` 标注来源 |
 

@@ -5,6 +5,7 @@
 > 状态：v0.1 草案（2026-11-13），待项目主理人过目后开工
 > 定位：**局域网多人 AI 跑团桌**——房主建房、AI 当 KP/GM、玩家只负责 RP。以 DSH 插件形态交付，后期通过 IM（QQ 等）接入公网玩家。
 > 内容（模组/世界书/角色卡）的制作与数据模型见 [CONTENT-MODEL.md](./CONTENT-MODEL.md)（内容包 Content Pack，M8）。
+> 规则层（可定义规则：数据 + 受限公式 + 8 个 JS 钩子、任意规则目标、主机权威投影）见 [RULES-MODEL.md](./RULES-MODEL.md)（M9）。
 
 ---
 
@@ -167,7 +168,7 @@ dsh-trpg/
 
 ### 5.3 数据驱动
 
-种族/职业/法术/怪物/物品全部是 JSON（`packages/content/rules/dnd5e-lite/*.json`），引擎只认 schema；换规则 = 换数据 + 换结算适配器（v2 再做适配层接口）。
+种族/职业/法术/怪物/物品全部是数据（v1 为 `packages/content/rules/dnd5e-lite/*.json`，M9 起并入内容包 `rules` 段），引擎只认 schema；**换规则 = 换规则包**（数据 + 受限公式 + 8 个 JS 钩子，见 [RULES-MODEL.md](./RULES-MODEL.md)，M9），结算由规则包内的公式/钩子定义，适配器不再是主要手段。历史过渡：v1 靠「换数据 + 换结算适配器」落地，原「v2 做适配层接口」的设想已由规则包模型取代。
 
 ---
 
