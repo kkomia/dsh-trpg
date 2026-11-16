@@ -188,7 +188,7 @@
 - `distance` / `movement` 是**约定公式键**（不强制）：能数据表达就写公式（`space.*` 变量由核心运行时注入：`cells` 格数、`meters` 米数、`hops` 区域跳数）；区域进出、掩体匹配等条件链交给 §6 的场地/时间/上限 9 钩子。
 - **权威顺序**：`terrain/obstacles/spawns` 的结构数据 > 底图美术。底图只负责好看，判定永远读结构数据；换底图不改规则。
 
-### 战斗地图与世界地图生成（M9.5e）
+### 战斗地图与世界地图生成（M9.5e ✅ 已实现 2026-11-16）
 
 **结论**：地图**不手绘**。作者只说「这一战在哪、谁在场、什么地形」，管线固定为：
 **AI 文本生成结构草稿 → 程序校验 → 修正/重生成 → AI 生图出底图 → 预览叠加（底图 + 网格 + 图标）→ 作者微调 → 落盘**。
@@ -196,7 +196,7 @@
 
 | 步骤 | 输入 | 产出 | 失败/兜底 |
 |---|---|---|---|
-| ① 结构草稿（AI 文本） | 区域名/地形描述/怪物组/玩家人数 | ASCII 地形矩阵 + 障碍/出生点行 + 一行图例 | 模型输出不可解析 → 重试 ≤3 → 程序生成结构 |
+| ① 结构草稿（AI 文本） | 区域名/地形描述/怪物组/玩家人数 | ASCII 地形矩阵 + 障碍/出生点行 + 一行图例 | 模型输出不可解析 → 重试 ≤2（共 3 轮，错误反馈进 prompt）→ 程序生成结构 |
 | ② 程序校验（硬闸） | 草稿 | 合法 `battleMaps[]` 或**逐条错误清单** | 任一硬校验失败即**拒绝**，错误原文回给 AI 重生成或作者手改 |
 | ③ 底图（AI 生图） | 结构摘要 + 风格档 + 氛围 prompt | 俯视/插画底图 PNG（1024 请求 → 归一化落盘） | 失败/超时 → 程序化底图；不阻塞地图可用 |
 | ④ 预览叠加 | 底图 + 网格 + 地形/障碍图标 + 出生点 | 对齐预览（作者调 `offsetX/offsetY/cellPx`） | 对齐失败 → 纯网格模式，底图仅作参考 |
@@ -218,7 +218,7 @@ LEGEND # wall | . floor | ~ rubble
 spawns: player 1,6 | enemy 10,2
 ```
 
-**校验器（缺一不可，M9.5e 单测覆盖）**：
+**校验器（缺一不可，M9.5e ✅ 单测覆盖）**：
 
 | 校验 | 规则 |
 |---|---|
@@ -233,7 +233,7 @@ spawns: player 1,6 | enemy 10,2
 
 **风格档**：世界图 = `2d-illustration`（俯视/等距插画，无网格）；战斗图 = `topdown-2d`（俯视 2D）或 `pixel-topdown`（像素风）两档。底图与网格的**对齐参数**（`offsetX/offsetY/cellPx`）记在 `battleMaps[].calibration`，对齐只影响显示、不影响格坐标。
 
-**与工作台的关系**：生成/校验/对齐的 UI 在 **M9.5e 地图与战棋生成工作台**（[UI-CONTRACT.md](./UI-CONTRACT.md) §10）；结构编辑、底图替换与微调在 **M9.6 地图工坊**。AI GM 可以生成草稿，但**不能直接写 `battleMaps` 结构**（必须过校验器）。
+**与工作台的关系**：生成/校验/预览保存的 UI 在 **M9.6a 工坊「地图」tab**（后端 M9.5e ✅ 已实现 2026-11-16，[UI-CONTRACT.md](./UI-CONTRACT.md) §7/§10）；结构编辑、底图替换与 `calibration` 对齐微调仍在 **M9.6b 地图工坊**。AI GM 可以生成草稿，但**不能直接写 `battleMaps` 结构**（必须过校验器）。
 
 ### time（时间：只做回合计数，可选段）
 
@@ -531,10 +531,12 @@ packages/content/src/rules/dnd5e-lite/     # 作者源码：可 diff、可单测
 | **M9.2** ✅ 完成 2026-11-16 | 核心运行时 + 脚本沙箱 | 种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `vm` 沙箱 + 核心 8 + 场地/时间/上限 9 钩子调度 + 超时/sha256/错误事件。**实测：单测 306 → 457（新增 151），typecheck 0、构建通过** | 核心 8 + 场地/时间/上限 9 各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界 |
 | **M9.3** | dnd5e-lite 示例规则包 + 迁移 | `rules.json` + 4 个脚本；`core-guimuya` pack 带 rules 段（含 `space`/`time`/`turn` 数据）；旧卡迁移器；与旧实现对照测试 | CLI 用「鬼木崖·异光」跑完一幕，骰面/命中/伤害/AC/先攻逐项一致；单测迁移后全绿（134 → 新增规则测试） |
 | **M9.4** ✅ 完成 2026-11-16（a 后端 + b 客户端） | 协议/房间/客户端卡面与地图视图（主机权威投影） | `sheet.view`/`combat.view`/`worldMap.view` + `sheet`/`rules` 事件 + 重连重算；客户端只读卡面（分组/资源条/装备槽/可用动作/状态）+ **世界地图页（主区域独立页）** + **战棋战斗视图（底图+网格+token+行动经济条）**。M9.4a 后端：投影 DTO + 12 个 RPC + rooms 接规则运行时；M9.4b 客户端：右栏「人物/装备/背包」紧凑子页签 + 主区域 keyed panel（人物详情/装备/背包/世界地图/战棋，`cols=0` 退化 theatre-of-mind），对接 sheet/combat/worldmap RPC 与 `sheet\|combat\|rules/error` SSE。**实测：单测 702 → 762，typecheck 0、构建通过；真机截图 `.tmp/verify4/01–10`（gitignored）** | 双实例：落座→检定→攻击→移动→断线重连后投影一致；世界地图热点/连线与战棋网格/token/回合/行动经济条正常；玩家端构建产物不含规则执行代码；320–420px 栏宽可读 |
-| **M9.5** 🔶 进行中（a ✅ / b ✅ / c ✅ / d 进行中 / e 待做） | **资产、图标与地图生成管线**（新增，详见 [UI-CONTRACT.md](./UI-CONTRACT.md) §10） | a) ✅ 纯 JS 归一化器 + SVG 白名单净化 + OpenAI 兼容客户端 + `assets/manifest.json`（**实测：新增 182 用例，总 702**）；b) ✅ zip 上限上调（整包/解压总量 **64 MiB**、条目 **520**，单条 8 MiB / `pack.json` 4 MiB 不变）+ manifest 全量校验 + host 只读端点 `GET /trpg/assets/<packId>/<path>`（ETag/304/403/404）（**实测：单测 808 → 828**；三 tab 工作台 UI 随 M9.6 工坊页）；c) ✅ 开发 shim `scripts/dev/`（**实测：shim 12 用例，不打包**）；d) 进行中：玩家立绘/变体/帧表与落座上传；**e) 待做：地图与战棋生成工作台**（AI 结构草稿 + 地图结构校验器 + AI 底图 + 预览叠加与对齐 `calibration` + 离线程序兜底） | 同 UI-CONTRACT §10 的 M9.5a–e 验收标准；地图侧另验：≤32×32 / token ≤20 / 包内 ≤64 上限生效，校验器拒绝断连·越界·出生点重叠各 1 例，无 AI 时程序兜底可导出可玩 |
-| **M9.6** | 规则编辑器 + **地图工坊**（M8.3 顺延至此；**原编号 M9.5**） | 工坊规则 tab：schema 表单 + 代码编辑器 + 沙箱试跑 + 断言面板 + 模板库；地图工坊：`space` 结构矩阵编辑/校验定位/底图替换与对齐微调/世界地图热点编辑 | 作者不改源码完成一次规则包修改并通过规则测试台；不改源码调整一张战棋图或世界地图热点并通过校验；导出 `.trpgpack` 后另一台机器可玩 |
+| **M9.5** 🔶 进行中（a–e ✅ · d 部分） | **资产、图标与地图生成管线**（新增，详见 [UI-CONTRACT.md](./UI-CONTRACT.md) §10） | a) ✅ 纯 JS 归一化器 + SVG 白名单净化 + OpenAI 兼容客户端 + `assets/manifest.json`（**实测：新增 182 用例，总 702**）；b) ✅ zip 上限上调（整包/解压总量 **64 MiB**、条目 **520**，单条 8 MiB / `pack.json` 4 MiB 不变）+ manifest 全量校验 + host 只读端点 `GET /trpg/assets/<packId>/<path>`（ETag/304/403/404）（**实测：单测 808 → 828**；图标页 UI 随 M9.6a 落地）；c) ✅ 开发 shim `scripts/dev/`（**实测：shim 12 用例，不打包**）；d) 🔶 后端（生图服务 / 房间资产只读端点 / 落座资产引用）+ 客户端（IndexedDB 私卡资产 / 导入 / AI 生成 / 立绘渲染）已落地，剩余双实例「队友可见立绘」验收；e) ✅ 地图与战棋生成工作台：`map.generate` / `world.generate`（AI 结构草稿 → 校验器硬闸 → 重试 ≤2 → **程序化确定性兜底** `method=procedural`；底图生图后归一化 1024×768 / 2048×1536）+ 工坊后端 `pack.detail/update/export/import/assetPut/assetDelete`（loopback + host token；`validatePack()` 后原子写回 `.trpgpack`；import 支持 reject/overwrite/rename）；结构写入 `rules.space.battleMaps[]` / `world` / `zones[]`（经 `pack.update`）、底图经 `pack.assetPut`，UI 为 M9.6a 工坊「地图」tab（**实测：单测 882 → 957，typecheck 0、构建通过；commit 848ea67**） | 同 UI-CONTRACT §10 的 M9.5a–e 验收标准；地图侧另验：≤32×32 / token ≤20 / 包内 ≤64 上限生效，校验器拒绝断连·越界·出生点重叠各 1 例，无 AI 时程序兜底可导出可玩 |
+| **M9.6** 🔶 进行中（a ✅ 2026-11-16 · b ⬜） | 规则编辑器 + **地图工坊**（M8.3 顺延至此；**原编号 M9.5**） | **a) ✅ 内容工坊主区域页**：8 tab（概览 / 角色卡 / 世界书 / 模组 / 规则只读 + 图标 / 地图工作台 + 分享）；图标三路径（本地导入 / AI SVG / AI 生图含批量 ≤6）→ `pack.assetPut`；地图工作室 `map.generate` / `world.generate` 预览 → `rules.space.battleMaps/zones/world` → `pack.update`（无 AI 走 procedural）；导出 `.trpgpack` / 导入冲突策略 / 内置包复制副本；真机截图 `.tmp/verify6/01–06`（**实测：单测 957、typecheck 0、构建通过；commit cc1debf**）。**b) ⬜ 规则编辑器**（schema 表单 + 代码编辑器 + 沙箱试跑 + 断言面板 + 模板库）与地图结构手改 / `calibration` 对齐编辑待做 | 作者不改源码完成一次规则包修改并通过规则测试台；不改源码调整一张战棋图或世界地图热点并通过校验；导出 `.trpgpack` 后另一台机器可玩 |
 
-**依赖关系**：M7 玩家侧镜像可并行（改 client 镜像/会话事件，与规则包文件面不重叠，交叉点只有投影字段与事件类型）；**M8.3 UI 依赖 M9.1 + M9.4**（schema 与投影都定稿）；**M8.3a 只读卡面可提前**（依赖 M8.2 + M9.1 的卡 DTO）；**M9.5e 地图生成依赖 M9.1 的 `space` schema + M9.5a 的资产生图/归一化 + M9.4 的战棋视图壳**；**M9.6 地图工坊依赖 M9.5e 的校验器与 M9.4 的视图**；M8.4/M8.5 不受阻，可穿插。
+**M8.5a（DiceFrame 适配器）✅ 完成 2026-11-16**：`adaptDiceFrameCard` / `isDiceFrameCard` / `diceFrameToRulesCardJson`（DiceFrame `schema_version: 2` → `trpg.card/1` 与规则包；属性/技能/资源/装备/叙事字段中英文别名映射、未映射 warning、`cardId` 稳定派生、个人世界书片段以 `personalLore` 另导）；47 用例，**全量单测 957 → 1004**、typecheck 0、构建通过（commit ec9fd72）；卡库导入路径的 UI 接入待 M8.5b。**当前全量单测：1004。**
+
+**依赖关系**：M7 玩家侧镜像可并行（改 client 镜像/会话事件，与规则包文件面不重叠，交叉点只有投影字段与事件类型）；**M8.3 UI 依赖 M9.1 + M9.4**（schema 与投影都定稿）；**M8.3a 只读卡面可提前**（依赖 M8.2 + M9.1 的卡 DTO）；**M9.5e 地图生成依赖 M9.1 的 `space` schema + M9.5a 的资产生图/归一化 + M9.4 的战棋视图壳**（✅ 已实现）；**M9.6b 地图工坊依赖 M9.5e 的校验器与 M9.4 的视图**；M8.4/M8.5 不受阻，可穿插。
 
 ## 14. 风险与开放问题（默认值已给）
 
@@ -552,7 +554,7 @@ packages/content/src/rules/dnd5e-lite/     # 作者源码：可 diff、可单测
 ## 15. 与现有代码的差异 / 迁移清单
 
 ```
-packages/rules/（新，M9.1 ✅、M9.2 ✅ 2026-11-16）  # @dsh-trpg/rules 已建包：types + validate-rules + formula + sheet + migrate + fixtures（M9.1）、核心运行时/沙箱（M9.2 ✅）；地图结构校验器（M9.5e）后续补
+packages/rules/（新，M9.1 ✅、M9.2 ✅、M8.5a ✅ 2026-11-16）  # @dsh-trpg/rules 已建包：types + validate-rules + formula + sheet + migrate + fixtures（M9.1）、核心运行时/沙箱（M9.2 ✅）、DiceFrame 卡适配器 adapters/diceframe.ts（M8.5a ✅）；地图结构校验器/程序生成器（M9.5e ✅ 2026-11-16，实际位于 packages/dsh-trpg-table/src/host/studio/map-generator.ts）
 packages/engine/                     # 瘦身：dice/rng 迁入 rules；checks/characters/spells/combat 的 dnd5e 实现移除
 packages/content/src/rules/dnd5e-lite/     # 新：示例规则包源码（rules.json + scripts/*.js；space/time/turn 数据段）
 packages/content/src/packs/core-guimuya.ts # 新增 pack.rules 段（M9.3）；pack.ts 加 rules 段 schema 与 zip 内脚本 sha256 校验

@@ -193,6 +193,7 @@
 - **位置已确认（Q1，2026-11-16）：主区域独立页 + 右栏轻量入口**。主区域独立页（keyed `main` panel）：工坊页，三个 tab = 角色卡编辑器 / 世界书编辑器 / 模组编辑器；共用顶部 pack 选择器 + `.trpgpack` 导入/导出 + 校验结果 + 预览。**右栏轻量入口**：保留在现有「跑团桌」tab 内——选择模组、我的卡、打开工坊（跳主区域页）。
 - 不违背 v3（#23）：工坊是工具页，不是自绘聊天；打开时聊天会话仍在（切页签），玩家仍用原生会话行动。理由：三栏编辑器 + 大表单需要宽度，右栏 320–420px 放不下。
 - 实现顺序（M8.3）：卡只读面板 → 卡编辑器 → 世界书编辑器 → 模组编辑器；每步复用 M8.1 的 `validatePack()`，不做第二套校验。
+- **实现状态（2026-11-16）**：主区域工坊页已随 **M9.6a** 落地——左栏内容包列表 + 右侧 **8 个 tab（概览 / 角色卡 / 世界书 / 模组 / 规则 只读；图标 / 地图 工作台；分享）**，只读 tab 为列表 + 分页折叠；右栏「跑团桌」新增 host 专属「内容工坊」入口。**工坊写回 / 导入导出 RPC 已实现（M9.5e 后端 + M9.6a UI）**：`pack.detail` / `pack.update` / `pack.export` / `pack.import` / `pack.assetPut` / `pack.assetDelete`，全部**仅 loopback + host token**；`pack.update` 走 `validatePack()` 后「临时文件 + rename」原子写回 `.trpgpack`，`pack.assetPut` 归一化后原子更新 `assets/manifest.json`，`pack.import` 支持 `reject` / `overwrite` / `rename`。**内置包只读**：对内置包的 `pack.update` / `pack.assetPut` / `pack.assetDelete` 一律 `conflict`（工坊提示「内置包只读」）；要编辑须先在「概览 → 复制为可编辑副本」，即 `pack.import` `strategy=rename` 产出 `<packId>-copy-N` 数据目录包后再写。可编辑表单（三个编辑器）与规则 tab 编辑器仍在 M9.6b，工坊页目前以只读列表 + 图标/地图工作台为主。
 
 **角色卡双轨（Q3 已确认，2026-11-16）：pack 内置卡库 + 玩家本地私卡**
 
@@ -248,7 +249,8 @@ node scripts/content-pack.mjs import dist/core-guimuya-1.0.0.trpgpack --target c
 node scripts/content-pack.mjs inspect dist/core-guimuya-1.0.0.trpgpack    # 打印包概要（模组/世界书/卡/素材/哈希）
 ```
 
-- 冲突与覆盖：同 `packId` 且同 `version` → 提示已安装（可跳过）；同 `packId` 不同版本 → 明确提示：覆盖（仅数据目录包）/ 另存副本（新 `packId` 后缀 `-copy-1`）；内置包不可覆盖。
+- **冲突与覆盖**：同 `packId` 且同 `version` → 提示已安装（可跳过）；同 `packId` 不同版本 → 明确提示：覆盖（仅数据目录包）/ 另存副本（新 `packId` 后缀 `-copy-1`）；内置包不可覆盖。工坊「分享」tab 把这套策略做成下拉（`reject` / `overwrite` / `rename`），内置包用「复制为可编辑副本」= `pack.import` `strategy=rename`。
+- **工坊 RPC（✅ 已实现 M9.5e 后端 + M9.6a UI，2026-11-16）**：导出/导入/写回不依赖 CLI 也能完成——`pack.export`（返回 `<packId>-<version>.trpgpack` 的 b64 + `packHash`）、`pack.import`（`reject` / `overwrite`（仅数据目录包）/ `rename`，内置包不可覆盖）、`pack.update`（整包 `validatePack()` 后原子写回）、`pack.detail`（读完整包）、`pack.assetPut` / `pack.assetDelete`（资产归一化 + `assets/manifest.json` 原子更新）；全部**仅 loopback + host token**，玩家不可调用。
 - 安装写盘用「临时文件 + rename」原子落盘；安装前先全量校验，坏包不落盘、不进 registry。
 
 ### 6.2 角色卡双轨（Q3 已确认）
@@ -269,12 +271,15 @@ node scripts/content-pack.mjs inspect dist/core-guimuya-1.0.0.trpgpack    # 打�
 | M8.2 ✅ 完成 2026-11-16 | **房间接包**：`{packId, moduleId}` + 建房选模组 + 快照引用（去硬编码） | ①✅ `room.create` 可选 `packId/moduleId`（显式不存在给中文错误；缺省 = registry 缺省包 + `defaultModuleId`）；②✅ pack registry（内置 + 数据目录 `.trpgpack`，坏包跳过 / 重复 `packId` 内置优先 / 可重扫）；③✅ `RoomView.content` 与 `RoomView.scenes`；④✅ RPC `content.list`（脱敏目录，无 token）与 `content.reload`（loopback + host token）；⑤✅ 快照引用 + 包缺失/hash 漂移 `degraded` 降级续团、重扫恢复；⑥✅ GM 提示/工具按 `room.content` 解析、host 去 `GUIMUYA_*` 硬编码；⑦✅ 客户端大厅「内容包 / 模组」选择器、建房传 `packId/moduleId`、房间卡内容展示 + 降级红色告警、GM 场景下拉改吃 `room.scenes`；⑧✅ 单测新增（protocol 2 + rooms 9 + registry 6 + room-http 3）；真机验收通过 | M8.1 |
 | M8.3 | 内容工坊 UI（主区域独立页 + 右栏轻量入口；卡只读面板 → 卡编辑器 → 世界书编辑器 → 模组编辑器） | 3 tab + pack 选择 + `.trpgpack` 导入导出 + 校验结果 + 预览；**在 M8.1、M8.2 完成后开工** | M8.1、M8.2 |
 | M8.4 | GM 检索注入 + 模组数据消费 | 检索器 + token 预算、`revealedLoreIds`、本场可用内容提示段、`list_scene`、GM 秘密不泄露回归用例 | M8.1、M8.2 |
-| M8.5 | 分享与 DiceFrame 适配 | `.trpgpack` 分享/导入冲突处理、DiceFrame `schema_version: 2` 卡适配器、内容作者文档（含 zip 目录结构与用编码器打包说明） | M8.1、M8.3 |
+| M8.5 a ✅ 2026-11-16 · b ⬜ | 分享与 DiceFrame 适配 | `.trpgpack` 分享/导入冲突处理、DiceFrame `schema_version: 2` 卡适配器、内容作者文档（含 zip 目录结构与用编码器打包说明） | M8.1、M8.3 |
 
 **M8.1 交付摘要（✅ 完成 2026-11-16）**：pack schema（`pack.ts`：`ContentPack` / `validatePack()` / `migratePack()` / `assertContentPack()` + D12 兼容适配）、内置包迁移（`packs/core-guimuya.ts`：`CORE_GUIMUYA_PACK` / `CORE_PACKS`，1.0.0 = 1 模组 / 10 条世界书 / 4 卡）、zip 编解码（`zip.ts` + `pack-zip.ts`：零依赖、stored+deflate、上限/路径/CRC、时间戳固定可复现）、文件落盘（`pack-io.ts`）、CLI（`scripts/content-pack.mjs` + `pack-check.mjs` 兼容别名，根 `package.json` 加 `content:pack`）、引用完整性校验、`scene.lore` 数据 bug 修复全部落地；单测 **87 → 114**（M8.1 阶段，`pack.test.ts` 14 + `zip.test.ts` 13），`typecheck` 0 错误，`node scripts/build.mjs` 构建通过。
 **M8.2 交付摘要（✅ 完成 2026-11-16）**：host 内容权威 = `host/pack-registry.ts`（内置 `CORE_PACKS` + 数据目录 `<profile-data>/<profile>/dsh-trpg-table/content/packs/*.trpgpack`；统一走 `trpgpackToPack()` 校验；坏包跳过并记 warning、重复 `packId` 内置优先、目录整体读取失败保留上一份清单；`reload()` 可重扫）；协议 `room.create` 可选 `{packId, moduleId}`、`RoomView.{content, scenes}`、`content.list`（脱敏目录，无 token）与 `content.reload`（loopback + host token）；rooms 只存引用（`content: {packId, packVersion, moduleId, contentHash, packName?, moduleTitle?, scenes[]}`），旧快照按内置包补齐，包缺失/版本或 hash 漂移 → `degraded` + warning、GM 回退内置包，重扫后恢复原引用；host 去掉 `GUIMUYA_*` 直接依赖，GM 提示与 `trpg_*` 工具按房间解析模组/世界书；客户端大厅「内容包 / 模组」卡（`content.list` 失败静默降级内置包、不挡建房）、建房带内容引用、房间卡显示包/模组/版本 + degraded 红色告警、GM 控制台场景下拉优先 `room.scenes`（旧数据回退内置模组）。单测 **114 → 134**（protocol 2、rooms 9、registry 6、room-http 3），`typecheck` 0 错误，`node scripts/build.mjs` 构建通过；本机真机验收通过（大厅选择 / 建房后内容展示 / 场景下拉 3 场 / 关房回大厅，截图 `.tmp/verify3/`，gitignored）。
 **M8.1 已知限制**：不支持 zip64（包 ≥ 4 GiB 直接报错）与加密/分卷 zip；`assets/` 目前只校验 `icon` 引用与 `assets/**` 路径安全（其它素材引用待 M8.3 工坊与 M8.5 分享），孤立素材只 warning；内置包暂不带 `assets/`。
 **M8.2 已知限制**：没有客户端「导入包 / 重扫」UI——数据目录包需手工放入并重启 DSH（或走 `content.reload` RPC，工坊入口在 M8.3）；大厅内容目录失败只显示「目录不可用」并静默用内置包，不展示具体原因；`content.list` 不含封面/素材，包预览待 M8.3。
+
+**M9.6a 工坊页交付摘要（✅ 完成 2026-11-16，承接 M8.3）**：主区域 keyed 工坊页 **8 tab（概览 / 角色卡 / 世界书 / 模组 / 规则 只读 + 图标 / 地图 工作台 + 分享）**，左栏包列表、只读 tab 用列表 + 分页折叠；图标工作台三路径（本地导入 / AI SVG / AI 生图含物品库批量 ≤6）→ `pack.assetPut`；地图工作室（`map.generate` / `world.generate` 预览 → 写入 `rules.space.battleMaps/zones/world` → `pack.update`，无 AI 走 procedural）；分享 tab：导出下载 `.trpgpack`、导入冲突策略、内置包「复制为可编辑副本」；大厅新增房主本机恢复；真机截图 `.tmp/verify6/01–06`。**M8.3 剩余**：三个可编辑表单（角色卡 / 世界书 / 模组）与规则编辑器随 M9.6b。
+**M8.5a 交付摘要（✅ 完成 2026-11-16）**：`adaptDiceFrameCard` / `isDiceFrameCard` / `diceFrameToRulesCardJson`（DiceFrame `schema_version: 2` → `trpg.card/1` 与规则包）——属性/技能/资源/装备/叙事字段中英文别名映射、未映射 warning、`cardId` 稳定派生、个人世界书片段以 `personalLore` 另导；47 用例，**全量单测 957 → 1004**。**M8.5b 剩余**：卡库导入路径的 UI 接入、内容作者文档（zip 目录结构与用编码器打包说明）、另一台机器验收；分享 UI 已在 M9.6a 部分实现。
 
 - 顺序理由（D12）：先保证地基（M8.1/M8.2）再上 UI，避免 schema 返工；zip 编解码是 M8.1 的头等交付（导入、导出、CLI、内置包构建都依赖它），放在统一 schema 之后、UI 之前。`packages/content` 重构为「内置 pack 定义 + 兼容导出」，host 已走 pack registry（M8.2），不一次性大爆炸。**M7 玩家侧镜像可并行**：它改 client 镜像/会话事件中继，与内容模型文件面基本不重叠；交叉点是 GM 提示组装（M8.4）与玩家投影，合入时一起回归。
 
