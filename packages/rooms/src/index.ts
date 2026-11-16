@@ -36,6 +36,7 @@ import {
   validateCombatUseAction,
   validateCombatView,
   validateCreateRoom,
+  validateCharacterAssetRefs,
   validateJoin,
   validateRoll,
   validateSay,
@@ -46,6 +47,7 @@ import {
   validateWorldMapGet,
   type ActionOutcomeView,
   type AlertPayload,
+  type CharacterAssetRefInput,
   type CombatEndResult,
   type CombatEndTurnResult,
   type CombatMoveResult,
@@ -53,6 +55,7 @@ import {
   type CombatStartResult,
   type CombatUpdatePayload,
   type CombatUseActionResult,
+  type CombatView,
   type CombatViewResult,
   type CreateRoomParams,
   type CreateRoomResult,
@@ -66,6 +69,7 @@ import {
   type LockParams,
   type NarrationPayload,
   type PlayerId,
+  type RoomAssetView,
   type RoomListResult,
   type RoomPhase,
   type RoomRulesView,
@@ -82,7 +86,9 @@ import {
   type Seq,
   type SheetCommandResult,
   type SheetGetResult,
+  type SheetIdentityMediaView,
   type SheetUpdatePayload,
+  type SheetView,
   type WorldMapGetResult,
 } from '@dsh-trpg/protocol';
 import type { ActorView, EquipmentInstanceDef, RuleRuntime, RuntimeEvent } from '@dsh-trpg/rules';
@@ -248,6 +254,8 @@ export interface RoomSnapshot {
       character?: CharacterCard;
       /** 座位上的规则卡原始数据（M9.4；旧卡或新卡实例）。 */
       ruleCard?: unknown;
+      /** 落座时上传的展示资产引用（M9.5d；只存引用/URL，不复制字节）。 */
+      characterAssets?: CharacterAssetRefInput[];
       joinedAt: number;
     }>;
     events: GameEvent[];
@@ -269,6 +277,8 @@ interface PlayerRecord {
    * 房间层只用 `character` 做旧视图/GM 提示；规则运行时按 `ruleCard` 实例化。
    */
   ruleCard?: unknown;
+  /** 落座时上传的展示资产引用（M9.5d；`assets.upload` 返回的 `{kind,variant?,sha256,url}`）。 */
+  characterAssets?: CharacterAssetRefInput[];
   joinedAt: number;
   connections: number;
 }
@@ -575,9 +585,13 @@ export class RoomService {
 
   seat(principal: Principal, rawParams: unknown): RoomStateResult {
     const room = this.requireRoom(principal.roomId);
-    const params = rawParams as { characterCard?: unknown };
+    const params = rawParams as { characterCard?: unknown; characterAssets?: unknown };
     if (!params || params.characterCard === undefined) throw new RoomError('bad-request', '缺少角色卡');
     const seated = this.parseSeatCard(params.characterCard);
+    // M9.5d：落座可带展示资产引用（只存引用/URL，不复制字节；无效引用按 bad-request 拒绝）。
+    const assetRefs = params.characterAssets !== undefined
+      ? this.parse(validateCharacterAssetRefs(params.characterAssets))
+      : undefined;
     const cardName = seated.character?.identity.name
       ?? readRuleCardName(seated.ruleCard)
       ?? '未命名角色';
@@ -587,6 +601,7 @@ export class RoomService {
       if (seated.character !== undefined) player.character = seated.character;
       player.ruleCard = seated.ruleCard;
       player.seat = 'player';
+      this.applyCharacterAssets(player, assetRefs);
       this.attachPlayerToRules(room, player);
       this.emit(room, 'alert', 'all', {
         level: 'info',
@@ -604,6 +619,7 @@ export class RoomService {
         joinedAt: this.now(),
         connections: 1,
       };
+      this.applyCharacterAssets(hostPlayer, assetRefs);
       room.players.set('host', hostPlayer);
       this.attachPlayerToRules(room, hostPlayer);
       this.emit(room, 'alert', 'all', {
@@ -613,6 +629,19 @@ export class RoomService {
     }
     this.emit(room, 'room', 'all', this.publicView(room));
     return { room: this.viewFor(room, principal) };
+  }
+
+  /**
+   * 写入/清除座位的展示资产引用（M9.5d）。
+   * `undefined` = 本次落座没带资产，保留既有引用（断线重连不重复上传）；空数组 = 显式清空。
+   */
+  private applyCharacterAssets(player: PlayerRecord, refs: CharacterAssetRefInput[] | undefined): void {
+    if (refs === undefined) return;
+    if (refs.length === 0) {
+      delete player.characterAssets;
+      return;
+    }
+    player.characterAssets = refs.map((ref) => ({ ...ref }));
   }
 
   roll(principal: Principal, rawParams: unknown): RollResult {
@@ -934,7 +963,8 @@ export class RoomService {
     const room = this.requireRoom(principal.roomId);
     const rr = this.requireRulesRoom(room);
     const target = this.resolveTargetActor(principal, rr, params);
-    return buildSheetResult(this.viewOptionsFor(rr), target.actorId);
+    const result = buildSheetResult(this.viewOptionsFor(rr), target.actorId);
+    return { ...result, sheet: this.sheetWithMedia(room, result.sheet) };
   }
 
   /** `sheet.equip`：装备物品到指定槽位（校验 accepts/件数；换装后重算投影）。 */
@@ -951,7 +981,7 @@ export class RoomService {
     if (plan.fromBag) rr.removeFromBag(target.actorId, params.instanceId);
     const options = this.viewOptionsFor(rr);
     return {
-      sheet: buildSheetView(options, target.actorId),
+      sheet: this.sheetWithMedia(room, buildSheetView(options, target.actorId)),
       inventory: buildInventoryView(options, target.actorId),
       events: ['equip/change'],
     };
@@ -971,7 +1001,7 @@ export class RoomService {
     rr.addToBag(target.actorId, plan.removed);
     const options = this.viewOptionsFor(rr);
     return {
-      sheet: buildSheetView(options, target.actorId),
+      sheet: this.sheetWithMedia(room, buildSheetView(options, target.actorId)),
       inventory: buildInventoryView(options, target.actorId),
       events: ['equip/change'],
     };
@@ -1021,7 +1051,7 @@ export class RoomService {
     }
     const options = this.viewOptionsFor(rr);
     return {
-      sheet: buildSheetView(options, target.actorId),
+      sheet: this.sheetWithMedia(room, buildSheetView(options, target.actorId)),
       inventory: buildInventoryView(options, target.actorId),
       events: [...used.events],
       item: {
@@ -1039,7 +1069,7 @@ export class RoomService {
   combatView(principal: Principal): CombatViewResult {
     const room = this.requireRoom(principal.roomId);
     const rr = this.requireRulesRoom(room);
-    return { combat: buildCombatView(this.viewOptionsFor(rr)) };
+    return { combat: this.combatWithMedia(room, buildCombatView(this.viewOptionsFor(rr))) };
   }
 
   /** `combat.start`：开战（仅房主/GM）；可带 `enemies` 临时加入敌对行动者。 */
@@ -1064,7 +1094,8 @@ export class RoomService {
         ...(params.reason !== undefined ? { reason: params.reason } : {}),
       });
       if (!started.ok) throw roomErrorFromRule(started.error);
-      return buildCombatStartResult(this.viewOptionsFor(rr), started.rolls);
+      const result = buildCombatStartResult(this.viewOptionsFor(rr), started.rolls);
+      return { ...result, combat: this.combatWithMedia(room, result.combat) };
     } catch (error) {
       // 开战失败：撤掉本次临时加入的敌人，保持运行时干净（避免半截战斗）
       for (const actorId of addedActorIds) {
@@ -1093,9 +1124,9 @@ export class RoomService {
     if (!result.ok) throw roomErrorFromRule(result.error);
     const options = this.viewOptionsFor(rr);
     return {
-      combat: buildCombatView(options),
+      combat: this.combatWithMedia(room, buildCombatView(options)),
       action: this.actionOutcomeView(result),
-      sheet: buildSheetView(options, target.actorId),
+      sheet: this.sheetWithMedia(room, buildSheetView(options, target.actorId)),
     };
   }
 
@@ -1114,7 +1145,8 @@ export class RoomService {
       ...(params.via !== undefined ? { via: params.via } : {}),
     });
     if (!result.ok) throw roomErrorFromRule(result.error);
-    return buildCombatMoveResult(this.viewOptionsFor(rr), result);
+    const moved = buildCombatMoveResult(this.viewOptionsFor(rr), result);
+    return { ...moved, combat: this.combatWithMedia(room, moved.combat) };
   }
 
   /** `combat.endTurn`：结束当前（或自己）的回合；跨轮自动走回合边界/回合上限。 */
@@ -1138,7 +1170,7 @@ export class RoomService {
     }
     const ended = rr.runtime.endTurn(actorId !== undefined ? { actorId } : {});
     if (!ended.ok) throw roomErrorFromRule(ended.error);
-    return { combat: buildCombatView(this.viewOptionsFor(rr)) };
+    return { combat: this.combatWithMedia(room, buildCombatView(this.viewOptionsFor(rr))) };
   }
 
   /** `combat.rollCheck`：检定（属性/技能/豁免；骰面与 trace 由运行时给出）。 */
@@ -1170,7 +1202,7 @@ export class RoomService {
     const rr = this.requireRulesRoom(room);
     const ended = rr.runtime.endCombat({ ...(params.reason !== undefined ? { reason: params.reason } : {}) });
     if (!ended.ok) throw roomErrorFromRule(ended.error);
-    return { combat: buildCombatView(this.viewOptionsFor(rr)) };
+    return { combat: this.combatWithMedia(room, buildCombatView(this.viewOptionsFor(rr))) };
   }
 
   /** `worldmap.get`：世界地图投影（底图/zone 热点/连线/队伍位置）。 */
@@ -1532,7 +1564,7 @@ export class RoomService {
     const actorId = rr.actorIdOfPlayer(playerId);
     if (actorId === undefined) return;
     try {
-      const sheet = buildSheetView(this.viewOptionsFor(rr), actorId);
+      const sheet = this.sheetWithMedia(room, buildSheetView(this.viewOptionsFor(rr), actorId));
       const payload: SheetUpdatePayload = {
         playerId,
         actorId,
@@ -1549,7 +1581,7 @@ export class RoomService {
   private emitCombatUpdate(room: RoomRecord, rr: RoomRulesRoom, cause: string, runtimeSeq: number): void {
     try {
       const payload: CombatUpdatePayload = {
-        combat: buildCombatView(this.viewOptionsFor(rr)),
+        combat: this.combatWithMedia(room, buildCombatView(this.viewOptionsFor(rr))),
         causes: [cause],
         runtimeSeq,
       };
@@ -1708,6 +1740,9 @@ export class RoomService {
           seat: player.seat,
           ...(player.character ? { character: player.character } : {}),
           ...(player.ruleCard !== undefined ? { ruleCard: player.ruleCard } : {}),
+          ...(player.characterAssets !== undefined && player.characterAssets.length > 0
+            ? { characterAssets: player.characterAssets.map((ref) => ({ ...ref })) }
+            : {}),
           joinedAt: player.joinedAt,
         })),
         events: room.events.map((event) => ({ ...event })),
@@ -1722,6 +1757,8 @@ export class RoomService {
     if (!source || typeof source.id !== 'string' || this.rooms.has(source.id)) return false;
     const players = new Map<PlayerId, PlayerRecord>();
     for (const player of source.players ?? []) {
+      // 快照里的展示资产引用（M9.5d）：续团保留；坏引用只丢弃、不让恢复失败。
+      const restoredAssets = validateCharacterAssetRefs(player.characterAssets);
       players.set(player.id, {
         id: player.id,
         name: player.name,
@@ -1729,6 +1766,7 @@ export class RoomService {
         seat: player.seat,
         ...(player.character ? { character: player.character } : {}),
         ...(player.ruleCard !== undefined ? { ruleCard: player.ruleCard } : {}),
+        ...(restoredAssets.ok && (restoredAssets.value?.length ?? 0) > 0 ? { characterAssets: restoredAssets.value } : {}),
         joinedAt: player.joinedAt,
         connections: 0,
       });
@@ -1946,6 +1984,7 @@ export class RoomService {
   private publicView(room: RoomRecord): RoomView {
     const content = room.content;
     const rules = this.rulesViewFor(room.id);
+    const assets = this.roomAssetViews(room);
     return {
       roomId: room.id,
       title: room.title,
@@ -1955,6 +1994,7 @@ export class RoomService {
       locked: room.locked,
       ...(room.scene ? { scene: room.scene } : {}),
       ...(rules !== undefined ? { rules: { ...rules } } : {}),
+      ...(assets.length > 0 ? { assets } : {}),
       ...(content
         ? {
             content: {
@@ -1984,6 +2024,76 @@ export class RoomService {
     const view = this.publicView(room);
     if (principal.kind === 'host') view.inviteCode = room.inviteCode;
     return view;
+  }
+
+  // -------------------------------------------------------------------------
+  // M9.5d 玩家展示资产（只存引用/URL；字节在 host 的 room-assets 区）
+  // -------------------------------------------------------------------------
+
+  /** 房间资产列表：已落座玩家上传的展示资产（按 sha256 去重；队友可见）。 */
+  private roomAssetViews(room: RoomRecord): RoomAssetView[] {
+    const seen = new Set<string>();
+    const views: RoomAssetView[] = [];
+    for (const player of room.players.values()) {
+      for (const ref of player.characterAssets ?? []) {
+        if (ref.url === undefined || seen.has(ref.sha256)) continue;
+        seen.add(ref.sha256);
+        views.push({
+          assetId: ref.sha256,
+          kind: ref.kind,
+          ...(ref.variant !== undefined ? { variant: ref.variant } : {}),
+          sha256: ref.sha256,
+          url: ref.url,
+          ownerId: player.id,
+        });
+      }
+    }
+    return views;
+  }
+
+  /** 某玩家卡面的媒体投影（头像/立绘/变体/帧表；没有资产返回 undefined）。 */
+  private mediaOfPlayer(room: RoomRecord, playerId: PlayerId | undefined): SheetIdentityMediaView | undefined {
+    if (playerId === undefined) return undefined;
+    const refs = room.players.get(playerId)?.characterAssets;
+    if (refs === undefined || refs.length === 0) return undefined;
+    const media: SheetIdentityMediaView = {};
+    const variants: Array<{ variant: string; url: string }> = [];
+    for (const ref of refs) {
+      if (ref.url === undefined) continue;
+      if (ref.kind === 'avatar') media.avatarUrl = ref.url;
+      else if (ref.kind === 'portrait') media.portraitUrl = ref.url;
+      else if (ref.kind === 'portraitVariant' && ref.variant !== undefined) variants.push({ variant: ref.variant, url: ref.url });
+      else if (ref.kind === 'spriteSheet') {
+        media.spriteSheet = {
+          url: ref.url,
+          rows: ref.meta?.rows ?? 4,
+          cols: ref.meta?.cols ?? 4,
+          frameSize: ref.meta?.frameSize ?? 128,
+        };
+      }
+    }
+    if (variants.length > 0) media.portraitVariants = variants;
+    return Object.keys(media).length > 0 ? media : undefined;
+  }
+
+  /** 给卡面投影补上玩家媒体字段（不改变规则数值；同一房间内按 playerId 查）。 */
+  private sheetWithMedia(room: RoomRecord, sheet: SheetView): SheetView {
+    const media = this.mediaOfPlayer(room, sheet.playerId);
+    if (media === undefined) return sheet;
+    return { ...sheet, identity: { ...sheet.identity, ...media } };
+  }
+
+  /** 给战棋 token 补头像 URL（玩家落座上传过头像才有；敌人/中立没有）。 */
+  private combatWithMedia(room: RoomRecord, combat: CombatView): CombatView {
+    if (combat.tokens.length === 0) return combat;
+    let changed = false;
+    const tokens = combat.tokens.map((token) => {
+      const media = token.playerId !== undefined ? this.mediaOfPlayer(room, token.playerId) : undefined;
+      if (media?.avatarUrl === undefined) return token;
+      changed = true;
+      return { ...token, avatarUrl: media.avatarUrl };
+    });
+    return changed ? { ...combat, tokens } : combat;
   }
 
   private emit<K extends GameEvent['kind'], P>(room: RoomRecord, kind: K, to: EventTarget, payload: P): GameEvent<K, P> {

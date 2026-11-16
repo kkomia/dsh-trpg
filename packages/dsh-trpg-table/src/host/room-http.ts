@@ -7,27 +7,36 @@
  * - POST /trpg/rpc                  JSON-RPC 风格调用（token 认证）
  * - GET  /trpg/events?token&lastSeq SSE 事件流（断线重连补发）
  * - GET  /trpg/assets/<packId>/<assetPath>  host 只读资产（**无 token**，png/svg + ETag + immutable）
+ * - GET  /trpg/room-assets/<roomId>/<sha256>.<ext>  房间资产（**无 token**，落座上传的展示图）
  *
  * 安全：room.create / host.session 只接受 loopback 请求（房主就坐在本机）；
  * 其余操作靠 token → principal 解析，客户端不能自称身份。
  * 资产端点是无鉴权只读：路径必须严格受限（无 `..` / 绝对路径 / 控制字符），只提供 png/svg，
- * 字节来自内容包注册表缓存（内容包安装 = 受信代码，见 RULES-MODEL §10）。
+ * 字节来自内容包注册表缓存（内容包安装 = 受信代码，见 RULES-MODEL §10）；
+ * 房间资产端点只提供本房间内容寻址文件名（sha256.<ext>），字节来自 RoomAssetStore。
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { RoomError, RoomService, type Principal } from '@dsh-trpg/rooms';
 import {
   encodeSseEvent,
   PROTOCOL_VERSION,
+  validateAssetsGenerate,
+  validateAssetsUpload,
   validateBindSession,
+  validateCharacterAssetRefs,
   validateGmAward,
   validateGmNarrate,
   validateGmScene,
   validateGmSecret,
   validateRpcRequest,
+  type AssetsGenerateResult,
+  type AssetsUploadResult,
   type CatalogPack,
+  type CharacterAssetRefInput,
   type RpcResponse,
   type RpcRequest,
 } from '@dsh-trpg/protocol';
+import type { MediaAssetsService, RoomAssetsStore } from './media/index.ts';
 
 /** 只读资产的解析结果（host 注入，一般来自 `PackRegistry.assetOf`）。 */
 export interface RoomAsset {
@@ -52,6 +61,16 @@ export interface RoomHttpOptions {
    * `assetPath` 是去掉 `assets/` 前缀的相对路径。未注入时资产端点一律 404。
    */
   assetOf?: (packId: string, assetPath: string) => RoomAsset | undefined;
+  /**
+   * 生图服务（M9.5d `assets.generate`）：未注入时返回可读中文错误（`conflict`），
+   * 客户端据此引导玩家配置自备的 OpenAI 兼容接口。
+   */
+  media?: MediaAssetsService;
+  /**
+   * 房间资产存储（M9.5d `assets.upload` + `GET /trpg/room-assets/...` + 落座引用规范化）：
+   * 未注入时上传返回可读中文错误，资产端点一律 404。
+   */
+  roomAssets?: RoomAssetsStore;
 }
 
 export interface RoomHttpServer {
@@ -89,6 +108,12 @@ async function readJsonBody(request: IncomingMessage, limitBytes = 256 * 1024): 
   if (size === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
+
+/**
+ * RPC 请求体上限：`assets.upload` 允许 8 MiB 原始字节（base64 后约 10.7 MiB），
+ * 这里给 12 MiB；其余方法继续在参数校验层限制（超限给中文错误）。
+ */
+const RPC_MAX_BODY_BYTES = 12 * 1024 * 1024;
 
 function isLoopback(request: IncomingMessage): boolean {
   const address = request.socket.remoteAddress ?? '';
@@ -158,6 +183,74 @@ function etagMatches(ifNoneMatch: string, sha256: string): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// M9.5d 房间资产端点（UI-CONTRACT §4.1/§4.5）
+// ---------------------------------------------------------------------------
+
+const ROOM_ASSET_URL_PREFIX = '/trpg/room-assets/';
+/** 房间 id：host 生成的 UUID，只允许 URL 安全字符（路径安全第一道闸）。 */
+const ROOM_ASSET_ROOM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+/** 资产文件名：`<sha256>.<png|svg>`（内容寻址；不接受其他文件名/子目录）。 */
+const ROOM_ASSET_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+type RoomAssetParseResult =
+  | { ok: true; roomId: string; sha256: string; ext: 'png' | 'svg' }
+  | { ok: false; status: 403 | 404; message: string };
+
+/** 解析 `/trpg/room-assets/<roomId>/<sha256>.<ext>`：拒绝穿越/反斜杠/控制字符/多余路径段。 */
+function parseRoomAssetRequestPath(rawPath: string): RoomAssetParseResult {
+  if (rawPath.length === 0) {
+    return { ok: false, status: 404, message: '缺少房间资产路径（应为 GET /trpg/room-assets/<roomId>/<sha256>.<ext>）' };
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawPath);
+  } catch {
+    return { ok: false, status: 403, message: '房间资产路径不是合法的 URL 编码' };
+  }
+  if (decoded.includes('\\')) return { ok: false, status: 403, message: '房间资产路径不允许使用反斜杠' };
+  if (/[\u0000-\u001f\u007f]/.test(decoded)) return { ok: false, status: 403, message: '房间资产路径包含控制字符，已拒绝' };
+  if (decoded.startsWith('/')) return { ok: false, status: 403, message: '房间资产路径必须是相对路径（不能以 / 开头）' };
+  const segments = decoded.split('/');
+  if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) {
+    return { ok: false, status: 403, message: '房间资产路径包含非法路径段（空段 / . / ..），已拒绝' };
+  }
+  if (segments.length !== 2) return { ok: false, status: 403, message: '房间资产路径必须形如 <roomId>/<sha256>.<ext>' };
+  const [roomId = '', filename = ''] = segments;
+  if (!ROOM_ASSET_ROOM_ID_PATTERN.test(roomId)) {
+    return { ok: false, status: 403, message: `房间 id 非法：${JSON.stringify(roomId)}` };
+  }
+  const dot = filename.lastIndexOf('.');
+  const sha256 = dot > 0 ? filename.slice(0, dot) : '';
+  const ext = dot > 0 ? filename.slice(dot + 1).toLowerCase() : '';
+  if (!ROOM_ASSET_SHA256_PATTERN.test(sha256)) {
+    return { ok: false, status: 403, message: '房间资产文件名必须是 64 位小写十六进制 sha256（形如 <sha256>.png）' };
+  }
+  if (ext !== 'png' && ext !== 'svg') {
+    return { ok: false, status: 404, message: `房间资产类型不支持（v1 只提供 png / svg）：${filename}` };
+  }
+  return { ok: true, roomId, sha256, ext };
+}
+
+/** RPC 参数里的展示资产引用：先过协议校验，再由存储层换成 host 权威 URL（未知 sha 丢弃）。 */
+function canonicalSeatParams(
+  rawParams: unknown,
+  roomId: string,
+  store: RoomAssetsStore | undefined,
+): unknown {
+  if (rawParams === null || typeof rawParams !== 'object' || Array.isArray(rawParams)) return rawParams;
+  const params = rawParams as { characterAssets?: unknown };
+  if (params.characterAssets === undefined) return rawParams;
+  const parsed = validateCharacterAssetRefs(params.characterAssets);
+  if (!parsed.ok || parsed.value === undefined) {
+    throw new RoomError('bad-request', parsed.error ?? 'characterAssets 非法');
+  }
+  const refs: CharacterAssetRefInput[] = store !== undefined
+    ? store.canonicalizeRefs(roomId, parsed.value)
+    : parsed.value;
+  return { ...params, characterAssets: refs };
+}
+
 export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
   const log = options.log ?? (() => {});
   const service = options.service ?? new RoomService();
@@ -211,7 +304,8 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
       case 'room.state':
         return service.state(principal);
       case 'room.seat':
-        return service.seat(principal, rpc.params);
+        // M9.5d：落座资产引用先过协议校验，再由 RoomAssetStore 换成 host 权威 URL（未知 sha 丢弃，不阻断落座）。
+        return service.seat(principal, canonicalSeatParams(rpc.params, principal.roomId, options.roomAssets));
       case 'room.roll':
         return service.roll(principal, rpc.params);
       case 'room.say':
@@ -285,6 +379,32 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
         return service.endCombat(principal, rpc.params);
       case 'worldmap.get':
         return service.worldMap(principal);
+      // ---- M9.5d 玩家角色资产（玩家 + 房主；token → 房间成员身份） ----
+      case 'assets.generate': {
+        const params = take(validateAssetsGenerate(rpc.params));
+        if (options.media === undefined) {
+          throw new RoomError(
+            'conflict',
+            '生图服务未启用：房主可在 host 环境变量里配置 DSH_TRPG_OPENAI_BASE_URL / DSH_TRPG_OPENAI_API_KEY / '
+              + 'DSH_TRPG_OPENAI_IMAGE_MODEL，或改用玩家自备的 OpenAI 兼容接口',
+          );
+        }
+        const ownerId = principal.kind === 'player' ? principal.playerId : 'host';
+        const result: AssetsGenerateResult = await options.media.generate(
+          { roomId: principal.roomId, playerId: ownerId },
+          params,
+        );
+        return result;
+      }
+      case 'assets.upload': {
+        const params = take(validateAssetsUpload(rpc.params));
+        if (options.roomAssets === undefined) {
+          throw new RoomError('conflict', '房间资产存储未启用（host 未配置文件目录）：暂时不能上传展示资产');
+        }
+        const ownerId = principal.kind === 'player' ? principal.playerId : 'host';
+        const result: AssetsUploadResult = options.roomAssets.store(principal.roomId, ownerId, params.assets);
+        return result;
+      }
       default:
         throw new RoomError('bad-request', `未知方法：${rpc.method}`);
     }
@@ -293,7 +413,7 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
   async function handleRpc(request: IncomingMessage, response: ServerResponse): Promise<void> {
     let body: unknown;
     try {
-      body = await readJsonBody(request);
+      body = await readJsonBody(request, RPC_MAX_BODY_BYTES);
     } catch (error) {
       sendJson(response, 400, {
         ok: false,
@@ -435,6 +555,63 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
     response.end(Buffer.from(asset.bytes));
   }
 
+  /**
+   * 房间资产：无 token、只允许内容寻址文件名、immutable + ETag、If-None-Match → 304。
+   * 路径非法/越权 → 403；房间/资产不存在或类型不支持 → 404（全中文错误）。
+   */
+  function handleRoomAsset(request: IncomingMessage, response: ServerResponse, url: URL): void {
+    const parsed = parseRoomAssetRequestPath(url.pathname.slice(ROOM_ASSET_URL_PREFIX.length));
+    if (!parsed.ok) {
+      sendJson(response, parsed.status, {
+        ok: false,
+        error: { code: parsed.status === 403 ? 'forbidden' : 'not-found', message: parsed.message },
+      });
+      return;
+    }
+    const store = options.roomAssets;
+    if (store === undefined) {
+      sendJson(response, 404, {
+        ok: false,
+        error: { code: 'not-found', message: '房间资产存储未启用' },
+      });
+      return;
+    }
+    let asset: ReturnType<RoomAssetsStore['read']>;
+    try {
+      asset = store.read(parsed.roomId, parsed.sha256, parsed.ext);
+    } catch (error) {
+      log(`room-asset ${parsed.roomId}/${parsed.sha256} failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+      sendJson(response, 500, { ok: false, error: { code: 'internal', message: '读取房间资产失败' } });
+      return;
+    }
+    if (asset === undefined) {
+      sendJson(response, 404, {
+        ok: false,
+        error: { code: 'not-found', message: `房间资产不存在：${parsed.roomId}/${parsed.sha256}.${parsed.ext}` },
+      });
+      return;
+    }
+    const etag = `"${parsed.sha256.slice(0, 16)}"`;
+    const headers = {
+      ...CORS_HEADERS,
+      etag,
+      'cache-control': ASSET_CACHE_CONTROL,
+      'x-content-type-options': 'nosniff',
+    };
+    const ifNoneMatch = request.headers['if-none-match'];
+    if (typeof ifNoneMatch === 'string' && etagMatches(ifNoneMatch, parsed.sha256)) {
+      response.writeHead(304, headers);
+      response.end();
+      return;
+    }
+    response.writeHead(200, {
+      ...headers,
+      'content-type': asset.contentType,
+      'content-length': asset.bytes.byteLength,
+    });
+    response.end(Buffer.from(asset.bytes));
+  }
+
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (request.method === 'OPTIONS') {
@@ -458,6 +635,10 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
     }
     if (request.method === 'GET' && url.pathname === '/trpg/events') {
       handleSse(request, response, url);
+      return;
+    }
+    if (request.method === 'GET' && url.pathname.startsWith(ROOM_ASSET_URL_PREFIX)) {
+      handleRoomAsset(request, response, url);
       return;
     }
     if (request.method === 'GET' && url.pathname.startsWith(ASSET_URL_PREFIX)) {

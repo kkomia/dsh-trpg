@@ -11,6 +11,7 @@ import { RoomError, RoomService } from '@dsh-trpg/rooms';
 import { createRoomHttpServer, type RoomHttpServer } from './room-http.ts';
 import { RoomPersistence } from './persistence.ts';
 import { PackRegistry } from './pack-registry.ts';
+import { MediaService, RoomAssetStore } from './media/index.ts';
 import { GmManager, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike, type GmContentResolver } from './gm/runtime.ts';
 import { SubagentGmManager, type SubagentsLike } from './gm/subagent-gm.ts';
 import { resetRevealedLore } from './gm/lore-reveal.ts';
@@ -118,6 +119,14 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   let restoredRooms: string[] = [];
   /** 内容包注册表：host 是内容权威，房间只按 {packId, moduleId} 引用。 */
   const registry = new PackRegistry({ log });
+  /**
+   * M9.5d 生图服务（`assets.generate`）：配置来自环境变量，没配置时给可读中文错误；
+   * 开发/离线验证可用 `DSH_TRPG_MEDIA_FAKE=1`（等同 `--fake`）。
+   */
+  const media = new MediaService({ log });
+  if (media.configured()) log(`media service ready (provider=${media.providerName})`);
+  /** M9.5d 房间资产存储（`assets.upload` + `GET /trpg/room-assets/...`，与房间存档同父目录）。 */
+  const roomAssets = new RoomAssetStore({ log });
   try {
     const loaded = registry.reload();
     log(`content packs ready: ${loaded.packs} pack(s)${loaded.warnings.length > 0 ? `, ${loaded.warnings.length} warning(s)` : ''}`);
@@ -249,6 +258,9 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       contentCatalog: () => registry.publicCatalog(),
       // 只读资产端点：内容包 zip 里的 assets/** 由注册表按需提供（M9.5b）。
       assetOf: (packId, assetPath) => registry.assetOf(packId, assetPath),
+      // M9.5d：玩家展示资产——生图（预览候选）与房间资产区（落座上传/无 token 只读）。
+      media,
+      roomAssets,
       contentReload: () => {
         const reloaded = registry.reload();
         let recoveredRooms = 0;

@@ -62,6 +62,11 @@ export interface RoomView {
    * 此时 sheet/combat/worldmap 命令返回中文错误，客户端隐藏规则相关面板。
    */
   rules?: RoomRulesView;
+  /**
+   * 房间资产列表（M9.5d）：已落座玩家上传的展示资产（头像/立绘/变体/帧表/图标），
+   * 按 sha256 去重、只含引用与 URL，不含字节。缺省 = 本房间还没有展示资产。
+   */
+  assets?: RoomAssetView[];
   players: RoomPlayerView[];
   createdAt: number;
 }
@@ -224,7 +229,10 @@ export type RpcMethod =
   | 'combat.endTurn'
   | 'combat.rollCheck'
   | 'combat.end'
-  | 'worldmap.get';
+  | 'worldmap.get'
+  // ---- M9.5d 玩家角色资产（生图 / 落座上传；UI-CONTRACT §4.4/§4.5/§7.2/§8） ----
+  | 'assets.generate'
+  | 'assets.upload';
 
 export interface CreateRoomParams {
   title: string;
@@ -267,6 +275,174 @@ export interface JoinRoomResult {
 
 export interface SeatParams {
   characterCard: unknown;
+  /**
+   * 落座时随卡提交的展示资产**引用**（M9.5d）：`assets.upload` 先上传字节，
+   * 这里只传 `{kind, variant?, sha256, url?}`；host 不复制字节、只把引用写进房间视图/快照。
+   * 未上传/上传失败的引用会被 host 丢弃（落座不阻断，客户端用几何徽记兜底）。
+   */
+  characterAssets?: CharacterAssetRefInput[];
+}
+
+// ---------------------------------------------------------------------------
+// M9.5d 玩家角色资产与生图（UI-CONTRACT §4.4/§4.5/§7.2/§8）
+//
+// 口径：私卡资产默认在客户端 IndexedDB；落座只上传「展示用」白名单资产（≤8 文件 / ≤8 MiB），
+// host 落盘到房间资产区（内容寻址、sha256 去重、immutable），房间关闭不删（续团保留）。
+// 生成走 host 的 OpenAI 兼容服务（或玩家自备接口的 host 侧代发），候选先预览确认再上传。
+// ---------------------------------------------------------------------------
+
+/** 生图请求的目标类型（玩家头像/立绘/图标/帧表）。 */
+export type MediaAssetKind = 'avatar' | 'portrait' | 'icon' | 'sprite';
+
+/** 生图风格档：像素 32 图标 / 扁平 2D / AI SVG 图标。 */
+export type MediaAssetStyle = 'pixel-32' | 'game-2d' | 'svg';
+
+export const MEDIA_ASSET_KINDS: readonly MediaAssetKind[] = ['avatar', 'portrait', 'icon', 'sprite'];
+export const MEDIA_ASSET_STYLES: readonly MediaAssetStyle[] = ['pixel-32', 'game-2d', 'svg'];
+
+/** `assets.generate` 参数（玩家 + 房主可用；每玩家限流）。 */
+export interface AssetsGenerateParams {
+  kind: MediaAssetKind;
+  style: MediaAssetStyle;
+  /** 用户提示词（主体/风格/颜色/构图要求）。 */
+  prompt: string;
+  /** 主体名（角色名/图标主题），参与提示词模板的 `{{name}}`。 */
+  subject?: string;
+  /** 复现种子（后端支持时透传并回写）。 */
+  seed?: number;
+  /** 候选数量 1–4（缺省 1）。 */
+  count?: number;
+}
+
+/** 单个生成候选（归一化后的标准档字节，base64；确认后由客户端走 `assets.upload`）。 */
+export interface AssetsGenerateCandidate {
+  /** 归一化后图片的 base64（PNG 或 SVG 文本字节）。 */
+  b64: string;
+  format: 'png' | 'svg';
+  /** 标准档宽高（avatar 256 / portrait 768×1024 / icon 128·32 / sprite 帧表 512×512）。 */
+  width: number;
+  height: number;
+  /** 归一化后字节的 sha256（内容寻址；与上传去重同口径）。 */
+  sha256: string;
+  /** 实际使用的完整提示词（可复现/生成历史）。 */
+  prompt: string;
+  seed?: number;
+  style: MediaAssetStyle;
+}
+
+export interface AssetsGenerateResult {
+  candidates: AssetsGenerateCandidate[];
+  /** 服务来源（如 `openai-compat:<imageModel>` / `fake`）；缺省 = 未标注。 */
+  provider?: string;
+}
+
+/** 落座上传的展示资产类型（白名单，UI-CONTRACT §4.5；私密字段永不上传）。 */
+export type CharacterAssetKind = 'avatar' | 'portrait' | 'portraitVariant' | 'spriteSheet' | 'icon';
+
+export const CHARACTER_ASSET_KINDS: readonly CharacterAssetKind[] = [
+  'avatar',
+  'portrait',
+  'portraitVariant',
+  'spriteSheet',
+  'icon',
+];
+
+/** 落座上传限额（UI-CONTRACT §4.5：单卡 ≤8 个文件 / ≤8 MiB）。 */
+export const ROOM_ASSET_LIMITS = {
+  /** 单次上传（= 单卡展示资产）文件数上限。 */
+  maxFiles: 8,
+  /** 单次上传总字节上限 8 MiB。 */
+  maxBytes: 8 * 1024 * 1024,
+  /** 单文件 URL 长度上限（防注入）。 */
+  maxUrlLength: 512,
+  /** 变体名长度上限。 */
+  maxVariantLength: 32,
+} as const;
+
+/** 帧表元数据（帧表必须给，用于切分校验与展示）。 */
+export interface CharacterAssetMeta {
+  /** 行数 1–8。 */
+  rows?: number;
+  /** 列数 1–8。 */
+  cols?: number;
+  /** 每格边长（px，16–256）。 */
+  frameSize?: number;
+}
+
+export interface CharacterAssetUploadItem {
+  kind: CharacterAssetKind;
+  /** 变体名（`portraitVariant` 必填；建议固定集 idle/smile/sad/angry/attack）。 */
+  variant?: string;
+  /** 图片字节的 base64（只收 PNG/SVG）。 */
+  b64: string;
+  /** 帧表元数据（`spriteSheet` 必填）。 */
+  meta?: CharacterAssetMeta;
+}
+
+/** `assets.upload` 参数（房间成员；token → 玩家）。 */
+export interface AssetsUploadParams {
+  assets: CharacterAssetUploadItem[];
+}
+
+/** 上传成功的资产引用（host 已落盘；后续 `seat` 只回传 `{kind, variant?, sha256, url}`）。 */
+export interface AssetsUploadedAsset {
+  /** 内容寻址 id（= sha256，同内容全房间唯一）。 */
+  assetId: string;
+  kind: CharacterAssetKind;
+  variant?: string;
+  sha256: string;
+  /** 无 token 只读 URL：`/trpg/room-assets/<roomId>/<sha256>.<ext>`。 */
+  url: string;
+  width: number;
+  height: number;
+  bytes: number;
+}
+
+export interface AssetsUploadResult {
+  assets: AssetsUploadedAsset[];
+}
+
+/** 落座时提交的资产引用（`seat.characterAssets[]`；只传引用，不复制字节）。 */
+export interface CharacterAssetRefInput {
+  kind: CharacterAssetKind;
+  variant?: string;
+  /** 64 位小写十六进制 sha256（与 `assets.upload` 返回一致）。 */
+  sha256: string;
+  /** 上传返回的 URL（host 会按自家存储重算；客户端原样回传即可）。 */
+  url?: string;
+  /**
+   * 帧表元数据（`spriteSheet` 用；host 落座时会按自家存储补全，
+   * 客户端不上传也可以——上传过的 host 知道 rows/cols/frameSize）。
+   */
+  meta?: CharacterAssetMeta;
+}
+
+/** 房间资产列表条目（`RoomView.assets[]`：队友可见的展示资产引用）。 */
+export interface RoomAssetView {
+  assetId: string;
+  kind: CharacterAssetKind;
+  variant?: string;
+  sha256: string;
+  /** 无 token 只读 URL（immutable + ETag）。 */
+  url: string;
+  /** 归一化/落盘时的宽高（帧表为整表尺寸）。 */
+  width?: number;
+  height?: number;
+  bytes?: number;
+  /** 上传者（玩家 id / `host`）。 */
+  ownerId?: PlayerId;
+}
+
+/** 角色卡面上的媒体投影（`SheetView.identity` 的 M9.5d 扩展；全部可选）。 */
+export interface SheetIdentityMediaView {
+  /** 头像 URL（玩家席/队伍面板用；缺省 → 客户端几何徽记）。 */
+  avatarUrl?: string;
+  /** 立绘 URL（人物界面 3:4 位；缺省回退头像）。 */
+  portraitUrl?: string;
+  /** 表情/动作变体（未配的按 `portraitUrl` 回退）。 */
+  portraitVariants?: Array<{ variant: string; url: string }>;
+  /** 精灵帧表（切分在归一化阶段完成；运行时不切）。 */
+  spriteSheet?: { url: string; rows: number; cols: number; frameSize: number };
 }
 
 export interface RollParams {
@@ -548,7 +724,7 @@ export interface SheetView {
   actorId: string;
   rulesId: string;
   rulesVersion: string;
-  identity: { name: string; level: number; race?: string; class?: string };
+  identity: { name: string; level: number; race?: string; class?: string } & SheetIdentityMediaView;
   values: SheetAttributeValues;
   resources: Array<{ id: string; name: string; current: number; max: number; icon?: IconRef }>;
   fields: Record<string, string | number>;
@@ -630,6 +806,8 @@ export interface CombatTokenView {
   name: string;
   team: CombatTeam;
   playerId?: PlayerId;
+  /** 头像 URL（M9.5d：玩家落座上传后由 host 下发；缺省 → 客户端用职业图标/几何徽记）。 */
+  avatarUrl?: string;
   x?: number;
   y?: number;
   zoneId?: string;
@@ -1031,6 +1209,8 @@ const METHODS: readonly RpcMethod[] = [
   'combat.rollCheck',
   'combat.end',
   'worldmap.get',
+  'assets.generate',
+  'assets.upload',
 ];
 
 export function isRpcMethod(value: unknown): value is RpcMethod {
@@ -1315,6 +1495,200 @@ export function validateCombatEnd(params: unknown): ValidationResult<CombatEndPa
 /** `worldmap.get` 参数校验（空参数）。 */
 export function validateWorldMapGet(params: unknown): ValidationResult<WorldMapGetParams> {
   return acceptEmptyParams<WorldMapGetParams>(params);
+}
+
+// ---------------------------------------------------------------------------
+// 校验：M9.5d 玩家角色资产 / 生图
+// ---------------------------------------------------------------------------
+
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+/** 变体名：小写字母数字 + `_`/`-`（`idle/smile/sad/angry/attack` 等）。 */
+const VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+/** 房间资产 URL 只允许 host 的只读端点相对路径（拒绝绝对地址/协议/`//`/反斜杠/`..`）。 */
+const ROOM_ASSET_URL_PREFIX = '/trpg/room-assets/';
+
+/** base64 文本解码后的近似字节数（校验限额用；精确字节由 host 存储层再验）。 */
+function approximateBase64Bytes(value: string): number {
+  const compact = value.replace(/\s+/g, '');
+  if (compact.length === 0) return 0;
+  const padding = compact.endsWith('==') ? 2 : compact.endsWith('=') ? 1 : 0;
+  return Math.floor((compact.length * 3) / 4) - padding;
+}
+
+function isCharacterAssetKind(value: unknown): value is CharacterAssetKind {
+  return typeof value === 'string' && (CHARACTER_ASSET_KINDS as readonly string[]).includes(value);
+}
+
+function isMediaAssetKind(value: unknown): value is MediaAssetKind {
+  return typeof value === 'string' && (MEDIA_ASSET_KINDS as readonly string[]).includes(value);
+}
+
+function isMediaAssetStyle(value: unknown): value is MediaAssetStyle {
+  return typeof value === 'string' && (MEDIA_ASSET_STYLES as readonly string[]).includes(value);
+}
+
+function isBoundedInteger(value: unknown, min: number, max: number): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
+}
+
+/** `assets.generate` 参数校验（玩家 + 房主可用；限流与配置由 host 的 MediaService 负责）。 */
+export function validateAssetsGenerate(params: unknown): ValidationResult<AssetsGenerateParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isMediaAssetKind(params.kind)) {
+    return fail(`kind 必须是 avatar / portrait / icon / sprite，收到 ${JSON.stringify(params.kind)}`);
+  }
+  if (!isMediaAssetStyle(params.style)) {
+    return fail(`style 必须是 pixel-32 / game-2d / svg，收到 ${JSON.stringify(params.style)}`);
+  }
+  if (!isNonEmptyString(params.prompt)) return fail('prompt 不能为空');
+  if (params.prompt.length > 2000) return fail('prompt 过长（最多 2000 字）');
+  if (params.subject !== undefined) {
+    if (typeof params.subject !== 'string') return fail('subject 必须是字符串');
+    if (params.subject.length > 100) return fail('subject 过长（最多 100 字）');
+  }
+  if (params.seed !== undefined && !isBoundedInteger(params.seed, 0, 2 ** 31 - 1)) {
+    return fail('seed 必须是 0–2147483647 的整数');
+  }
+  if (params.count !== undefined && !isBoundedInteger(params.count, 1, 4)) {
+    return fail('count 必须是 1–4 的整数');
+  }
+  return { ok: true, value: params as unknown as AssetsGenerateParams };
+}
+
+/**
+ * `assets.upload` 参数校验（房间成员）：白名单 kind、base64 文本、帧表 meta，
+ * 单次 ≤8 个文件 / ≤8 MiB（按 base64 近似字节；host 存储层解码后再精确校验）。
+ */
+export function validateAssetsUpload(params: unknown): ValidationResult<AssetsUploadParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  const rawAssets = params.assets;
+  if (!Array.isArray(rawAssets)) return fail('缺少 assets 数组');
+  if (rawAssets.length === 0) return fail('assets 数组不能为空（至少上传 1 个资产）');
+  if (rawAssets.length > ROOM_ASSET_LIMITS.maxFiles) {
+    return fail(`单次最多上传 ${ROOM_ASSET_LIMITS.maxFiles} 个资产（当前 ${rawAssets.length} 个）：请删掉不用的表情或换更小的图`);
+  }
+  let totalBytes = 0;
+  const assets: CharacterAssetUploadItem[] = [];
+  for (let index = 0; index < rawAssets.length; index += 1) {
+    const item = rawAssets[index];
+    if (!isRecord(item)) return fail(`assets[${index}] 必须是对象`);
+    if (!isCharacterAssetKind(item.kind)) {
+      return fail(`assets[${index}].kind 必须是 avatar / portrait / portraitVariant / spriteSheet / icon`);
+    }
+    if (!isNonEmptyString(item.b64)) return fail(`assets[${index}].b64 不能为空（应为图片字节的 base64）`);
+    if (item.variant !== undefined) {
+      if (typeof item.variant !== 'string' || !VARIANT_PATTERN.test(item.variant)) {
+        return fail(`assets[${index}].variant 非法（只能是字母/数字/_/-，最多 32 字符）`);
+      }
+    }
+    if (item.kind === 'portraitVariant' && item.variant === undefined) {
+      return fail(`assets[${index}] 是表情/动作变体，必须带 variant 名（如 idle / smile）`);
+    }
+    if (item.meta !== undefined) {
+      if (!isRecord(item.meta)) return fail(`assets[${index}].meta 必须是对象`);
+      if (item.meta.rows !== undefined && !isBoundedInteger(item.meta.rows, 1, 8)) {
+        return fail(`assets[${index}].meta.rows 必须是 1–8 的整数`);
+      }
+      if (item.meta.cols !== undefined && !isBoundedInteger(item.meta.cols, 1, 8)) {
+        return fail(`assets[${index}].meta.cols 必须是 1–8 的整数`);
+      }
+      if (item.meta.frameSize !== undefined && !isBoundedInteger(item.meta.frameSize, 16, 256)) {
+        return fail(`assets[${index}].meta.frameSize 必须是 16–256 的整数`);
+      }
+    }
+    if (item.kind === 'spriteSheet' && item.meta === undefined) {
+      return fail(`assets[${index}] 是帧表，必须带 meta{rows,cols,frameSize}`);
+    }
+    totalBytes += approximateBase64Bytes(item.b64);
+    assets.push(item as unknown as CharacterAssetUploadItem);
+  }
+  if (totalBytes > ROOM_ASSET_LIMITS.maxBytes) {
+    const mb = (totalBytes / (1024 * 1024)).toFixed(2);
+    return fail(`上传资产总量超限：当前约 ${mb} MB / 上限 8 MB；请删掉不用的表情或换更小的图`);
+  }
+  return { ok: true, value: { assets } };
+}
+
+/** 校验一条资产引用 URL：只允许 host 只读房间资产端点的相对路径。 */
+function isSafeRoomAssetUrl(url: string): boolean {
+  if (url.length > ROOM_ASSET_LIMITS.maxUrlLength) return false;
+  if (!url.startsWith(ROOM_ASSET_URL_PREFIX)) return false;
+  if (url.includes('\\')) return false;
+  if (url.includes('//')) return false;
+  if (/[\u0000-\u001f\u007f]/.test(url)) return false;
+  const rest = url.slice(ROOM_ASSET_URL_PREFIX.length);
+  const segments = rest.split('/');
+  if (segments.length === 0) return false;
+  if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) return false;
+  return true;
+}
+
+/**
+ * 校验 `seat.characterAssets`（落座资产引用）：kind 白名单、sha256 64 位小写十六进制、
+ * 可选 url 只允许 host 房间资产端点相对路径；同一 `kind+variant` 只允许一条。
+ * `undefined`/`null` = 没有资产（合法），返回空数组。
+ */
+export function validateCharacterAssetRefs(input: unknown): ValidationResult<CharacterAssetRefInput[]> {
+  if (input === undefined || input === null) return { ok: true, value: [] };
+  if (!Array.isArray(input)) return fail('characterAssets 必须是数组');
+  if (input.length > ROOM_ASSET_LIMITS.maxFiles) {
+    return fail(`角色展示资产最多 ${ROOM_ASSET_LIMITS.maxFiles} 个文件（当前 ${input.length} 个）`);
+  }
+  const refs: CharacterAssetRefInput[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < input.length; index += 1) {
+    const item = input[index];
+    if (!isRecord(item)) return fail(`characterAssets[${index}] 必须是对象`);
+    if (!isCharacterAssetKind(item.kind)) {
+      return fail(`characterAssets[${index}].kind 必须是 avatar / portrait / portraitVariant / spriteSheet / icon`);
+    }
+    const sha256 = item.sha256;
+    if (typeof sha256 !== 'string' || !SHA256_PATTERN.test(sha256)) {
+      return fail(`characterAssets[${index}].sha256 必须是 64 位小写十六进制 sha256`);
+    }
+    if (item.variant !== undefined && (typeof item.variant !== 'string' || !VARIANT_PATTERN.test(item.variant))) {
+      return fail(`characterAssets[${index}].variant 非法（只能是字母/数字/_/-，最多 32 字符）`);
+    }
+    if (item.kind === 'portraitVariant' && item.variant === undefined) {
+      return fail(`characterAssets[${index}] 是表情/动作变体，必须带 variant 名`);
+    }
+    if (item.url !== undefined) {
+      if (typeof item.url !== 'string' || !isSafeRoomAssetUrl(item.url)) {
+        return fail(`characterAssets[${index}].url 必须是 /trpg/room-assets/ 下的相对路径`);
+      }
+    }
+    if (item.meta !== undefined) {
+      if (!isRecord(item.meta)) return fail(`characterAssets[${index}].meta 必须是对象`);
+      if (item.meta.rows !== undefined && !isBoundedInteger(item.meta.rows, 1, 8)) {
+        return fail(`characterAssets[${index}].meta.rows 必须是 1–8 的整数`);
+      }
+      if (item.meta.cols !== undefined && !isBoundedInteger(item.meta.cols, 1, 8)) {
+        return fail(`characterAssets[${index}].meta.cols 必须是 1–8 的整数`);
+      }
+      if (item.meta.frameSize !== undefined && !isBoundedInteger(item.meta.frameSize, 16, 256)) {
+        return fail(`characterAssets[${index}].meta.frameSize 必须是 16–256 的整数`);
+      }
+    }
+    const key = `${item.kind}:${item.variant ?? ''}`;
+    if (seen.has(key)) return fail(`characterAssets 里同一 kind/variant 只能有一条引用（重复：${key}）`);
+    seen.add(key);
+    refs.push({
+      kind: item.kind,
+      ...(item.variant !== undefined ? { variant: item.variant as string } : {}),
+      sha256,
+      ...(item.url !== undefined ? { url: item.url as string } : {}),
+      ...(item.meta !== undefined
+        ? {
+            meta: {
+              ...(item.meta.rows !== undefined ? { rows: item.meta.rows as number } : {}),
+              ...(item.meta.cols !== undefined ? { cols: item.meta.cols as number } : {}),
+              ...(item.meta.frameSize !== undefined ? { frameSize: item.meta.frameSize as number } : {}),
+            },
+          }
+        : {}),
+    });
+  }
+  return { ok: true, value: refs };
 }
 
 /** 事件的 SSE 线格式。 */
