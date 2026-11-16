@@ -5,11 +5,14 @@
  * + pack 内置卡库（`cards[]`）。制作/分发单元是 `.trpgpack`（ZIP，见 `pack-zip.ts`），
  * 但本文件只做纯数据层：类型、校验、旧格式迁移、D12 兼容适配，不碰 zip / 文件系统。
  *
- * 校验约定（CONTENT-MODEL §2.2 / §9）：
+ * 校验约定（CONTENT-MODEL §2.2 / §9 / UI-CONTRACT §1.2/§1.4）：
  * - 错误聚合返回（`errors: string[]`，全中文人话），一次给出全部问题，不 fail-fast；
  * - 除字段合法性外，重点查「引用完整性」与「重 id」：pack.defaultModuleId、module.startSceneId、
  *   scene.{loreIds,npcIds,encounterIds,rewardIds}、card.ruleSystem 等；
- * - 素材引用（`icon`）在传入 `assetPaths` 时校验存在性；孤立素材只给 warning。
+ * - 素材引用（`icon`）在传入 `assetPaths` / `assets` 时校验存在性；
+ * - 传入素材字节时，若 zip 内含 `assets/manifest.json`（`trpg.assets/1`），额外校验资产清单
+ *   （file 存在、bytes/sha256 匹配、被引用的 assetId 存在、孤立资产 warning，见 `asset-manifest.ts`）；
+ *   没有清单时保持 M8.1 行为（孤立素材逐文件 warning）。
  *
  * 兼容（D12）：`migratePack()` 把旧草案/旧源码形状迁移到 v1；`toCharacterCard()` /
  * `toLegacyModuleDef()` / `toLegacyLorebook()` 把 pack 反推回旧导出形状，
@@ -24,6 +27,7 @@ import {
 import type { LorebookDef, ModuleDef, SceneDef, Visibility } from './schema.ts';
 import { verifyPackScripts, type PackScriptsInput } from './pack-scripts.ts';
 import { RULE_PACK_SCHEMA_VERSION, validateRulePack, type RulePack } from './rules-bridge.ts';
+import { ASSET_MANIFEST_ENTRY, verifyPackAssetManifest } from './asset-manifest.ts';
 
 export const CONTENT_PACK_SCHEMA_VERSION = 'trpg.pack/1';
 
@@ -53,9 +57,26 @@ export interface PackRuleDataIndex {
   spellIds?: Iterable<string>;
 }
 
+/** 素材字节输入：`assets/xxx.png` → 字节（字符串按 UTF-8 编码）。 */
+export type PackAssetBytesInput = Map<string, Uint8Array> | Record<string, Uint8Array | string>;
+
 export interface PackValidateOptions {
-  /** 包内实际携带的素材路径（zip 解码后传入）；传入后校验 icon 引用存在性。 */
+  /**
+   * 包内实际携带的素材字节（zip 解码 / 导出时传入）：`assets/**` 路径 → 字节。
+   * 传入后：校验 icon 引用、`assets/manifest.json`（含 bytes/sha256）与 assetId 引用完整性
+   * （UI-CONTRACT §1.2/§1.4）。
+   */
+  assets?: PackAssetBytesInput;
+  /**
+   * 包内实际携带的素材路径（只有路径、没有字节的场景，如 host 列内置包）；
+   * 传入后校验 icon 引用存在性 + 清单的结构/文件存在性（跳过 bytes/sha256）。
+   */
   assetPaths?: Iterable<string>;
+  /**
+   * `assets/manifest.json` 的原始文本（不含在 `assets` 里时单独传，如源码目录读取）：
+   * 用于「有清单但没读素材字节」的降级校验（结构与 file 存在性，跳过 sha256）。
+   */
+  assetManifestText?: string;
   /** 规则数据索引（怪物/物品/法术 id）；由调用方按规则系统提供。 */
   ruleData?: PackRuleDataIndex;
   /**
@@ -278,6 +299,19 @@ export function isSafePackAssetPath(path: string): boolean {
   const segments = path.split('/');
   if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) return false;
   return true;
+}
+
+/** 素材字节输入规范化成 Map（字符串按 UTF-8 编码）；未传返回 undefined。 */
+function normalizeAssetBytes(input: PackAssetBytesInput | undefined): Map<string, Uint8Array> | undefined {
+  if (input === undefined) return undefined;
+  const encoder = new TextEncoder();
+  const output = new Map<string, Uint8Array>();
+  const entries: Array<[string, Uint8Array | string]> =
+    input instanceof Map ? [...input.entries()] : Object.entries(input);
+  for (const [name, data] of entries) {
+    output.set(name, typeof data === 'string' ? encoder.encode(data) : data);
+  }
+  return output;
 }
 
 // ---------------------------------------------------------------------------
@@ -504,11 +538,23 @@ export function validatePack(input: unknown, options: PackValidateOptions = {}):
     for (const warning of scriptReport.warnings) warnings.push(warning);
   }
 
-  // ---- 素材引用 ----
-  const assetPaths = options.assetPaths !== undefined ? [...options.assetPaths] : undefined;
-  if (assetPaths) {
+  // ---- 素材引用（M8.1 路径检查 + M9.5b 资产清单校验） ----
+  // 素材字节（zip 解码/导出）优先；只有路径时退化为存在性校验（不阻断 sha256 校验）。
+  const assetBytes = normalizeAssetBytes(options.assets);
+  const declaredPaths =
+    assetBytes !== undefined
+      ? [...assetBytes.keys()]
+      : options.assetPaths !== undefined
+        ? [...options.assetPaths]
+        : undefined;
+  // 清单条目：显式文本优先，其次从素材字节里取 `assets/manifest.json`
+  const manifestInput: string | Uint8Array | undefined =
+    options.assetManifestText ?? assetBytes?.get(ASSET_MANIFEST_ENTRY);
+  if (declaredPaths !== undefined) {
     const declared = new Set<string>();
-    for (const assetPath of assetPaths) {
+    for (const assetPath of declaredPaths) {
+      // 清单是元数据条目，不是素材（否则会误报孤立素材）
+      if (assetPath === ASSET_MANIFEST_ENTRY) continue;
       if (typeof assetPath !== 'string' || !isSafePackAssetPath(assetPath)) {
         fail(`素材路径非法（必须是以 assets/ 开头的相对路径）：${String(assetPath)}`);
       } else {
@@ -519,10 +565,23 @@ export function validatePack(input: unknown, options: PackValidateOptions = {}):
     if (isNonEmptyString(icon) && icon.startsWith(ASSET_PATH_PREFIX)) {
       if (!declared.has(icon)) fail(`icon 引用的素材不存在：${icon}`);
     }
-    for (const assetPath of [...declared].sort()) {
-      if (isNonEmptyString(icon) && icon === assetPath) continue;
-      warnings.push(`孤立素材（pack.json 未引用，不阻断）：${assetPath}`);
+    // 有资产清单时，孤立资产由清单校验给出（以 assetId 为口径）；无清单沿用 M8.1 的逐文件口径。
+    if (manifestInput === undefined) {
+      for (const assetPath of [...declared].sort()) {
+        if (isNonEmptyString(icon) && icon === assetPath) continue;
+        warnings.push(`孤立素材（pack.json 未引用，不阻断）：${assetPath}`);
+      }
     }
+  }
+  if (manifestInput !== undefined) {
+    const assetReport = verifyPackAssetManifest({
+      manifest: manifestInput,
+      pack: input,
+      ...(declaredPaths !== undefined ? { files: declaredPaths } : {}),
+      ...(assetBytes !== undefined ? { contents: assetBytes } : {}),
+    });
+    for (const item of assetReport.errors) fail(item.message);
+    for (const item of assetReport.warnings) warnings.push(item.message);
   }
 
   if (errors.length > 0) return { ok: false, errors, warnings };

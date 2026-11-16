@@ -6,9 +6,12 @@
  * - GET  /trpg/rooms                公开房间列表
  * - POST /trpg/rpc                  JSON-RPC 风格调用（token 认证）
  * - GET  /trpg/events?token&lastSeq SSE 事件流（断线重连补发）
+ * - GET  /trpg/assets/<packId>/<assetPath>  host 只读资产（**无 token**，png/svg + ETag + immutable）
  *
  * 安全：room.create / host.session 只接受 loopback 请求（房主就坐在本机）；
  * 其余操作靠 token → principal 解析，客户端不能自称身份。
+ * 资产端点是无鉴权只读：路径必须严格受限（无 `..` / 绝对路径 / 控制字符），只提供 png/svg，
+ * 字节来自内容包注册表缓存（内容包安装 = 受信代码，见 RULES-MODEL §10）。
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { RoomError, RoomService, type Principal } from '@dsh-trpg/rooms';
@@ -26,6 +29,13 @@ import {
   type RpcRequest,
 } from '@dsh-trpg/protocol';
 
+/** 只读资产的解析结果（host 注入，一般来自 `PackRegistry.assetOf`）。 */
+export interface RoomAsset {
+  bytes: Uint8Array;
+  /** sha256(字节)：ETag 与客户端缓存 key。 */
+  sha256: string;
+}
+
 export interface RoomHttpOptions {
   port: number;
   bindHost: string;
@@ -37,6 +47,11 @@ export interface RoomHttpOptions {
   contentCatalog?: () => CatalogPack[];
   /** 重扫内容包（`content.reload`，仅 loopback + host token）。 */
   contentReload?: () => { packs: number; warnings: string[]; recoveredRooms?: number };
+  /**
+   * 只读资产解析（`GET /trpg/assets/<packId>/<assetPath>`，M9.5b）：
+   * `assetPath` 是去掉 `assets/` 前缀的相对路径。未注入时资产端点一律 404。
+   */
+  assetOf?: (packId: string, assetPath: string) => RoomAsset | undefined;
 }
 
 export interface RoomHttpServer {
@@ -78,6 +93,69 @@ async function readJsonBody(request: IncomingMessage, limitBytes = 256 * 1024): 
 function isLoopback(request: IncomingMessage): boolean {
   const address = request.socket.remoteAddress ?? '';
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
+// ---------------------------------------------------------------------------
+// M9.5b 只读资产端点（UI-CONTRACT §4.1）
+// ---------------------------------------------------------------------------
+
+const ASSET_URL_PREFIX = '/trpg/assets/';
+/** v1 只提供 PNG/SVG（UI-CONTRACT §0 #6 / §4.1）。 */
+const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  svg: 'image/svg+xml',
+};
+/** 内容寻址 + immutable：换图即换 ETag/sha256，永不强刷（契约 §4.1/§4.3）。 */
+const ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+/** packId 规范（与内容包的 slug 规则一致）。 */
+const ASSET_PACK_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+type AssetPathParseResult =
+  | { ok: true; packId: string; assetPath: string }
+  | { ok: false; status: 403 | 404; message: string };
+
+/**
+ * 解析 `/trpg/assets/<packId>/<assetPath>`：先 URL 解码，再拒绝路径穿越 / 绝对路径 /
+ * 反斜杠 / 控制字符 / 空段。403 = 路径越权，404 = 端点/路径缺失。
+ */
+function parseAssetRequestPath(rawPath: string): AssetPathParseResult {
+  if (rawPath.length === 0) {
+    return { ok: false, status: 404, message: '缺少资产路径（应为 GET /trpg/assets/<packId>/<assetPath>）' };
+  }
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(rawPath);
+  } catch {
+    return { ok: false, status: 403, message: '资产路径不是合法的 URL 编码' };
+  }
+  if (decoded.includes('\\')) return { ok: false, status: 403, message: '资产路径不允许使用反斜杠' };
+  if (/[\u0000-\u001f\u007f]/.test(decoded)) return { ok: false, status: 403, message: '资产路径包含控制字符，已拒绝' };
+  if (decoded.startsWith('/')) return { ok: false, status: 403, message: '资产路径必须是相对路径（不能以 / 开头）' };
+  const segments = decoded.split('/');
+  if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) {
+    return { ok: false, status: 403, message: '资产路径包含非法路径段（空段 / . / ..），已拒绝' };
+  }
+  const packId = segments[0] ?? '';
+  if (!ASSET_PACK_ID_PATTERN.test(packId)) {
+    return { ok: false, status: 403, message: `packId 非法：${JSON.stringify(packId)}` };
+  }
+  if (segments.length < 2) return { ok: false, status: 404, message: '缺少资产路径' };
+  return { ok: true, packId, assetPath: segments.slice(1).join('/') };
+}
+
+/** If-None-Match 匹配：接受短 ETag（sha256 前 16）、完整 sha256、以及 `*`。 */
+function etagMatches(ifNoneMatch: string, sha256: string): boolean {
+  const full = sha256.toLowerCase();
+  const short = full.slice(0, 16);
+  for (const candidate of ifNoneMatch.split(',')) {
+    let token = candidate.trim();
+    if (token === '*') return true;
+    if (token.startsWith('W/')) token = token.slice(2).trim();
+    if (token.startsWith('"')) token = token.slice(1);
+    if (token.endsWith('"')) token = token.slice(0, -1);
+    if (token === short || token === full) return true;
+  }
+  return false;
 }
 
 export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
@@ -298,6 +376,65 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
     request.on('error', cleanup);
   }
 
+  /**
+   * 只读资产：无 token、只允许 png/svg、immutable + ETag、If-None-Match → 304。
+   * 路径非法/越权 → 403；包/资产不存在或类型不支持 → 404（全中文错误）。
+   */
+  function handleAsset(request: IncomingMessage, response: ServerResponse, url: URL): void {
+    const parsed = parseAssetRequestPath(url.pathname.slice(ASSET_URL_PREFIX.length));
+    if (!parsed.ok) {
+      sendJson(response, parsed.status, {
+        ok: false,
+        error: { code: parsed.status === 403 ? 'forbidden' : 'not-found', message: parsed.message },
+      });
+      return;
+    }
+    const { packId, assetPath } = parsed;
+    const extension = assetPath.slice(assetPath.lastIndexOf('.') + 1).toLowerCase();
+    const contentType = ASSET_CONTENT_TYPES[extension];
+    if (contentType === undefined) {
+      sendJson(response, 404, {
+        ok: false,
+        error: { code: 'not-found', message: `资产类型不支持（v1 只提供 png / svg 图片资产）：${assetPath}` },
+      });
+      return;
+    }
+    let asset: RoomAsset | undefined;
+    try {
+      asset = options.assetOf?.(packId, assetPath);
+    } catch (error) {
+      log(`asset ${packId}/${assetPath} failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+      sendJson(response, 500, { ok: false, error: { code: 'internal', message: '读取资产失败' } });
+      return;
+    }
+    if (asset === undefined) {
+      sendJson(response, 404, {
+        ok: false,
+        error: { code: 'not-found', message: `资产不存在：${packId}/${assetPath}` },
+      });
+      return;
+    }
+    const etag = `"${asset.sha256.slice(0, 16)}"`;
+    const headers = {
+      ...CORS_HEADERS,
+      etag,
+      'cache-control': ASSET_CACHE_CONTROL,
+      'x-content-type-options': 'nosniff',
+    };
+    const ifNoneMatch = request.headers['if-none-match'];
+    if (typeof ifNoneMatch === 'string' && etagMatches(ifNoneMatch, asset.sha256)) {
+      response.writeHead(304, headers);
+      response.end();
+      return;
+    }
+    response.writeHead(200, {
+      ...headers,
+      'content-type': contentType,
+      'content-length': asset.bytes.byteLength,
+    });
+    response.end(Buffer.from(asset.bytes));
+  }
+
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (request.method === 'OPTIONS') {
@@ -321,6 +458,10 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
     }
     if (request.method === 'GET' && url.pathname === '/trpg/events') {
       handleSse(request, response, url);
+      return;
+    }
+    if (request.method === 'GET' && url.pathname.startsWith(ASSET_URL_PREFIX)) {
+      handleAsset(request, response, url);
       return;
     }
     if (request.method === 'POST' && url.pathname === '/trpg/rpc') {

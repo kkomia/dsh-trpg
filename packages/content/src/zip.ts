@@ -14,18 +14,24 @@
  */
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
 
-/** zip 读取上限（CONTENT-MODEL §2.2；单测直接断言这些常量）。 */
+/**
+ * zip 读取上限（CONTENT-MODEL §2.2 / UI-CONTRACT §3.1；单测直接断言这些常量）。
+ *
+ * M9.5b 上调（UI-CONTRACT §3.1 待办、§11「zip 上限与资产上限冲突」）：
+ * 整包 16→64 MiB、解压总量 32→64 MiB、条目数 512→520（`pack.json` + 规则脚本 + 512 资产）；
+ * 单条目 8 MiB 与 `pack.json` 4 MiB 保持不变（单资产上限 8 MiB 与之对齐）。
+ */
 export const ZIP_LIMITS = {
-  /** 整个 .trpgpack 文件 ≤ 16 MiB。 */
-  maxArchiveBytes: 16 * 1024 * 1024,
+  /** 整个 .trpgpack 文件 ≤ 64 MiB。 */
+  maxArchiveBytes: 64 * 1024 * 1024,
   /** pack.json 解压后 ≤ 4 MiB。 */
   maxPackJsonBytes: 4 * 1024 * 1024,
   /** 单条目解压后 ≤ 8 MiB。 */
   maxEntryBytes: 8 * 1024 * 1024,
-  /** 条目数 ≤ 512。 */
-  maxEntries: 512,
-  /** 解压总量 ≤ 32 MiB。 */
-  maxTotalUncompressedBytes: 32 * 1024 * 1024,
+  /** 条目数 ≤ 520（512 资产 + pack.json + 规则脚本）。 */
+  maxEntries: 520,
+  /** 解压总量 ≤ 64 MiB。 */
+  maxTotalUncompressedBytes: 64 * 1024 * 1024,
 } as const;
 
 export type ZipErrorCode =
@@ -176,7 +182,7 @@ export function readZip(bytes: Uint8Array, limits: ZipReadLimits = ZIP_LIMITS): 
   const warnings: string[] = [];
   if (!(bytes instanceof Uint8Array)) throw new ZipError('not-zip', 'zip 输入必须是 Uint8Array');
   if (bytes.length > limits.maxArchiveBytes) {
-    throw new ZipError('limit', `包过大：${bytes.length} 字节，上限 ${limits.maxArchiveBytes} 字节（< 16 MiB）`);
+    throw new ZipError('limit', `包过大：${bytes.length} 字节，上限 ${limits.maxArchiveBytes} 字节（< 64 MiB）`);
   }
   if (bytes.length < EOCD_SIZE) throw new ZipError('not-zip', '不是有效的 ZIP：文件太小，找不到中央目录结尾');
 

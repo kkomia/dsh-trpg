@@ -165,7 +165,7 @@ export function packToTrpgpack(pack: ContentPack, options: PackEncodeOptions = {
     throw error instanceof PackScriptError ? new PackValidationError(error.errors) : error;
   }
   const report = validatePack(pack, {
-    assetPaths: [...assets.keys()],
+    assets,
     // 规范化后已算过 sha256；这里换成 `路径 → 源码` 的 map 交给校验器（避免重复计算）
     scripts: new Map([...scripts.entries()].map(([file, entry]) => [file, entry.code])),
   });
@@ -212,7 +212,7 @@ export function trpgpackToPack(bytes: Uint8Array): TrpgpackDecodeResult {
     return result();
   }
   if (bytes.length > ZIP_LIMITS.maxArchiveBytes) {
-    errors.push(`包过大：${bytes.length} 字节，上限 ${ZIP_LIMITS.maxArchiveBytes} 字节（< 16 MiB）`);
+    errors.push(`包过大：${bytes.length} 字节，上限 ${ZIP_LIMITS.maxArchiveBytes} 字节（< 64 MiB）`);
     return result();
   }
   if (
@@ -281,7 +281,7 @@ export function trpgpackToPack(bytes: Uint8Array): TrpgpackDecodeResult {
   const migration = migratePack(parsed);
   warnings.push(...migration.warnings);
   const report = validatePack(migration.pack, {
-    assetPaths: [...assets.keys()],
+    assets,
     scripts,
   });
   warnings.push(...report.warnings);

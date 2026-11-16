@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CORE_GUIMUYA_PACK, CORE_PACKS, type ContentPack } from '@dsh-trpg/content';
+import { ASSET_MANIFEST_ENTRY, CORE_GUIMUYA_PACK, CORE_PACKS, type ContentPack } from '@dsh-trpg/content';
 import { contentHashOfPack, packToTrpgpack } from '@dsh-trpg/content/pack-zip';
 import { PackRegistry, defaultPacksDir } from '../src/host/pack-registry.ts';
 
@@ -179,4 +180,83 @@ test('registry: defaultPacksDir 与房间存档同一父目录（profile-data �
   assert.ok(dir.includes('dsh-home'));
   assert.ok(dir.includes('trpg'));
   assert.ok(dir.replaceAll('\\', '/').endsWith('dsh-trpg-table/content/packs'));
+});
+
+test('registry: 数据目录包的 png/svg 资产被缓存，assetOf 返回字节/sha256/contentType（路径安全）', () => {
+  const dir = tempDir();
+  const encoder = new TextEncoder();
+  const sha256Hex = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
+  try {
+    const pack = variantPack('asset-pack');
+    pack.icon = 'assets/cover.png';
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7, 7, 7]);
+    const svg = encoder.encode('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"></svg>');
+    const manifest = {
+      schemaVersion: 'trpg.assets/1',
+      packId: 'asset-pack',
+      assets: [
+        {
+          assetId: 'cover.core.main',
+          file: 'assets/cover.png',
+          format: 'png',
+          size: { w: 32, h: 32 },
+          bytes: png.length,
+          sha256: sha256Hex(png),
+          kind: 'cover',
+          style: 'imported',
+          seed: null,
+          prompt: null,
+          createdAt: '2026-11-16T18:00:00+08:00',
+        },
+        {
+          assetId: 'icon.status.poison',
+          file: 'assets/icons/status/poison.svg',
+          format: 'svg',
+          size: { w: 128, h: 128 },
+          bytes: svg.length,
+          sha256: sha256Hex(svg),
+          kind: 'status',
+          style: 'imported',
+          seed: null,
+          prompt: null,
+          createdAt: '2026-11-16T18:00:00+08:00',
+        },
+      ],
+    };
+    const assets = new Map<string, Uint8Array>([
+      ['assets/cover.png', png],
+      ['assets/icons/status/poison.svg', svg],
+      [ASSET_MANIFEST_ENTRY, encoder.encode(`${JSON.stringify(manifest, null, 2)}\n`)],
+    ]);
+    writeFileSync(join(dir, 'asset-pack-1.0.0.trpgpack'), packToTrpgpack(pack, { assets }));
+
+    const registry = new PackRegistry({ dir });
+    assert.equal(registry.reload().packs, 2, '内置包 + 带资产的数据包');
+
+    const cover = registry.assetOf('asset-pack', 'cover.png');
+    assert.ok(cover);
+    assert.equal(cover.path, 'assets/cover.png');
+    assert.equal(cover.contentType, 'image/png');
+    assert.equal(cover.sha256, sha256Hex(png));
+    assert.deepEqual([...cover.bytes], [...png]);
+
+    const status = registry.assetOf('asset-pack', 'icons/status/poison.svg');
+    assert.equal(status?.contentType, 'image/svg+xml');
+    assert.equal(status?.sha256, sha256Hex(svg));
+
+    // 清单本身不是图片资产；路径穿越/绝对路径/反斜杠/空段一律拒绝
+    assert.equal(registry.assetOf('asset-pack', 'manifest.json'), undefined);
+    for (const assetPath of ['../cover.png', '/cover.png', '', 'icons//status/poison.svg', 'icons\\x.png', '.']) {
+      assert.equal(registry.assetOf('asset-pack', assetPath), undefined, `应拒绝：${JSON.stringify(assetPath)}`);
+    }
+    assert.equal(registry.assetOf('missing-pack', 'cover.png'), undefined);
+    assert.equal(registry.assetOf('core-guimuya', 'cover.png'), undefined, '内置包没有字节资产（随代码编译）');
+
+    // reload 重扫后缓存随包消失
+    rmSync(join(dir, 'asset-pack-1.0.0.trpgpack'));
+    assert.equal(registry.reload().packs, 1);
+    assert.equal(registry.assetOf('asset-pack', 'cover.png'), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

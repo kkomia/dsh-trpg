@@ -24,6 +24,7 @@ import {
   type TrpgpackDecodeResult,
 } from './pack-zip.ts';
 import { isSafePackAssetPath, migratePack, validatePack, type ContentPack } from './pack.ts';
+import { ASSET_MANIFEST_ENTRY } from './asset-manifest.ts';
 import {
   SCRIPT_ENTRY_PREFIX,
   isSafeScriptPath,
@@ -159,9 +160,23 @@ export async function readPackJsonFile(
     }
     scriptPaths.sort();
   }
+  // 资产清单：不加载全部素材字节时也要读 manifest（很小），让清单结构/引用/file 存在性仍被校验
+  let assetManifestText: string | undefined;
+  if (assetPaths.includes(ASSET_MANIFEST_ENTRY) && !assets.has(ASSET_MANIFEST_ENTRY)) {
+    try {
+      assetManifestText = await readFile(
+        join(dirname(filePath), ...ASSET_MANIFEST_ENTRY.split('/')),
+        'utf8',
+      );
+    } catch (error) {
+      return empty([
+        `assets/manifest.json 读取失败：${error instanceof Error ? error.message : String(error)}`,
+      ]);
+    }
+  }
   const migration = migratePack(parsed);
   const report = validatePack(migration.pack, {
-    assetPaths,
+    ...(options.loadAssets ? { assets } : assetManifestText !== undefined ? { assetPaths, assetManifestText } : { assetPaths }),
     ...(options.loadScripts === false ? {} : { scripts }),
   });
   const warnings = [...migration.warnings, ...report.warnings];

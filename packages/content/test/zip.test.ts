@@ -225,6 +225,26 @@ test('zip: 重复条目名（大小写不敏感）被拒', () => {
   assert.throws(() => readZip(zipBytes), zipErrorCode('duplicate'));
 });
 
+test('zip: M9.5b 上限上调（整包 64 MiB / 解压总量 64 MiB / 条目 520；单条目与 pack.json 不变）', () => {
+  assert.equal(ZIP_LIMITS.maxArchiveBytes, 64 * 1024 * 1024, '整包上限 64 MiB（UI-CONTRACT §3.1）');
+  assert.equal(ZIP_LIMITS.maxTotalUncompressedBytes, 64 * 1024 * 1024, '解压总量上限 64 MiB');
+  assert.equal(ZIP_LIMITS.maxEntries, 520, '条目数上限 520（512 资产 + pack.json + 规则脚本）');
+  assert.equal(ZIP_LIMITS.maxEntryBytes, 8 * 1024 * 1024, '单条目仍是 8 MiB');
+  assert.equal(ZIP_LIMITS.maxPackJsonBytes, 4 * 1024 * 1024, 'pack.json 仍是 4 MiB');
+
+  // 520 个条目可读可写；521 个在 zip 读取层直接拒绝（写入层也拒绝）
+  const atLimit = Array.from({ length: ZIP_LIMITS.maxEntries }, (_, index) => ({
+    name: `assets/f${index}.txt`,
+    data: new Uint8Array([index & 0xff]),
+  }));
+  assert.equal(readZip(writeZip(atLimit)).entries.size, ZIP_LIMITS.maxEntries);
+  assert.throws(
+    () => readZip(buildRawZip([...atLimit, { name: 'assets/overflow.txt', data: new Uint8Array([0]) }])),
+    zipErrorCode('limit'),
+  );
+  assert.throws(() => writeZip([...atLimit, { name: 'assets/overflow.txt', data: new Uint8Array([0]) }]), zipErrorCode('limit'));
+});
+
 test('zip: 上线限制（条目数 / 单条目声明大小 / 整包大小 / pack.json 大小）', () => {
   const tooMany = Array.from({ length: ZIP_LIMITS.maxEntries + 1 }, (_, index) => ({
     name: `assets/f${index}.txt`,

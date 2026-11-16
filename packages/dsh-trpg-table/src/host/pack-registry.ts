@@ -18,6 +18,9 @@
  * M9.4：注册表同时实现 `RoomRulesResolver`（`resolveRules`）——把内容包的 `rules` 段与
  * `rules/scripts/*.js` 脚本源码交给 rooms 建规则运行时。内置包的脚本源码随代码发布
  * （`@dsh-trpg/content/rules-pack`），数据目录包的脚本来自 zip 条目。
+ *
+ * M9.5b：数据目录包解码时把 `assets/**` 的图片字节（png/svg）连同 sha256 缓存进注册表，
+ * 供 `GET /trpg/assets/<packId>/<assetPath>` 只读资产端点使用（`assetOf`）。
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -32,7 +35,8 @@ import {
   type ModuleDef,
   type PackModuleDef,
 } from '@dsh-trpg/content';
-import { contentHashOfPack, trpgpackToPack } from '@dsh-trpg/content/pack-zip';
+import { contentHashOfPack, trpgpackToPack, ASSET_ENTRY_PREFIX } from '@dsh-trpg/content/pack-zip';
+import { ASSET_MANIFEST_ENTRY } from '@dsh-trpg/content';
 import { scriptSourcesForRules } from '@dsh-trpg/content/rules-pack';
 import type { CatalogPack } from '@dsh-trpg/protocol';
 import type {
@@ -53,6 +57,47 @@ export const PACK_FILE_EXTENSION = '.trpgpack';
 /** 内容包来源：内置（随插件编译）或数据目录（.trpgpack 文件）。 */
 export type PackSource = 'builtin' | 'data';
 
+/**
+ * 只读资产（`GET /trpg/assets/<packId>/<assetPath>` 的数据来源）。
+ * 数据目录包在解码时把 `assets/**` 的图片字节缓存进注册表（UI-CONTRACT §4.1：host 只读资产端点）。
+ */
+export interface PackAsset {
+  /** zip 内完整路径（`assets/...`）。 */
+  path: string;
+  /** 资产字节（解码时缓存，避免每次请求重读 zip）。 */
+  bytes: Uint8Array;
+  /** sha256(字节)：ETag / 客户端缓存 key / immutable 内容寻址。 */
+  sha256: string;
+  /** 扩展名推导的 content-type（v1 只提供 png / svg）。 */
+  contentType: 'image/png' | 'image/svg+xml';
+}
+
+/** 按扩展名判断可对外提供的资产类型（v1 只收 PNG/SVG，UI-CONTRACT §0 #6）。 */
+function contentTypeOf(path: string): PackAsset['contentType'] | undefined {
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  return undefined;
+}
+
+/** zip 解出的素材 → 只读资产表（跳过清单本身与非图片文件）。 */
+function packAssetsOf(files: Map<string, Uint8Array> | undefined): Map<string, PackAsset> {
+  const output = new Map<string, PackAsset>();
+  if (files === undefined) return output;
+  for (const [path, bytes] of files) {
+    if (path === ASSET_MANIFEST_ENTRY) continue;
+    const contentType = contentTypeOf(path);
+    if (contentType === undefined) continue;
+    output.set(path, {
+      path,
+      bytes,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      contentType,
+    });
+  }
+  return output;
+}
+
 /** 注册表里的一条内容包（host 侧，含完整包数据；不要直接下发给玩家）。 */
 export interface PackEntry {
   pack: ContentPack;
@@ -65,6 +110,8 @@ export interface PackEntry {
   rules?: RoomRulesInput['rules'];
   /** 规则脚本源码（`rules/scripts/*.js`；与 `rules.scripts` 清单 sha256 对应）。 */
   scripts?: RoomRuleScript[];
+  /** 只读资产表（zip 内路径 → 字节/sha256；M9.5b 资产端点用）。 */
+  assets?: Map<string, PackAsset>;
 }
 
 /** 包内带 `rules` 段时解析出的规则运行时来源（供 rooms 建房）。 */
@@ -251,6 +298,7 @@ export class PackRegistry implements RoomContentResolver, RoomRulesResolver {
         );
         continue;
       }
+      const assets = packAssetsOf(decoded.assets);
       entries.set(pack.packId, {
         pack,
         contentHash: decoded.contentHash,
@@ -260,6 +308,7 @@ export class PackRegistry implements RoomContentResolver, RoomRulesResolver {
           ? { rules: (pack as ContentPack & { rules?: RoomRulesInput['rules'] }).rules }
           : {}),
         ...(decoded.scripts.size > 0 ? { scripts: decodedScriptsOf(decoded.scripts) } : {}),
+        ...(assets.size > 0 ? { assets } : {}),
       });
       for (const warning of decoded.warnings) warnings.push(`内容包 ${name}：${warning}`);
     }
@@ -298,6 +347,24 @@ export class PackRegistry implements RoomContentResolver, RoomRulesResolver {
   /** 内容指纹（sha256(规范化 pack.json)）；不存在返回 undefined。 */
   contentHashOf(packId: string): string | undefined {
     return this.entries.get(packId)?.contentHash;
+  }
+
+  /**
+   * 只读资产（`GET /trpg/assets/<packId>/<assetPath>` 的数据来源，UI-CONTRACT §4.1）：
+   * `assetPath` 是去掉 `assets/` 前缀的 zip 相对路径（如 `icons/item/hengdao.svg`）。
+   * 路径安全由调用方（HTTP 层）先做；这里再做一次防御性检查。
+   * 包不存在 / 没有该资产 / 非 png-svg 资产 → undefined（HTTP 层回 404）。
+   */
+  assetOf(packId: string, assetPath: string): PackAsset | undefined {
+    const entry = this.entries.get(packId);
+    if (entry?.assets === undefined) return undefined;
+    if (typeof assetPath !== 'string') return undefined;
+    if (assetPath.length === 0) return undefined;
+    if (assetPath.startsWith('/')) return undefined;
+    if (assetPath.includes('\\') || assetPath.includes('..') || /[\u0000-\u001f\u007f]/.test(assetPath)) return undefined;
+    const segments = assetPath.split('/');
+    if (segments.some((segment) => segment.length === 0 || segment === '.' || segment === '..')) return undefined;
+    return entry.assets.get(`${ASSET_ENTRY_PREFIX}${assetPath}`);
   }
 
   /**

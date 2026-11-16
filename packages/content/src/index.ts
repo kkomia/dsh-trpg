@@ -22,6 +22,7 @@ import { CORE_GUIMUYA_PACK } from './packs/core-guimuya.ts';
 
 export * from './schema.ts';
 export * from './pack.ts';
+export * from './asset-manifest.ts';
 export * from './rule-system.ts';
 export * from './packs/core-guimuya.ts';
 export { RACES } from './rules/races.ts';
