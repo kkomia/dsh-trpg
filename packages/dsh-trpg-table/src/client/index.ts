@@ -13,7 +13,13 @@
  * 构建：scripts/build.mjs 打包成 lib/client.js（CJS + ModuleLoader 包装）；
  * 因此源码里不要 import 'react'（由 ModuleLoader 注入），数据从 workspace 包静态打入。
  */
-import { CARDS, GUIMUYA_MODULE } from '@dsh-trpg/content';
+import {
+  CARDS,
+  CORE_GUIMUYA_PACK_NAME,
+  CORE_GUIMUYA_PACK_VERSION,
+  GUIMUYA_MODULE,
+  RULE_SYSTEM,
+} from '@dsh-trpg/content';
 import {
   copyFromPregen,
   exportCardText,
@@ -36,15 +42,20 @@ import {
 import type {
   AwardPayload,
   BindSessionResult,
+  CatalogModuleSummary,
+  CatalogPack,
+  ContentListResult,
   CreateRoomResult,
   DicePayload,
   GameEvent,
   JoinRoomResult,
   LockParams,
   RoomStateResult,
+  RoomSceneSummary,
   RoomView,
   RollResult,
 } from '@dsh-trpg/protocol';
+import { DEFAULT_CONTENT_MODULE_ID, DEFAULT_CONTENT_PACK_ID } from '@dsh-trpg/protocol';
 
 interface SlotsService {
   inject(ownerKey: string, callback: () => () => void): () => void;
@@ -300,6 +311,104 @@ function readActiveSessionId(): string | undefined {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 内容包（M8.2b）：大厅选包/选模组 + 房间内容展示
+// ---------------------------------------------------------------------------
+
+/** 大厅当前选中的内容引用（packId + moduleId；建房时原样传给 room.create）。 */
+interface ContentChoice {
+  packId: string;
+  moduleId: string;
+}
+
+/** 来源标签：内置（随插件）还是数据目录里的 .trpgpack。 */
+function packSourceLabel(source: CatalogPack['source']): string {
+  return source === 'builtin' ? '内置' : '数据目录';
+}
+
+/** 等级/人数区间：上下限相同时只显示一个值。 */
+function rangeLabel(range: [number, number]): string {
+  return range[0] === range[1] ? `${range[0]}` : `${range[0]}–${range[1]}`;
+}
+
+/** 模组摘要一行：标题（等级 / 人数 / 场景数）。 */
+function moduleOptionLabel(module: CatalogModuleSummary): string {
+  return `${module.title}（${rangeLabel(module.level)} 级 / ${rangeLabel(module.playerCount)} 人 / ${module.sceneCount} 场）`;
+}
+
+/**
+ * `content.list` 返回值的宽松校验：只保留形状正确的包，避免坏数据把大厅渲染炸掉。
+ * （服务端已做脱敏投影，这里只是客户端防御。）
+ */
+function sanitizeCatalog(input: unknown): CatalogPack[] {
+  const packs = (input as { packs?: unknown } | null | undefined)?.packs;
+  if (!Array.isArray(packs)) return [];
+  return packs.filter((pack): pack is CatalogPack => {
+    if (!pack || typeof pack !== 'object') return false;
+    const candidate = pack as Partial<CatalogPack>;
+    return (
+      typeof candidate.packId === 'string' &&
+      typeof candidate.name === 'string' &&
+      typeof candidate.version === 'string' &&
+      Array.isArray(candidate.modules)
+    );
+  });
+}
+
+/**
+ * 内容目录不可用时的兜底：内置包 core-guimuya + 其默认模组。
+ * 只用于大厅展示；建房不传 packId/moduleId，由 host 用自己的缺省值（静默降级）。
+ */
+function builtinCatalogFallback(): CatalogPack[] {
+  return [
+    {
+      packId: DEFAULT_CONTENT_PACK_ID,
+      name: CORE_GUIMUYA_PACK_NAME,
+      version: CORE_GUIMUYA_PACK_VERSION,
+      ruleSystem: { id: RULE_SYSTEM.id, name: RULE_SYSTEM.name },
+      defaultModuleId: DEFAULT_CONTENT_MODULE_ID,
+      modules: [
+        {
+          moduleId: GUIMUYA_MODULE.id,
+          title: GUIMUYA_MODULE.title,
+          level: [GUIMUYA_MODULE.level[0], GUIMUYA_MODULE.level[1]],
+          playerCount: [GUIMUYA_MODULE.playerCount[0], GUIMUYA_MODULE.playerCount[1]],
+          sceneCount: GUIMUYA_MODULE.scenes.length,
+        },
+      ],
+      cardCount: CARDS.length,
+      loreCount: 0,
+      source: 'builtin',
+    },
+  ];
+}
+
+/** 在目录里定位当前选择；选择失效（包/模组被删）时回退到默认包、默认模组。 */
+function resolveContentChoice(
+  packs: CatalogPack[] | null,
+  choice: ContentChoice,
+): { pack?: CatalogPack; module?: CatalogModuleSummary } {
+  if (!packs || packs.length === 0) return {};
+  const pack =
+    packs.find((candidate) => candidate.packId === choice.packId) ??
+    packs.find((candidate) => candidate.packId === DEFAULT_CONTENT_PACK_ID) ??
+    packs[0];
+  if (!pack) return {};
+  const modules = pack.modules ?? [];
+  const module =
+    modules.find((candidate) => candidate.moduleId === choice.moduleId) ??
+    modules.find((candidate) => candidate.moduleId === pack.defaultModuleId) ??
+    modules[0];
+  return { pack, module };
+}
+
+/** 切包后选该包的默认模组（没有默认就第一个）。 */
+function moduleIdForPack(pack: CatalogPack | undefined): string {
+  const modules = pack?.modules ?? [];
+  const preferred = modules.find((candidate) => candidate.moduleId === pack?.defaultModuleId) ?? modules[0];
+  return preferred?.moduleId ?? pack?.defaultModuleId ?? DEFAULT_CONTENT_MODULE_ID;
+}
+
 export function createPlugin(React: any) {
   const h = React.createElement;
   const { useCallback, useEffect, useMemo, useRef, useState } = React;
@@ -431,7 +540,16 @@ export function createPlugin(React: any) {
     const [base, setBase] = useState(() => loadSession()?.base ?? DEFAULT_BASE);
     const [playerName, setPlayerName] = useState(() => loadSession()?.playerName ?? '冒险者');
     const [inviteCode, setInviteCode] = useState('');
-    const [title, setTitle] = useState('鬼木崖·异光');
+    const [title, setTitle] = useState(GUIMUYA_MODULE.title);
+    // 内容包目录（content.list）：null = 还没读到；catalogFallback = 目录失败、已静默降级到内置包。
+    const [catalog, setCatalog] = useState(null as CatalogPack[] | null);
+    const [catalogFallback, setCatalogFallback] = useState(false);
+    const [contentChoice, setContentChoice] = useState({
+      packId: DEFAULT_CONTENT_PACK_ID,
+      moduleId: DEFAULT_CONTENT_MODULE_ID,
+    } as ContentChoice);
+    const titleTouchedRef = useRef(false);
+    const catalogLoadingRef = useRef(false);
     const [gmMode, setGmMode] = useState('ai' as 'ai' | 'human');
     const [expression, setExpression] = useState('d20');
     const [privateRoll, setPrivateRoll] = useState(false);
@@ -466,6 +584,26 @@ export function createPlugin(React: any) {
         : room.players.find((entry: RoomView['players'][number]) => entry.playerId === 'host');
       return me;
     }, [room, session]);
+
+    /**
+     * GM 控制台场景下拉：优先用服务端下发的 `room.scenes`（当前模组的公开场景标题）；
+     * 旧房间/旧服务端没有该字段时回退内置模组 `GUIMUYA_MODULE.scenes`。两边都没有则不渲染下拉。
+     */
+    const sceneChoices = useMemo(() => {
+      const fromRoom = room?.scenes ?? [];
+      if (fromRoom.length > 0) {
+        return fromRoom.map((scene: RoomSceneSummary) => ({ sceneId: scene.sceneId, title: scene.title }));
+      }
+      return GUIMUYA_MODULE.scenes.map((scene: { id: string; title: string }) => ({ sceneId: scene.id, title: scene.title }));
+    }, [room]);
+
+    // 房间切换/场景清单变化后，选中项若不在清单里就落到第一个场景。
+    useEffect(() => {
+      if (sceneChoices.length === 0) return;
+      if (!sceneChoices.some((scene: { sceneId: string; title: string }) => scene.sceneId === gmSceneId)) {
+        setGmSceneId(sceneChoices[0]?.sceneId ?? '');
+      }
+    }, [sceneChoices, gmSceneId]);
 
     const appendFeed = useCallback((event: GameEvent) => {
       if (event.seq <= lastSeqRef.current && event.kind !== 'room') return;
@@ -572,6 +710,71 @@ export function createPlugin(React: any) {
       setBase(next.base);
     }, []);
 
+    /**
+     * 读取房主的内容包目录（`content.list`，无需 token，玩家也可读）。
+     * 失败时静默降级到内置默认：大厅照常能建房，不弹错误、不挡流程。
+     */
+    const loadCatalog = useCallback(async (address: string) => {
+      if (catalogLoadingRef.current) return;
+      const normalizedBase = address.trim().replace(/\/+$/, '');
+      if (!normalizedBase) return;
+      catalogLoadingRef.current = true;
+      try {
+        const result = await callRpc<ContentListResult>(normalizedBase, 'content.list', {});
+        const packs = sanitizeCatalog(result);
+        if (packs.length === 0) throw new Error('内容包目录为空');
+        setCatalog(packs);
+        setCatalogFallback(false);
+        setContentChoice((previous: ContentChoice) => {
+          const { pack, module } = resolveContentChoice(packs, previous);
+          return {
+            packId: pack?.packId ?? DEFAULT_CONTENT_PACK_ID,
+            moduleId: module?.moduleId ?? moduleIdForPack(pack),
+          };
+        });
+      } catch {
+        // 静态降级：用内置包展示，建房时不传 packId/moduleId，由 host 用缺省值。
+        setCatalog(builtinCatalogFallback());
+        setCatalogFallback(true);
+        setContentChoice({ packId: DEFAULT_CONTENT_PACK_ID, moduleId: DEFAULT_CONTENT_MODULE_ID });
+      } finally {
+        catalogLoadingRef.current = false;
+      }
+    }, []);
+
+    // 大厅可见时读内容目录（回到大厅/换房主地址后刷新一次；短 debounce 避免输入地址时刷屏）。
+    useEffect(() => {
+      if (session) return;
+      const timer = setTimeout(() => void loadCatalog(base), 250);
+      return () => clearTimeout(timer);
+    }, [session, base, loadCatalog]);
+
+    /** 当前选中的包/模组（选择失效时自动回退）。 */
+    const { pack: selectedPack, module: selectedModule } = useMemo(
+      () => resolveContentChoice(catalog, contentChoice),
+      [catalog, contentChoice],
+    );
+
+    // 团名默认跟所选模组标题联动；用户手动改过团名后不再覆盖。
+    useEffect(() => {
+      if (titleTouchedRef.current) return;
+      if (typeof selectedModule?.title === 'string' && selectedModule.title.length > 0) {
+        setTitle(selectedModule.title);
+      }
+    }, [selectedModule]);
+
+    const choosePack = useCallback(
+      (nextPackId: string) => {
+        const pack = catalog?.find((candidate: CatalogPack) => candidate.packId === nextPackId);
+        setContentChoice({ packId: nextPackId, moduleId: moduleIdForPack(pack) });
+      },
+      [catalog],
+    );
+
+    const chooseModule = useCallback((nextModuleId: string) => {
+      setContentChoice((previous: ContentChoice) => ({ ...previous, moduleId: nextModuleId }));
+    }, []);
+
     const createRoom = useCallback(async () => {
       setBusy(true);
       setStatus({ kind: 'idle', text: '创建房间中…' });
@@ -583,6 +786,10 @@ export function createPlugin(React: any) {
           title,
           gmMode,
           ...(sessionId ? { sessionId } : {}),
+          // 目录可用时把所选内容一并带上；目录失败时省略，交给 host 的内置缺省（静默降级）。
+          ...(!catalogFallback && selectedPack
+            ? { packId: selectedPack.packId, ...(selectedModule ? { moduleId: selectedModule.moduleId } : {}) }
+            : {}),
         });
         lastSeqRef.current = 0;
         feedRef.current = [];
@@ -600,7 +807,7 @@ export function createPlugin(React: any) {
       } finally {
         setBusy(false);
       }
-    }, [base, title, gmMode, enterRoom, tabSessionId]);
+    }, [base, title, gmMode, enterRoom, tabSessionId, catalogFallback, selectedPack, selectedModule]);
 
     const joinRoom = useCallback(async () => {
       setBusy(true);
@@ -793,13 +1000,14 @@ export function createPlugin(React: any) {
 
     const gmScene = useCallback(async () => {
       if (!session || !token || !gmSceneId) return;
-      const scene = GUIMUYA_MODULE.scenes.find((entry) => entry.id === gmSceneId);
+      const scene = sceneChoices.find((entry: { sceneId: string; title: string }) => entry.sceneId === gmSceneId);
       try {
+        // RPC 参数保持原样：只认场景 sceneId（标题只用于端上展示进度）。
         await callRpc(session.base, 'gm.scene', { sceneId: gmSceneId, title: scene?.title }, token);
       } catch (error) {
         setStatus({ kind: 'bad', text: `推进场景失败：${error instanceof Error ? error.message : String(error)}` });
       }
-    }, [session, token, gmSceneId]);
+    }, [session, token, gmSceneId, sceneChoices]);
 
     const gmAward = useCallback(async () => {
       if (!session || !token || !gmPlayerId) return;
@@ -928,6 +1136,33 @@ export function createPlugin(React: any) {
             h('span', { key: 'roomno', style: CSS.tag, title: room.roomId }, `房间号 ${shortId(room.roomId)}`),
             h('span', { key: 'online', style: CSS.muted }, `在线 ${onlineCount}/${room.players.length}`),
           ]),
+          // 房间内容引用：包名/模组标题 + 版本小字；降级时给红色警戒文案。
+          room.content
+            ? h('div', { key: 'content', style: CSS.metaRow }, [
+                h(
+                  'span',
+                  {
+                    key: 'pack',
+                    style: { fontSize: 12, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                    title: `${room.content.packId} · ${room.content.moduleId}`,
+                  },
+                  `内容包：${room.content.packName ?? room.content.packId}`,
+                ),
+                h(
+                  'span',
+                  {
+                    key: 'module',
+                    style: { fontSize: 12, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                    title: room.content.moduleId,
+                  },
+                  `模组：${room.content.moduleTitle ?? room.content.moduleId}`,
+                ),
+                h('span', { key: 'version', style: CSS.tag, title: `内容包版本 ${room.content.packVersion}` }, `v${room.content.packVersion}`),
+              ])
+            : null,
+          room.content?.degraded
+            ? h('span', { key: 'degraded', style: { ...CSS.bad, display: 'block' } }, '⚠ 内容包缺失或已变更，GM 回退到内置模组')
+            : null,
           room.scene
             ? h('span', { key: 'scene', style: CSS.muted }, `场景：${room.scene.title ?? room.scene.sceneId}`)
             : null,
@@ -966,6 +1201,72 @@ export function createPlugin(React: any) {
         ])
       : null;
 
+    // 大厅的内容包/模组选择：目录只有一项时压成只读文字（仍保留来源标签），
+    // 多个包/模组时用原生 select（右侧栏 320–420px，原生控件不会溢出）。
+    const multiPack = (catalog?.length ?? 0) > 1;
+    const moduleOptions = selectedPack?.modules ?? [];
+    const multiModule = moduleOptions.length > 1;
+    const contentSection = h('div', { key: 'content', style: CSS.section }, [
+      h('div', { key: 'head', style: CSS.sectionTitle }, [
+        h('strong', { key: 't' }, '内容包 / 模组'),
+        selectedPack ? h('span', { key: 'source', style: CSS.tag }, packSourceLabel(selectedPack.source)) : null,
+        selectedPack ? h('span', { key: 'rule', style: CSS.tag }, selectedPack.ruleSystem.name) : null,
+        catalogFallback ? h('span', { key: 'fallback', style: CSS.tag }, '目录不可用') : null,
+      ]),
+      !catalog
+        ? h('span', { key: 'loading', style: CSS.muted }, '正在读取内容包…')
+        : selectedPack
+          ? h('div', { key: 'body', style: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 } }, [
+              multiPack
+                ? h(
+                    'select',
+                    {
+                      key: 'pack',
+                      style: CSS.field,
+                      value: selectedPack.packId,
+                      title: '选择内容包',
+                      onChange: (event: { target: { value: string } }) => choosePack(event.target.value),
+                    },
+                    (catalog ?? []).map((pack: CatalogPack) => h('option', { key: pack.packId, value: pack.packId }, `${pack.name} v${pack.version}`)),
+                  )
+                : h(
+                    'span',
+                    {
+                      key: 'pack',
+                      style: { fontSize: 12, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                      title: `${selectedPack.packId} · ${selectedPack.ruleSystem.name}`,
+                    },
+                    `内容包：${selectedPack.name} v${selectedPack.version}`,
+                  ),
+              multiModule
+                ? h(
+                    'select',
+                    {
+                      key: 'module',
+                      style: CSS.field,
+                      value: selectedModule?.moduleId ?? '',
+                      title: '选择模组',
+                      onChange: (event: { target: { value: string } }) => chooseModule(event.target.value),
+                    },
+                    moduleOptions.map((module: CatalogModuleSummary) => h('option', { key: module.moduleId, value: module.moduleId }, moduleOptionLabel(module))),
+                  )
+                : h(
+                    'span',
+                    {
+                      key: 'module',
+                      style: { fontSize: 12, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                      title: selectedModule?.moduleId,
+                    },
+                    selectedModule ? `模组：${moduleOptionLabel(selectedModule)}` : '该内容包没有可用模组',
+                  ),
+            ])
+          : h('span', { key: 'empty', style: CSS.bad }, '内容包目录为空，将使用内置默认内容建房'),
+      catalogFallback
+        ? h('span', { key: 'fallbackhint', style: CSS.muted }, '内容目录暂不可用：已用内置内容包，建房时由房主服务端取缺省内容。')
+        : null,
+      h('span', { key: 'note', style: CSS.muted }, '内容由房主本机决定；建房后房间引用所选内容包与模组。'),
+    ]);
+
     const lobby = h('div', { key: 'lobby', style: { display: 'flex', flexDirection: 'column', gap: 8 } }, [
       missingSessionHint,
       h('div', { key: 'base', style: CSS.section }, [
@@ -980,6 +1281,7 @@ export function createPlugin(React: any) {
         }),
         h('span', { key: 'hint', style: CSS.muted }, '同机测试用 127.0.0.1；玩家填房主的局域网地址。'),
       ]),
+      contentSection,
       h('div', { key: 'host', style: CSS.section }, [
         h('strong', { key: 't' }, '开团 · 我是房主'),
         h('input', {
@@ -987,7 +1289,11 @@ export function createPlugin(React: any) {
           style: CSS.field,
           value: title,
           placeholder: '团名',
-          onChange: (event: { target: { value: string } }) => setTitle(event.target.value),
+          onChange: (event: { target: { value: string } }) => {
+            // 用户改过团名后，切换模组不再覆盖。
+            titleTouchedRef.current = true;
+            setTitle(event.target.value);
+          },
         }),
         h(
           'select',
@@ -1194,6 +1500,24 @@ export function createPlugin(React: any) {
       ]),
     ]);
 
+    // 场景下拉：服务端给了公开场景清单就按它列；旧数据回退内置模组；两者都无则不渲染该行。
+    const sceneRow = sceneChoices.length > 0
+      ? h('div', { key: 'scene', style: CSS.row }, [
+          h(
+            'select',
+            {
+              key: 'sceneid',
+              style: { ...CSS.input, flex: '1 1 140px' },
+              value: gmSceneId,
+              title: '选择要推进到的场景',
+              onChange: (event: { target: { value: string } }) => setGmSceneId(event.target.value),
+            },
+            sceneChoices.map((scene: { sceneId: string; title: string }) => h('option', { key: scene.sceneId, value: scene.sceneId }, scene.title)),
+          ),
+          h('button', { key: 'scene-btn', type: 'button', style: CSS.button, disabled: busy, onClick: () => void gmScene() }, '推进场景'),
+        ])
+      : null;
+
     const gmConsole = isHost && gmOpen
       ? h('div', { key: 'gmconsole', style: { ...CSS.section, gap: 8 } }, [
           h('strong', { key: 't' }, 'GM 控制台'),
@@ -1218,10 +1542,7 @@ export function createPlugin(React: any) {
             }),
             h('button', { key: 'sb', type: 'button', style: CSS.button, disabled: busy, onClick: () => void gmSecret() }, '私发'),
           ]),
-          h('div', { key: 'scene', style: CSS.row }, [
-            h('select', { key: 'sceneid', style: { ...CSS.input, flex: '1 1 140px' }, value: gmSceneId, onChange: (event: { target: { value: string } }) => setGmSceneId(event.target.value) }, GUIMUYA_MODULE.scenes.map((scene) => h('option', { key: scene.id, value: scene.id }, scene.title))),
-            h('button', { key: 'scene-btn', type: 'button', style: CSS.button, disabled: busy, onClick: () => void gmScene() }, '推进场景'),
-          ]),
+          sceneRow,
           h('div', { key: 'award', style: CSS.row }, [
             h('input', {
               key: 'xp',
