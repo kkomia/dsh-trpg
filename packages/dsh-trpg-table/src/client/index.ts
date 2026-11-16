@@ -1,11 +1,13 @@
 /**
- * 跑团桌 Client 半边（v2）。
+ * 跑团桌 Client 半边（v3：原生会话即牌桌）。
  *
- * 布局：
- * - 注册为主区域面板 `main`（key = trpg）：打开后整块主区域就是「跑团桌」页面，
- *   中间是叙事对话流，下方是行动输入框 —— 不再占用输入框下方的 dock 条。
- * - 侧边栏面板图标（`sidebar.panellist`）与对话顶栏按钮（`conversation.session.header.actions`）作为入口。
- * - 没有房间时页面是大厅（建房 / 加入 / 本地角色卡库）。
+ * 形态（产品已定，勿改回自绘聊天页）：
+ * - 对话主区域直接复用 DSH 原生会话：房主会话即牌桌，GM 的回复由原生对话渲染。
+ * - 插件只提供三样东西：对话顶栏入口（`conversation.session.header.actions`）、
+ *   右侧边栏常驻 tab（`sidebarRightTabs` + `sidebar.right.pane.tab`）、以及
+ *   没有房间时的建房/加入最小大厅卡片。
+ * - tab 正文只有紧凑卡片（宽度适配右侧栏约 320–420px）：房间状态 / 大厅 /
+ *   玩家席 / 落座 / 掷骰记录 / GM 控制台 / 成长。没有自绘对话流，也没有输入框。
  *
  * 构建：scripts/build.mjs 打包成 lib/client.js（CJS + ModuleLoader 包装）；
  * 因此源码里不要 import 'react'（由 ModuleLoader 注入），数据从 workspace 包静态打入。
@@ -32,16 +34,15 @@ import {
 } from './export.ts';
 import type {
   AwardPayload,
+  BindSessionResult,
   CreateRoomResult,
   DicePayload,
   GameEvent,
   JoinRoomResult,
   LockParams,
-  NarrationPayload,
   RoomStateResult,
   RoomView,
   RollResult,
-  SayResult,
 } from '@dsh-trpg/protocol';
 
 interface SlotsService {
@@ -59,23 +60,38 @@ interface SlotsService {
   ): () => void;
 }
 
-interface LayoutService {
-  selectPanel(panelId: string | null): void;
+/** 右侧栏 tab 类型注册表（由 @deepseek-ai/dsh-client-ui-sidebar-right 提供）。 */
+interface SidebarRightTabsService {
+  register(definition: { id: string; kind: string; title: (address: string) => string }): () => void;
+}
+
+/** 右侧栏导航面（同一个包提供）：按 kind 打开一个页面 tab。 */
+interface SidebarRightService {
+  openTab(kind: string, options?: Record<string, unknown>): void;
 }
 
 interface ClientContext {
   slots: SlotsService;
   get?(id: string): unknown;
+  inject?(deps: string[], callback: (scoped: ClientContext) => void | (() => void)): unknown;
   effect?(fn: () => () => void): void;
 }
 
-/** main 面板 key：同时是 sidebar.panellist 的 id。 */
-const MAIN_PANEL_ID = 'trpg';
+/**
+ * 右侧栏 tab：`id` 是实现的唯一标识（正文注册的 key），`kind` 是 openTab 点名的对象。
+ * 包名前缀避免与其它插件的注册撞名。
+ */
+const TAB_TYPE_ID = 'dsh-trpg-table:table';
+const TAB_KIND = 'trpg-table';
+const TAB_TITLE = '跑团桌';
+
 const DEFAULT_BASE = 'http://127.0.0.1:45871';
 const STORAGE_KEY = 'dsh-trpg:session:v1';
-/** 当前打开的 DSH 会话 id（顶栏按钮写入，开团时作为牌桌会话绑定）。 */
+/** 当前打开的 DSH 会话 id（顶栏按钮写入，建房时作为牌桌会话绑定的兜底）。 */
 const ACTIVE_SESSION_KEY = 'dsh-trpg:active-session.v1';
 const MAX_FEED = 300;
+/** 掷骰记录卡最多回显几条。 */
+const MAX_DICE_ROWS = 8;
 
 interface StoredSession {
   base: string;
@@ -93,95 +109,35 @@ interface RpcResult<T> {
   error?: { code: string; message: string };
 }
 
+/** 右侧栏紧凑卡片样式：所有卡片铺满栏宽，靠外层 tab 容器滚动。 */
 const CSS = {
-  page: {
-    width: '100%',
-    maxWidth: '100%',
-    boxSizing: 'border-box',
-    minWidth: 0,
-    height: '100%',
+  root: {
+    flex: 1,
     minHeight: 0,
+    minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
+    gap: 8,
+    padding: '10px 10px 14px',
+    boxSizing: 'border-box',
+    overflowY: 'auto',
     background: 'var(--dsw-alias-bg-base)',
     color: 'var(--dsw-alias-label-primary)',
-    overflow: 'hidden',
   } as Record<string, unknown>,
-  shell: {
-    width: '100%',
-    maxWidth: 1240,
-    margin: '0 auto',
-    boxSizing: 'border-box',
-    flex: 1,
-    minHeight: 0,
-    display: 'flex',
-    flexDirection: 'column',
-  } as Record<string, unknown>,
-  head: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
-    padding: '10px 20px',
-    borderBottom: '1px solid var(--dsw-alias-border-l1)',
-    flexShrink: 0,
-  } as Record<string, unknown>,
-  brand: { fontSize: 15, fontWeight: 700, letterSpacing: 0.2 } as Record<string, unknown>,
-  headTitle: { fontSize: 14, fontWeight: 600, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } as Record<string, unknown>,
-  body: {
-    flex: 1,
-    minHeight: 0,
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: 16,
-    padding: '12px 20px 16px',
-    boxSizing: 'border-box',
-  } as Record<string, unknown>,
-  chatCol: { flex: '1 1 340px', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 10 } as Record<string, unknown>,
-  feed: {
-    flex: 1,
-    minHeight: 0,
-    overflowY: 'auto',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 10,
-    padding: '4px 6px 8px',
-  } as Record<string, unknown>,
-  rail: {
-    flex: '1 0 300px', maxWidth: 360,
-    minWidth: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 10,
-    overflowY: 'auto',
-    maxHeight: '100%',
-    boxSizing: 'border-box',
-  } as Record<string, unknown>,
-  composer: {
-    display: 'flex',
-    alignItems: 'flex-end',
-    gap: 10,
-    padding: '8px 10px',
-    borderRadius: 12,
+  section: {
     border: '1px solid var(--dsw-alias-border-l1)',
-    background: 'var(--dsw-alias-bg-layer-1)',
+    borderRadius: 10,
+    padding: 8,
+    background: 'var(--dsw-alias-bg-layer-2)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
     flexShrink: 0,
-  } as Record<string, unknown>,
-  composerInput: {
-    flex: 1,
     minWidth: 0,
-    minHeight: 46,
-    maxHeight: 180,
-    resize: 'none',
-    border: 'none',
-    outline: 'none',
-    background: 'transparent',
-    color: 'var(--dsw-alias-label-primary)',
-    fontSize: 13,
-    lineHeight: 1.65,
-    padding: '3px 0',
-    fontFamily: 'inherit',
   } as Record<string, unknown>,
+  sectionTitle: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 12, fontWeight: 600 } as Record<string, unknown>,
+  roomTitle: { fontSize: 12, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } as Record<string, unknown>,
+  metaRow: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 } as Record<string, unknown>,
   button: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -219,107 +175,22 @@ const CSS = {
     fontSize: 12,
     fontFamily: 'inherit',
   } as Record<string, unknown>,
+  /** 竖排卡片里的输入控件：不参与竖向拉伸，固定铺满栏宽。 */
+  field: {
+    flex: '0 0 auto',
+    width: '100%',
+    boxSizing: 'border-box',
+    padding: '5px 9px',
+    borderRadius: 8,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-layer-2)',
+    color: 'var(--dsw-alias-label-primary)',
+    fontSize: 12,
+    fontFamily: 'inherit',
+  } as Record<string, unknown>,
   muted: { color: 'var(--dsw-alias-label-secondary)', fontSize: 11 } as Record<string, unknown>,
   ok: { color: 'var(--dsw-alias-state-success-primary)', fontSize: 11 } as Record<string, unknown>,
   bad: { color: 'var(--dsw-alias-state-error-primary)', fontSize: 11 } as Record<string, unknown>,
-  section: {
-    border: '1px solid var(--dsw-alias-border-l1)',
-    borderRadius: 10,
-    padding: 8,
-    background: 'var(--dsw-alias-bg-layer-2)',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
-    flexShrink: 0,
-  } as Record<string, unknown>,
-  msgRow: { display: 'flex', gap: 8, alignItems: 'flex-start' } as Record<string, unknown>,
-  msgRowMine: { display: 'flex', gap: 8, alignItems: 'flex-start', flexDirection: 'row-reverse' } as Record<string, unknown>,
-  avatar: {
-    width: 26,
-    height: 26,
-    flex: '0 0 26px',
-    borderRadius: 999,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: 11,
-    fontWeight: 700,
-    background: 'var(--dsw-alias-bg-layer-2)',
-    border: '1px solid var(--dsw-alias-border-l1)',
-  } as Record<string, unknown>,
-  avatarGm: {
-    width: 26,
-    height: 26,
-    flex: '0 0 26px',
-    borderRadius: 999,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: 10,
-    fontWeight: 700,
-    background: 'var(--dsw-alias-brand-primary)',
-    color: 'var(--dsw-alias-bg-base)',
-  } as Record<string, unknown>,
-  msgCol: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, maxWidth: 'min(680px, 82%)' } as Record<string, unknown>,
-  msgColMine: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 2,
-    minWidth: 0,
-    maxWidth: 'min(680px, 82%)',
-    alignItems: 'flex-end',
-  } as Record<string, unknown>,
-  bubble: {
-    padding: '8px 12px',
-    borderRadius: 12,
-    border: '1px solid var(--dsw-alias-border-l1)',
-    background: 'var(--dsw-alias-bg-layer-2)',
-    fontSize: 13,
-    lineHeight: 1.7,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-  } as Record<string, unknown>,
-  bubbleGm: {
-    padding: '8px 12px',
-    borderRadius: 12,
-    border: '1px solid var(--dsw-alias-border-l1)',
-    background: 'var(--dsw-alias-bg-layer-1)',
-    fontSize: 13,
-    lineHeight: 1.7,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-  } as Record<string, unknown>,
-  bubbleMine: {
-    padding: '8px 12px',
-    borderRadius: 12,
-    border: '1px solid var(--dsw-alias-brand-primary)',
-    background: 'var(--dsw-alias-brand-primary)',
-    color: 'var(--dsw-alias-bg-base)',
-    fontSize: 13,
-    lineHeight: 1.7,
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-  } as Record<string, unknown>,
-  diceCard: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: 6,
-    fontSize: 12,
-    padding: '5px 8px',
-    borderRadius: 8,
-    border: '1px dashed var(--dsw-alias-border-l2)',
-  } as Record<string, unknown>,
-  die: {
-    display: 'inline-block',
-    minWidth: 20,
-    textAlign: 'center',
-    padding: '1px 5px',
-    borderRadius: 5,
-    background: 'var(--dsw-alias-bg-layer-1)',
-    border: '1px solid var(--dsw-alias-border-l1)',
-    fontVariantNumeric: 'tabular-nums',
-  } as Record<string, unknown>,
   tag: {
     fontSize: 10,
     padding: '1px 6px',
@@ -330,35 +201,27 @@ const CSS = {
   } as Record<string, unknown>,
   party: { display: 'flex', flexDirection: 'column', gap: 5, fontSize: 12 } as Record<string, unknown>,
   dot: { width: 6, height: 6, borderRadius: 999, display: 'inline-block', flex: '0 0 6px' } as Record<string, unknown>,
-  lobby: {
-    flex: 1,
-    minHeight: 0,
-    width: '100%',
-    boxSizing: 'border-box',
-    overflowY: 'auto',
+  diceCard: {
     display: 'flex',
-    flexDirection: 'column',
+    flexWrap: 'wrap',
     alignItems: 'center',
-    gap: 14,
-    padding: '32px 20px 40px',
+    gap: 6,
+    fontSize: 11,
+    padding: '4px 6px',
+    borderRadius: 8,
+    border: '1px dashed var(--dsw-alias-border-l2)',
   } as Record<string, unknown>,
-  lobbyTitle: { fontSize: 22, fontWeight: 700, textAlign: 'center' } as Record<string, unknown>,
-  lobbySub: { fontSize: 13, lineHeight: 1.7, color: 'var(--dsw-alias-label-secondary)', maxWidth: 620, textAlign: 'center' } as Record<string, unknown>,
-  lobbyCols: { display: 'flex', gap: 14, flexWrap: 'wrap', justifyContent: 'center', width: 'min(780px, 100%)', boxSizing: 'border-box' } as Record<string, unknown>,
-  lobbyCard: {
-    flex: '1 1 300px',
-    minWidth: 0,
-    maxWidth: 420,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 8,
-    border: '1px solid var(--dsw-alias-border-l1)',
-    borderRadius: 12,
-    padding: 14,
+  die: {
+    display: 'inline-block',
+    minWidth: 18,
+    textAlign: 'center',
+    padding: '0 4px',
+    borderRadius: 5,
     background: 'var(--dsw-alias-bg-layer-1)',
-    boxSizing: 'border-box',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    fontVariantNumeric: 'tabular-nums',
   } as Record<string, unknown>,
-  emptyHint: { margin: 'auto', color: 'var(--dsw-alias-label-secondary)', fontSize: 12, textAlign: 'center', lineHeight: 1.8 } as Record<string, unknown>,
+  emptyDice: { color: 'var(--dsw-alias-label-secondary)', fontSize: 11 } as Record<string, unknown>,
 };
 
 async function callRpc<T>(base: string, method: string, params: unknown, token?: string): Promise<T> {
@@ -413,40 +276,29 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+/** 会话/房间 id 太长时截短展示，完整值放 title。 */
+function shortId(id: string, keep = 8): string {
+  return id.length <= keep ? id : `${id.slice(0, keep)}…`;
+}
+
+/** 顶栏按钮记住的当前会话 id（建房的兜底；右侧栏 tab 有 props.sessionId 时优先用它）。 */
+function readActiveSessionId(): string | undefined {
+  try {
+    const raw = globalThis.localStorage?.getItem(ACTIVE_SESSION_KEY);
+    return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function createPlugin(React: any) {
   const h = React.createElement;
   const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
-  /** 侧边栏面板图标。 */
-  function TrpgSidebarIcon(props: { size?: number; active?: boolean }) {
-    const size = props?.size ?? 16;
-    return h(
-      'svg',
-      {
-        width: size,
-        height: size,
-        viewBox: '0 0 16 16',
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: props?.active ? 1.7 : 1.4,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-        'aria-hidden': true,
-        focusable: false,
-      },
-      [
-        h('path', { key: 'dice', d: 'M8 1.8 13.6 5v6L8 14.2 2.4 11V5L8 1.8Z' }),
-        h('circle', { key: 'p1', cx: 8, cy: 5.7, r: 0.7, fill: 'currentColor', stroke: 'none' }),
-        h('circle', { key: 'p2', cx: 5.4, cy: 9.6, r: 0.7, fill: 'currentColor', stroke: 'none' }),
-        h('circle', { key: 'p3', cx: 10.6, cy: 9.6, r: 0.7, fill: 'currentColor', stroke: 'none' }),
-      ],
-    );
-  }
-
-  /** 对话顶栏快捷入口：同时记住当前会话 id，开团时把牌桌绑定到这个会话。 */
+  /** 对话顶栏入口：打开右侧栏的跑团桌 tab；顺带记住当前会话，作为建房的兜底。 */
   function OpenTableButton(props: { onOpen?: () => void; sessionId?: string }) {
     useEffect(() => {
-      if (typeof props?.sessionId !== 'string') return;
+      if (typeof props?.sessionId !== 'string' || props.sessionId.length === 0) return;
       try {
         globalThis.localStorage?.setItem(ACTIVE_SESSION_KEY, props.sessionId);
       } catch {
@@ -457,7 +309,7 @@ export function createPlugin(React: any) {
       'button',
       {
         type: 'button',
-        title: '打开跑团桌（开团时绑定到当前会话）',
+        title: '在右侧栏打开跑团桌',
         style: { ...CSS.button, padding: '3px 8px', fontSize: 11 },
         onClick: () => props?.onOpen?.(),
       },
@@ -465,8 +317,8 @@ export function createPlugin(React: any) {
     );
   }
 
-  /** 主区域整页：叙事对话流 + 行动输入框 + 右侧桌面。 */
-  function TrpgTable(props: { goHome?: () => void }) {
+  /** 右侧栏 tab 正文：紧凑常驻卡片。props.sessionId = 当前会话（右侧栏按会话作用域注入）。 */
+  function TrpgTableCard(props: { sessionId?: string }) {
     const [session, setSession] = useState(loadSession() as StoredSession | null);
     const [room, setRoom] = useState(null as RoomView | null);
     const [feed, setFeed] = useState([] as GameEvent[]);
@@ -481,8 +333,6 @@ export function createPlugin(React: any) {
     const [gmMode, setGmMode] = useState('ai' as 'ai' | 'human');
     const [expression, setExpression] = useState('d20');
     const [privateRoll, setPrivateRoll] = useState(false);
-    const [sayText, setSayText] = useState('');
-    const [sayPrivate, setSayPrivate] = useState(false);
     const [seatCardId, setSeatCardId] = useState(CARDS[0]?.id ?? '');
     const [localCards, setLocalCards] = useState(loadLocalCards() as LocalCardRecord[]);
     const [selectedLocalId, setSelectedLocalId] = useState('');
@@ -501,10 +351,12 @@ export function createPlugin(React: any) {
     const lastSeqRef = useRef(0);
     const sourceRef = useRef(null as { close: () => void } | null);
     const feedRef = useRef([] as GameEvent[]);
-    const feedDomRef = useRef(null as { scrollTop: number; scrollHeight: number } | null);
 
     const token = session?.hostToken ?? session?.playerToken;
     const isHost = Boolean(session?.hostToken);
+    /** 右侧栏 tab 的会话 id：绑定/建房优先用它，localStorage 只做兜底。 */
+    const tabSessionId = typeof props?.sessionId === 'string' && props.sessionId.trim().length > 0 ? props.sessionId.trim() : undefined;
+
     const myCharacter = useMemo(() => {
       if (!room || !session) return undefined;
       const me = session.playerId
@@ -599,7 +451,6 @@ export function createPlugin(React: any) {
       }
     }, []);
 
-
     // 恢复上次会话：拉状态 + 连 SSE。
     useEffect(() => {
       if (!session) return;
@@ -613,12 +464,6 @@ export function createPlugin(React: any) {
       return () => sourceRef.current?.close();
     }, [session, connect, refreshRoom]);
 
-    // 新事件自动滚到底部。
-    useEffect(() => {
-      const element = feedDomRef.current;
-      if (element) element.scrollTop = element.scrollHeight;
-    }, [feed.length]);
-
     const enterRoom = useCallback((next: StoredSession) => {
       saveSession(next);
       setSession(next);
@@ -630,14 +475,8 @@ export function createPlugin(React: any) {
       setStatus({ kind: 'idle', text: '创建房间中…' });
       try {
         const normalizedBase = base.trim().replace(/\/+$/, '');
-        // 牌桌会话：顶栏按钮记住的当前 DSH 会话（仅 AI GM 模式需要；没有就不绑定，走旧通道）。
-        let sessionId: string | undefined;
-        try {
-          const stored = globalThis.localStorage?.getItem(ACTIVE_SESSION_KEY);
-          if (typeof stored === 'string' && stored.trim().length > 0) sessionId = stored.trim();
-        } catch {
-          /* 隐私模式忽略 */
-        }
+        // 牌桌会话：右侧栏 tab 的会话优先，顶栏按钮记住的会话兜底。
+        const sessionId = tabSessionId ?? readActiveSessionId();
         const created = await callRpc<CreateRoomResult>(normalizedBase, 'room.create', {
           title,
           gmMode,
@@ -651,7 +490,7 @@ export function createPlugin(React: any) {
         setStatus({
           kind: 'ok',
           text: created.room.sessionId
-            ? `房间已创建并绑定到当前会话（邀请码 ${created.inviteCode}）`
+            ? `房间已创建，并绑定到当前对话（邀请码 ${created.inviteCode}）`
             : `房间已创建，邀请码 ${created.inviteCode}`,
         });
       } catch (error) {
@@ -659,7 +498,7 @@ export function createPlugin(React: any) {
       } finally {
         setBusy(false);
       }
-    }, [base, title, gmMode, enterRoom]);
+    }, [base, title, gmMode, enterRoom, tabSessionId]);
 
     const joinRoom = useCallback(async () => {
       setBusy(true);
@@ -688,6 +527,22 @@ export function createPlugin(React: any) {
         setBusy(false);
       }
     }, [base, inviteCode, playerName, enterRoom]);
+
+    /** 房主：把房间绑定到右侧栏 tab 所在的会话（原生对话即牌桌）。 */
+    const bindCurrentSession = useCallback(async () => {
+      if (!session || !token || !tabSessionId) return;
+      setBusy(true);
+      setStatus({ kind: 'idle', text: '绑定中…' });
+      try {
+        const result = await callRpc<BindSessionResult>(session.base, 'room.bind', { sessionId: tabSessionId }, token);
+        setRoom(result.room);
+        setStatus({ kind: 'ok', text: `牌桌已绑定到当前对话（${shortId(tabSessionId, 8)}）` });
+      } catch (error) {
+        setStatus({ kind: 'bad', text: `绑定失败：${error instanceof Error ? error.message : String(error)}` });
+      } finally {
+        setBusy(false);
+      }
+    }, [session, token, tabSessionId]);
 
     const selectedLocalCard = localCards.find((record: LocalCardRecord) => record.card.id === selectedLocalId) ?? null;
 
@@ -777,21 +632,6 @@ export function createPlugin(React: any) {
       }
     }, [session, token, expression, privateRoll, appendFeed]);
 
-    const say = useCallback(async () => {
-      if (!session || !token || !sayText.trim()) return;
-      setBusy(true);
-      try {
-        const text = sayText;
-        setSayText('');
-        const result = await callRpc<SayResult>(session.base, 'room.say', { text, private: sayPrivate }, token);
-        appendFeed(result.event);
-      } catch (error) {
-        setStatus({ kind: 'bad', text: `发送失败：${error instanceof Error ? error.message : String(error)}` });
-      } finally {
-        setBusy(false);
-      }
-    }, [session, token, sayText, sayPrivate, appendFeed]);
-
     const kick = useCallback(
       async (playerId: string) => {
         if (!session || !token) return;
@@ -876,9 +716,11 @@ export function createPlugin(React: any) {
     }, [room]);
 
     const leave = useCallback(async () => {
-      if (session && token && !session.hostToken) {
+      if (session && token) {
         try {
-          await callRpc(session.base, 'room.leave', {}, token);
+          // 房主「结束房间」必须真的关房：服务端 closeRoom → onRoomClosed 解绑牌桌会话，
+          // 撤销注入当前会话的 GM 人设/trpg_* 工具；玩家「退出房间」只离开自己的席位。
+          await callRpc(session.base, session.hostToken ? 'room.close' : 'room.leave', {}, token);
         } catch {
           /* 忽略 */
         }
@@ -893,84 +735,7 @@ export function createPlugin(React: any) {
       setStatus({ kind: 'idle', text: '已离开房间' });
     }, [session, token]);
 
-    // ---------------------------------------------------------------- 事件渲染
-
-    const renderChatEntry = (event: GameEvent, index: number) => {
-      const key = `${event.seq}-${index}`;
-      if (event.kind === 'narration') {
-        const payload = event.payload as NarrationPayload;
-        const gm = payload.speaker === 'gm';
-        const mine = Boolean(session?.playerId && payload.playerId === session.playerId);
-        const name = payload.speakerName ?? (gm ? 'GM' : payload.speaker === 'system' ? '系统' : '玩家');
-        return h('div', { key, style: mine ? CSS.msgRowMine : CSS.msgRow }, [
-          h('div', { key: 'avatar', style: gm ? CSS.avatarGm : CSS.avatar }, gm ? 'GM' : name.slice(0, 1)),
-          h('div', { key: 'col', style: mine ? CSS.msgColMine : CSS.msgCol }, [
-            h('span', { key: 'name', style: CSS.muted }, name),
-            h('div', { key: 'bubble', style: gm ? CSS.bubbleGm : mine ? CSS.bubbleMine : CSS.bubble }, payload.text),
-          ]),
-        ]);
-      }
-      if (event.kind === 'dice') {
-        const payload = event.payload as DicePayload;
-        return h('div', { key, style: { display: 'flex', justifyContent: 'center' } }, [
-          h('div', { key: 'card', style: { ...CSS.diceCard, borderStyle: payload.private ? 'solid' : 'dashed' } }, [
-            h('span', { key: 'roller', style: CSS.muted }, payload.rollerName),
-            ...(payload.label ? [h('span', { key: 'label' }, payload.label)] : []),
-            h('span', { key: 'expr', style: CSS.muted }, payload.expression),
-            ...payload.dice.map((die: number, dieIndex: number) => h('span', { key: `die-${dieIndex}`, style: CSS.die }, `${die}`)),
-            h('span', { key: 'total', style: { fontWeight: 700 } }, `= ${payload.total}`),
-            payload.check
-              ? h('span', { key: 'check', style: payload.check.success ? { ...CSS.tag, color: 'var(--dsw-alias-state-success-primary)' } : { ...CSS.tag, color: 'var(--dsw-alias-state-error-primary)' } },
-                `${payload.check.name} DC${payload.check.dc} ${payload.check.success ? '成功' : '失败'}`)
-              : null,
-            payload.private ? h('span', { key: 'private', style: CSS.tag }, '私骰') : null,
-          ]),
-        ]);
-      }
-      if (event.kind === 'combat') {
-        const payload = event.payload as {
-          view?: {
-            round: number;
-            activeName: string;
-            order: Array<{ id: string; name: string; kind: string; hp: number; maxHp: number; downed: boolean; dead: boolean }>;
-          };
-          note?: string;
-        };
-        const view = payload.view;
-        return h('div', { key, style: CSS.section }, [
-          h('div', { key: 'head', style: { fontSize: 12, fontWeight: 600 } }, `⚔ 第 ${view?.round ?? '?'} 轮 · 轮到 ${view?.activeName ?? '?'}`),
-          h(
-            'div',
-            { key: 'order', style: { display: 'flex', flexWrap: 'wrap', gap: 6, fontSize: 11 } },
-            (view?.order ?? []).map((entry) =>
-              h('span', { key: entry.id, style: { ...CSS.tag, color: entry.dead ? 'var(--dsw-alias-state-error-primary)' : entry.kind === 'pc' ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-state-warn-primary)' } },
-                `${entry.name} ${entry.dead ? '阵亡' : entry.downed ? '倒地' : `${entry.hp}/${entry.maxHp}`}`),
-            ),
-          ),
-          payload.note ? h('div', { key: 'note', style: CSS.muted }, payload.note) : null,
-        ]);
-      }
-      if (event.kind === 'scene') {
-        const payload = event.payload as { sceneId: string; title?: string };
-        return h('div', { key, style: { ...CSS.muted, textAlign: 'center', fontSize: 12, color: 'var(--dsw-alias-brand-primary)' } }, `📍 场景推进：${payload.title ?? payload.sceneId}`);
-      }
-      if (event.kind === 'award') {
-        const payload = event.payload as { xp: number; items: string[]; note?: string };
-        return h('div', { key, style: { display: 'flex', justifyContent: 'center' } }, [
-          h('div', { key: 'card', style: { ...CSS.diceCard, borderStyle: 'solid' } }, [
-            h('span', { key: 'title', style: { fontWeight: 600 } }, '🎁 获得奖励'),
-            h('span', { key: 'xp' }, `+${payload.xp} XP`),
-            payload.items.length ? h('span', { key: 'items', style: CSS.muted }, payload.items.join('、')) : null,
-            payload.note ? h('span', { key: 'note', style: CSS.muted }, payload.note) : null,
-          ]),
-        ]);
-      }
-      if (event.kind === 'alert') {
-        const payload = event.payload as { level: string; text: string };
-        return h('div', { key, style: { ...CSS.muted, fontStyle: 'italic', textAlign: 'center' } }, `— ${payload.text} —`);
-      }
-      return h('div', { key, style: CSS.muted }, `[${event.kind}]`);
-    };
+    // ---------------------------------------------------------------- 下拉选项 & 派生数据
 
     const seatOptions = CARDS.map((card) =>
       h('option', { key: card.id, value: card.id }, `${card.identity.name}（${card.identity.class} ${card.identity.level} 级）`),
@@ -991,64 +756,155 @@ export function createPlugin(React: any) {
         .filter((entry: RoomView['players'][number]) => entry.playerId !== 'host')
         .map((entry: RoomView['players'][number]) => h('option', { key: entry.playerId, value: entry.playerId }, entry.displayName)),
     ];
+    /** 掷骰记录：最近几条（新→旧），数据来自 SSE 事件流，只回显不重排。 */
+    const recentDice = useMemo(
+      () => feed.filter((event: GameEvent) => event.kind === 'dice').slice(-MAX_DICE_ROWS).reverse(),
+      [feed],
+    );
 
     // ---------------------------------------------------------------- 页面片段
 
-    const head = h('div', { key: 'head', style: CSS.head }, [
-      h('span', { key: 'brand', style: CSS.brand }, '🎲 跑团桌'),
-      room ? h('span', { key: 'title', style: CSS.headTitle }, room.title) : null,
-      room ? h('span', { key: 'phase', style: CSS.tag }, room.phase) : null,
-      room ? h('span', { key: 'gm', style: CSS.tag }, room.gmMode === 'human' ? '真人 GM' : 'AI GM') : null,
-      room?.scene ? h('span', { key: 'scene', style: CSS.tag }, `场景：${room.scene.title ?? room.scene.sceneId}`) : null,
-      room?.locked ? h('span', { key: 'locked', style: CSS.tag }, '已锁定') : null,
-      room ? h('span', { key: 'count', style: CSS.muted }, `${room.players.length} 人在桌`) : null,
-      isHost && room?.inviteCode
-        ? h('button', { key: 'invite', type: 'button', style: { ...CSS.tag, cursor: 'pointer', background: 'transparent' }, title: '点击复制邀请码', onClick: () => void copyInvite() }, `邀请码 ${room.inviteCode}`)
-        : null,
-      h('span', { key: 'spacer', style: { flex: 1 } }),
-      h('span', { key: 'status', style: status.kind === 'ok' ? CSS.ok : status.kind === 'bad' ? CSS.bad : CSS.muted }, status.text),
-      isHost && room ? h('button', { key: 'gm-console', type: 'button', style: CSS.button, onClick: () => setGmOpen((value: boolean) => !value) }, gmOpen ? '收起 GM 控制台' : 'GM 控制台') : null,
-      isHost && room ? h('button', { key: 'lock', type: 'button', style: CSS.button, onClick: () => void toggleLock() }, room.locked ? '解锁' : '锁房') : null,
-      session ? h('button', { key: 'leave', type: 'button', style: CSS.button, onClick: () => void leave() }, session.hostToken ? '结束房间' : '退出房间') : null,
-      props?.goHome ? h('button', { key: 'home', type: 'button', style: CSS.button, title: '返回 DSH 对话', onClick: () => props.goHome?.() }, '返回对话') : null,
-    ]);
-
-    const composer = h('div', { key: 'composer', style: CSS.composer }, [
-      h('textarea', {
-        key: 'input',
-        style: CSS.composerInput,
-        value: sayText,
-        placeholder: sayPrivate ? '悄悄话给 GM：只有 GM（和真人 GM）能看到…' : '你要做什么？（例：我推开门，先看一眼门缝里的光）',
-        onChange: (event: { target: { value: string } }) => setSayText(event.target.value),
-        onKeyDown: (event: { key: string; shiftKey: boolean; preventDefault?: () => void }) => {
-          if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault?.();
-            void say();
-          }
+    const statusLine = h('div', { key: 'status', style: { display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 } }, [
+      h('span', {
+        key: 'dot',
+        style: {
+          ...CSS.dot,
+          background:
+            status.kind === 'ok'
+              ? 'var(--dsw-alias-state-success-primary)'
+              : status.kind === 'bad'
+                ? 'var(--dsw-alias-state-error-primary)'
+                : 'var(--dsw-alias-state-idle-primary)',
         },
       }),
-      h('div', { key: 'actions', style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 } }, [
-        h('button', { key: 'send', type: 'button', style: CSS.buttonPrimary, disabled: busy || !sayText.trim(), onClick: () => void say() }, sayPrivate ? '私发 GM' : '发送'),
-        h('label', { key: 'whisper', style: { ...CSS.muted, display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' } }, [
-          h('input', {
-            key: 'checkbox',
-            type: 'checkbox',
-            checked: sayPrivate,
-            onChange: (event: { target: { checked: boolean } }) => setSayPrivate(event.target.checked),
-          }),
-          '悄悄话给 GM',
-        ]),
+      h('span', { key: 'text', style: status.kind === 'ok' ? CSS.ok : status.kind === 'bad' ? CSS.bad : CSS.muted }, status.text),
+    ]);
+
+    const boundSessionId = room?.sessionId;
+    const boundIsCurrent = Boolean(boundSessionId && tabSessionId && boundSessionId === tabSessionId);
+    const onlineCount = (room?.players ?? []).filter((entry: RoomView['players'][number]) => entry.online).length;
+
+    const roomCard = room
+      ? h('div', { key: 'room', style: CSS.section }, [
+          h('div', { key: 'head', style: CSS.sectionTitle }, [
+            h('span', { key: 'title', style: CSS.roomTitle, title: room.title }, room.title),
+            h('span', { key: 'phase', style: CSS.tag }, room.phase),
+            h('span', { key: 'gm', style: CSS.tag }, room.gmMode === 'human' ? '真人 GM' : 'AI GM'),
+            room.locked ? h('span', { key: 'locked', style: CSS.tag }, '已锁定') : null,
+          ]),
+          h('div', { key: 'meta', style: CSS.metaRow }, [
+            isHost && room.inviteCode
+              ? h(
+                  'button',
+                  {
+                    key: 'invite',
+                    type: 'button',
+                    style: { ...CSS.tag, cursor: 'pointer', background: 'transparent' },
+                    title: '点击复制邀请码',
+                    onClick: () => void copyInvite(),
+                  },
+                  `邀请码 ${room.inviteCode}`,
+                )
+              : null,
+            h('span', { key: 'roomno', style: CSS.tag, title: room.roomId }, `房间号 ${shortId(room.roomId)}`),
+            h('span', { key: 'online', style: CSS.muted }, `在线 ${onlineCount}/${room.players.length}`),
+          ]),
+          room.scene
+            ? h('span', { key: 'scene', style: CSS.muted }, `场景：${room.scene.title ?? room.scene.sceneId}`)
+            : null,
+          h('div', { key: 'session', style: CSS.metaRow }, [
+            h(
+              'span',
+              {
+                key: 'sessionid',
+                style: { ...CSS.muted, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                title: boundSessionId ?? '尚未绑定牌桌会话',
+              },
+              `牌桌会话：${boundSessionId ? shortId(boundSessionId, 10) : '未绑定'}`,
+            ),
+            isHost
+              ? h(
+                  'button',
+                  {
+                    key: 'bind',
+                    type: 'button',
+                    style: CSS.button,
+                    disabled: busy || !tabSessionId || boundIsCurrent,
+                    title: tabSessionId ? '把房间绑定到当前对话会话' : '当前没有可绑定的会话',
+                    onClick: () => void bindCurrentSession(),
+                  },
+                  boundIsCurrent ? '已绑定本会话' : boundSessionId ? '改绑到本会话' : '绑定当前会话',
+                )
+              : null,
+          ]),
+          h('div', { key: 'actions', style: CSS.row }, [
+            isHost
+              ? h('button', { key: 'gm-console', type: 'button', style: CSS.button, onClick: () => setGmOpen((value: boolean) => !value) }, gmOpen ? '收起 GM 控制台' : 'GM 控制台')
+              : null,
+            isHost ? h('button', { key: 'lock', type: 'button', style: CSS.button, onClick: () => void toggleLock() }, room.locked ? '解锁' : '锁房') : null,
+            session ? h('button', { key: 'leave', type: 'button', style: CSS.button, onClick: () => void leave() }, session.hostToken ? '结束房间' : '退出房间') : null,
+          ]),
+        ])
+      : null;
+
+    const lobby = h('div', { key: 'lobby', style: { display: 'flex', flexDirection: 'column', gap: 8 } }, [
+      h('div', { key: 'base', style: CSS.section }, [
+        h('strong', { key: 't' }, '房主地址'),
+        h('input', {
+          key: 'input',
+          style: CSS.field,
+          value: base,
+          spellCheck: false,
+          placeholder: 'http://192.168.x.x:45871',
+          onChange: (event: { target: { value: string } }) => setBase(event.target.value),
+        }),
+        h('span', { key: 'hint', style: CSS.muted }, '同机测试用 127.0.0.1；玩家填房主的局域网地址。'),
+      ]),
+      h('div', { key: 'host', style: CSS.section }, [
+        h('strong', { key: 't' }, '开团 · 我是房主'),
+        h('input', {
+          key: 'title',
+          style: CSS.field,
+          value: title,
+          placeholder: '团名',
+          onChange: (event: { target: { value: string } }) => setTitle(event.target.value),
+        }),
+        h(
+          'select',
+          {
+            key: 'gm',
+            style: CSS.field,
+            value: gmMode,
+            onChange: (event: { target: { value: string } }) => setGmMode(event.target.value === 'human' ? 'human' : 'ai'),
+          },
+          [h('option', { key: 'ai', value: 'ai' }, 'AI 当 GM'), h('option', { key: 'human', value: 'human' }, '真人 GM（我来主持）')],
+        ),
+        h('button', { key: 'create', type: 'button', style: CSS.buttonPrimary, disabled: busy, onClick: () => void createRoom() }, '创建房间'),
+        h('span', { key: 'hint', style: CSS.muted }, '需在房主本机操作；会把当前对话设为牌桌，AI GM 直接在会话里回话。'),
+      ]),
+      h('div', { key: 'join', style: CSS.section }, [
+        h('strong', { key: 't' }, '加入朋友的团'),
+        h('input', {
+          key: 'code',
+          style: CSS.field,
+          placeholder: '邀请码（如 7F3K9Q）',
+          value: inviteCode,
+          onChange: (event: { target: { value: string } }) => setInviteCode(event.target.value),
+        }),
+        h('input', {
+          key: 'name',
+          style: CSS.field,
+          placeholder: '你的玩家名',
+          value: playerName,
+          onChange: (event: { target: { value: string } }) => setPlayerName(event.target.value),
+        }),
+        h('button', { key: 'join-btn', type: 'button', style: CSS.buttonPrimary, disabled: busy, onClick: () => void joinRoom() }, '加入房间'),
+        h('span', { key: 'hint', style: CSS.muted }, '进房后先「落座」，行动直接写在原生对话里。'),
       ]),
     ]);
 
-    const chatColumn = h('div', { key: 'chat', style: CSS.chatCol }, [
-      h('div', { key: 'feed', ref: feedDomRef, style: CSS.feed }, feed.length
-        ? feed.map(renderChatEntry)
-        : h('div', { key: 'empty', style: CSS.emptyHint }, [
-            h('div', { key: 'line1' }, room?.gmMode === 'human' ? '真人 GM 主持中。' : 'AI GM 正在带团。'),
-            h('div', { key: 'line2' }, '在下方输入你的行动，按 Enter 发送（Shift+Enter 换行）。'),
-          ])),
-      composer,
+    const connecting = h('div', { key: 'loading', style: { ...CSS.section, gap: 4 } }, [
+      h('span', { key: 't', style: CSS.muted }, '正在连接房间…'),
     ]);
 
     const partySection = h('div', { key: 'party', style: CSS.section }, [
@@ -1062,7 +918,7 @@ export function createPlugin(React: any) {
               key: 'dot',
               style: { ...CSS.dot, background: entry.online ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-idle-primary)' },
             }),
-            h('span', { key: 'name' }, entry.displayName),
+            h('span', { key: 'name', style: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, entry.displayName),
             h('span', { key: 'char', style: CSS.muted }, entry.characterName ? `· ${entry.characterName}` : '· 未落座'),
             entry.playerId === 'host' ? h('span', { key: 'hosttag', style: CSS.tag }, 'GM') : null,
             isHost && entry.playerId !== 'host'
@@ -1152,6 +1008,35 @@ export function createPlugin(React: any) {
         h('button', { key: 'roll', type: 'button', style: CSS.button, disabled: busy, onClick: () => void roll() }, '掷'),
       ]),
       h('span', { key: 'hint', style: CSS.muted }, '骰子由房主服务端掷，可复现。'),
+      recentDice.length
+        ? h(
+            'div',
+            { key: 'history', style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+            recentDice.map((event: GameEvent) => {
+              const payload = event.payload as DicePayload;
+              return h('div', { key: `${event.seq}`, style: { ...CSS.diceCard, borderStyle: payload.private ? 'solid' : 'dashed' } }, [
+                h('span', { key: 'roller', style: CSS.muted }, payload.rollerName),
+                ...(payload.label ? [h('span', { key: 'label' }, payload.label)] : []),
+                h('span', { key: 'expr', style: CSS.muted }, payload.expression),
+                ...payload.dice.map((die: number, dieIndex: number) => h('span', { key: `die-${dieIndex}`, style: CSS.die }, `${die}`)),
+                h('span', { key: 'total', style: { fontWeight: 700 } }, `= ${payload.total}`),
+                payload.check
+                  ? h(
+                      'span',
+                      {
+                        key: 'check',
+                        style: payload.check.success
+                          ? { ...CSS.tag, color: 'var(--dsw-alias-state-success-primary)' }
+                          : { ...CSS.tag, color: 'var(--dsw-alias-state-error-primary)' },
+                      },
+                      `${payload.check.name} DC${payload.check.dc} ${payload.check.success ? '成功' : '失败'}`,
+                    )
+                  : null,
+                payload.private ? h('span', { key: 'private', style: CSS.tag }, '私骰') : null,
+              ]);
+            }),
+          )
+        : h('span', { key: 'empty', style: CSS.emptyDice }, '还没有掷骰记录。'),
     ]);
 
     const growthSection = h('div', { key: 'growth', style: CSS.section }, [
@@ -1195,7 +1080,7 @@ export function createPlugin(React: any) {
           h('div', { key: 'narr', style: { display: 'flex', flexDirection: 'column', gap: 6 } }, [
             h('textarea', {
               key: 'txt',
-              style: { ...CSS.input, minHeight: 52, resize: 'vertical' },
+              style: { ...CSS.field, minHeight: 52, resize: 'vertical' },
               value: gmText,
               placeholder: '以 GM 身份向全桌描述…',
               onChange: (event: { target: { value: string } }) => setGmText(event.target.value),
@@ -1238,128 +1123,65 @@ export function createPlugin(React: any) {
         ])
       : null;
 
-    const rail = h('div', { key: 'rail', style: CSS.rail }, [partySection, seatSection, gmConsole, diceSection, growthSection]);
+    const children: unknown[] = [statusLine];
+    if (!session) children.push(lobby);
+    else if (!room) children.push(connecting);
+    else children.push(roomCard, partySection, seatSection, gmConsole, diceSection, growthSection);
 
-    const roomBody = h('div', { key: 'body', style: CSS.body }, [chatColumn, rail]);
-
-    // ---------------------------------------------------------------- 大厅
-
-    const lobby = h('div', { key: 'lobby', style: CSS.lobby }, [
-      h('div', { key: 'title', style: CSS.lobbyTitle }, '跑团桌 · 局域网多人跑团'),
-      h('div', { key: 'sub', style: CSS.lobbySub }, '房主在自己电脑上开团（AI 当 GM，或你自己当 GM），朋友们用你的局域网地址 + 邀请码上桌。AI GM 只跑在房主机器上，玩家端不需要模型 Key。'),
-      h('div', { key: 'base', style: { ...CSS.row, width: 'min(560px, 100%)', boxSizing: 'border-box' } }, [
-        h('span', { key: 'label', style: CSS.muted }, '房主地址'),
-        h('input', {
-          key: 'input',
-          style: CSS.input,
-          value: base,
-          spellCheck: false,
-          placeholder: 'http://192.168.x.x:45871',
-          onChange: (event: { target: { value: string } }) => setBase(event.target.value),
-        }),
-      ]),
-      h('div', { key: 'cols', style: CSS.lobbyCols }, [
-        h('div', { key: 'host', style: CSS.lobbyCard }, [
-          h('strong', { key: 'h', style: { fontSize: 14 } }, '我是房主 · 开团'),
-          h('span', { key: 'hint', style: CSS.muted }, '创建房间需要在房主本机操作。'),
-          h('input', {
-            key: 'title',
-            style: CSS.input,
-            value: title,
-            placeholder: '团名',
-            onChange: (event: { target: { value: string } }) => setTitle(event.target.value),
-          }),
-          h('select', {
-            key: 'gm',
-            style: CSS.input,
-            value: gmMode,
-            onChange: (event: { target: { value: string } }) => setGmMode(event.target.value === 'human' ? 'human' : 'ai'),
-          }, [h('option', { key: 'ai', value: 'ai' }, 'AI 当 GM'), h('option', { key: 'human', value: 'human' }, '真人 GM（我来主持）')]),
-          h('button', { key: 'create', type: 'button', style: CSS.buttonPrimary, disabled: busy, onClick: () => void createRoom() }, '创建房间'),
-        ]),
-        h('div', { key: 'join', style: CSS.lobbyCard }, [
-          h('strong', { key: 'j', style: { fontSize: 14 } }, '加入朋友的团'),
-          h('span', { key: 'hint', style: CSS.muted }, '填房主的局域网地址（或 127.0.0.1 同机测试）和邀请码。'),
-          h('input', {
-            key: 'code',
-            style: CSS.input,
-            placeholder: '邀请码（如 7F3K9Q）',
-            value: inviteCode,
-            onChange: (event: { target: { value: string } }) => setInviteCode(event.target.value),
-          }),
-          h('input', {
-            key: 'name',
-            style: CSS.input,
-            placeholder: '你的玩家名',
-            value: playerName,
-            onChange: (event: { target: { value: string } }) => setPlayerName(event.target.value),
-          }),
-          h('button', { key: 'join-btn', type: 'button', style: CSS.buttonPrimary, disabled: busy, onClick: () => void joinRoom() }, '加入房间'),
-        ]),
-      ]),
-      h('div', { key: 'hint2', style: { ...CSS.muted, textAlign: 'center', maxWidth: 620, lineHeight: 1.8 } },
-        '进房后先「落座」：从预制卡里挑一张，或导入自己的角色卡。落座后中间就是叙事对话流，输入框写你的 RP 行动即可。'),
-    ]);
-
-    const loading = h('div', { key: 'loading', style: { display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, padding: 40 } }, [
-      h('span', { key: 't', style: CSS.muted }, '正在连接房间…'),
-    ]);
-
-    return h('div', { key: 'page', style: CSS.page }, [
-      h('div', { key: 'shell', style: CSS.shell }, [
-        head,
-        session ? (room ? roomBody : loading) : lobby,
-      ]),
-    ]);
+    return h('div', { key: 'root', style: CSS.root }, children);
   }
 
   return {
     inject: ['slots'],
     apply(ctx: ClientContext) {
-      const layout = (ctx.get?.('layout') ?? undefined) as LayoutService | undefined;
-      ctx.effect?.(() => {
-        const disposers: Array<() => void> = [];
-        // 主区域整页：打开后整块主区域就是跑团桌。
-        disposers.push(
-          ctx.slots.inject('main', () =>
-            ctx.slots.register(
-              {
-                name: 'main',
-                key: MAIN_PANEL_ID,
-                inject: () => ({ goHome: layout ? () => layout.selectPanel(null) : undefined }),
-              },
-              TrpgTable,
-            ),
-          ),
-        );
-
-        // 侧边栏面板图标。
-        disposers.push(
-          ctx.slots.inject('sidebar.panellist', () =>
-            ctx.slots.register({ name: 'sidebar.panellist', id: MAIN_PANEL_ID, order: 20, label: '跑团桌' }, TrpgSidebarIcon),
-          ),
-        );
-        // 对话顶栏的快捷入口（有 layout 服务时才注册）。
-        if (layout) {
-          disposers.push(
-            ctx.slots.inject('conversation.session.header.actions', () =>
-              ctx.slots.register(
-                {
-                  name: 'conversation.session.header.actions',
-                  id: 'dsh-trpg-table-open',
-                  order: 60,
-                  label: '跑团桌',
-                  inject: () => ({ onOpen: () => layout.selectPanel(MAIN_PANEL_ID) }),
-                },
-                OpenTableButton,
-              ),
-            ),
-          );
+      /** 顶栏按钮点击：打开右侧栏 tab。服务懒取（点击时一定已就绪），没有则静默。 */
+      const openTableTab = (): void => {
+        const service = ctx.get?.('sidebarRight') as SidebarRightService | undefined;
+        if (!service || typeof service.openTab !== 'function') return;
+        try {
+          service.openTab(TAB_KIND);
+        } catch {
+          /* 没有已挂载的会话面（例如停在全局页面）时忽略 */
         }
-        return () => {
-          for (const dispose of disposers) dispose();
-        };
+      };
+
+      // 1) 右侧栏 tab 类型：服务由 @deepseek-ai/dsh-client-ui-sidebar-right 提供，
+      //    用 ctx.inject 惰性等待（它可能比本插件晚挂载；没有该服务的精简宿主只是没有这个 tab）。
+      ctx.inject?.(['sidebarRightTabs'], (scoped) => {
+        const tabs = scoped.get?.('sidebarRightTabs') as SidebarRightTabsService | undefined;
+        if (!tabs || typeof tabs.register !== 'function') return;
+        let dispose: (() => void) | undefined;
+        try {
+          dispose = tabs.register({ id: TAB_TYPE_ID, kind: TAB_KIND, title: () => TAB_TITLE });
+        } catch (error) {
+          console.warn('[dsh-trpg-table] 注册右侧栏 tab 类型失败', error);
+          return;
+        }
+        return () => dispose?.();
       });
+
+      // 2) tab 正文：按 tab 类型的 id 注册到 keyed slot（slot 由右侧栏拥有，inject 会等它就绪）。
+      ctx.effect?.(() =>
+        ctx.slots.inject('sidebar.right.pane.tab', () =>
+          ctx.slots.register({ name: 'sidebar.right.pane.tab', key: TAB_TYPE_ID }, TrpgTableCard),
+        ),
+      );
+
+      // 3) 对话顶栏入口（点击打开右侧栏 tab，不再切换主区域面板）。
+      ctx.effect?.(() =>
+        ctx.slots.inject('conversation.session.header.actions', () =>
+          ctx.slots.register(
+            {
+              name: 'conversation.session.header.actions',
+              id: 'dsh-trpg-table-open',
+              order: 60,
+              label: TAB_TITLE,
+              inject: () => ({ onOpen: openTableTab }),
+            },
+            OpenTableButton,
+          ),
+        ),
+      );
     },
   };
 }
