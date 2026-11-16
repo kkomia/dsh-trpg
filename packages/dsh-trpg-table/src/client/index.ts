@@ -3,7 +3,8 @@
  *
  * 形态（产品已定，勿改回自绘聊天页）：
  * - 对话主区域直接复用 DSH 原生会话：房主会话即牌桌，GM 的回复由原生对话渲染。
- * - 插件只提供三样东西：对话顶栏入口（`conversation.session.header.actions`）、
+ * - 插件只提供四样东西：对话顶栏入口（`conversation.session.header.actions`）、
+ *   空态页全局入口（`conversation.header.leading`，无会话/空会话时显示，正常对话页让位给顶栏 chip）、
  *   右侧边栏常驻 tab（`sidebarRightTabs` + `sidebar.right.pane.tab`）、以及
  *   没有房间时的建房/加入最小大厅卡片。
  * - tab 正文只有紧凑卡片（宽度适配右侧栏约 320–420px）：房间状态 / 大厅 /
@@ -65,9 +66,17 @@ interface SidebarRightTabsService {
   register(definition: { id: string; kind: string; title: (address: string) => string }): () => void;
 }
 
+/** 右侧栏的「当前在屏会话」快照（service.mounted）：root 作用域也能读到有没有会话面。 */
+interface SidebarRightMountedSource {
+  getSnapshot(): string | undefined;
+  subscribe(listener: () => void): () => void;
+}
+
 /** 右侧栏导航面（同一个包提供）：按 kind 打开一个页面 tab。 */
 interface SidebarRightService {
   openTab(kind: string, options?: Record<string, unknown>): void;
+  /** 没有在屏会话时为 undefined；openTab 在这种状态下会抛错。 */
+  mounted?: SidebarRightMountedSource;
 }
 
 interface ClientContext {
@@ -317,6 +326,99 @@ export function createPlugin(React: any) {
     );
   }
 
+  /**
+   * 全局入口：挂在 `conversation.header.leading`（root 作用域，空态新会话页也渲染）。
+   *
+   * 会话头有标题/操作集群时（正常对话页），原 `conversation.session.header.actions`
+   * 的「跑团桌」chip 已在，本组件返回 null 让位，保证同一时刻只有一个入口；
+   * 只在「没有会话面」或「空会话（会话头隐藏操作集群）」时显示。
+   *
+   * 点击：有在屏会话就直接开右侧栏 tab；没有则先让 DSH 新开会话，等 mounted 出现后重试，
+   * 仍失败（例如完全没有工作区）才给出可读引导。
+   */
+  function GlobalOpenTableEntry(props: {
+    onOpen?: () => boolean;
+    readMounted?: () => string | undefined;
+    subscribeMounted?: (listener: () => void) => () => void;
+    ensureSession?: () => void;
+    useSessions?: (selector: (state: any) => unknown) => unknown;
+  }) {
+    const [mounted, setMounted] = useState(() => props?.readMounted?.());
+    const [hint, setHint] = useState('');
+    const retryRef = useRef(null as ReturnType<typeof setTimeout> | null);
+
+    useEffect(() => {
+      setMounted(props?.readMounted?.());
+      const stop = props?.subscribeMounted?.(() => setMounted(props?.readMounted?.()));
+      return () => {
+        stop?.();
+      };
+    }, []);
+
+    useEffect(() => () => {
+      if (retryRef.current) clearTimeout(retryRef.current);
+    }, []);
+
+    // 空会话 = 会话头隐藏了标题/操作集群（原 chip 看不见）；undefined 表示列表还没加载，先不显示，避免重复。
+    const blank = props?.useSessions?.((state: any) =>
+      typeof mounted === 'string' && state?.byId !== undefined ? state.byId[mounted]?.blank : undefined);
+
+    const tryOpen = (attempt: number): void => {
+      if (props?.onOpen?.() === true) {
+        setHint('');
+        return;
+      }
+      if (attempt <= 0) {
+        setHint('先在左侧「新会话」建一个会话，再打开跑团桌');
+        return;
+      }
+      retryRef.current = setTimeout(() => {
+        tryOpen(attempt - 1);
+      }, 300);
+    };
+
+    // 有会话且不是空会话时，会话头 chip 已覆盖入口 → 让位。
+    if (mounted !== undefined && blank !== true) return null;
+
+    return h('div', { key: 'global-open', style: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 } }, [
+      h(
+        'button',
+        {
+          key: 'btn',
+          type: 'button',
+          title: '在右侧栏打开跑团桌',
+          style: { ...CSS.button, padding: '3px 8px', fontSize: 11 },
+          onClick: () => {
+            if (props?.onOpen?.() === true) {
+              setHint('');
+              return;
+            }
+            // 没有在屏会话：先新建会话，再等右侧栏出现会话面。
+            props?.ensureSession?.();
+            tryOpen(12);
+          },
+        },
+        '🎲 跑团桌',
+      ),
+      hint
+        ? h(
+            'span',
+            {
+              key: 'hint',
+              style: {
+                ...CSS.muted,
+                fontSize: 11,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              },
+            },
+            hint,
+          )
+        : null,
+    ]);
+  }
+
   /** 右侧栏 tab 正文：紧凑常驻卡片。props.sessionId = 当前会话（右侧栏按会话作用域注入）。 */
   function TrpgTableCard(props: { sessionId?: string }) {
     const [session, setSession] = useState(loadSession() as StoredSession | null);
@@ -491,7 +593,7 @@ export function createPlugin(React: any) {
           kind: 'ok',
           text: created.room.sessionId
             ? `房间已创建，并绑定到当前对话（邀请码 ${created.inviteCode}）`
-            : `房间已创建，邀请码 ${created.inviteCode}`,
+            : `房间已创建，邀请码 ${created.inviteCode}（未绑定会话：请在对话页顶栏打开跑团桌后点「绑定当前会话」）`,
         });
       } catch (error) {
         setStatus({ kind: 'bad', text: `创建失败：${error instanceof Error ? error.message : String(error)}（创建房间需要在房主本机）` });
@@ -530,7 +632,11 @@ export function createPlugin(React: any) {
 
     /** 房主：把房间绑定到右侧栏 tab 所在的会话（原生对话即牌桌）。 */
     const bindCurrentSession = useCallback(async () => {
-      if (!session || !token || !tabSessionId) return;
+      if (!session || !token) return;
+      if (!tabSessionId) {
+        setStatus({ kind: 'bad', text: '当前 tab 没有可绑定的会话：请在对话页顶栏打开跑团桌后再绑定' });
+        return;
+      }
       setBusy(true);
       setStatus({ kind: 'idle', text: '绑定中…' });
       try {
@@ -782,6 +888,19 @@ export function createPlugin(React: any) {
 
     const boundSessionId = room?.sessionId;
     const boundIsCurrent = Boolean(boundSessionId && tabSessionId && boundSessionId === tabSessionId);
+
+    /** 拿不到会话 id（例如这个 tab 被恢复在没有会话的宿主里）时给可读提示：建房不会静默丢绑定。 */
+    const missingSessionHint = tabSessionId
+      ? null
+      : h('div', { key: 'nosession', style: CSS.section }, [
+          h('strong', { key: 't', style: { color: 'var(--dsw-alias-state-warning-primary)' } }, '当前没有可绑定的会话'),
+          h(
+            'span',
+            { key: 'hint', style: CSS.muted },
+            '建房会照常成功，但不会绑定 AI GM。请回到对话页，用顶栏的「跑团桌」入口重新打开本栏，再点「绑定当前会话」。',
+          ),
+        ]);
+
     const onlineCount = (room?.players ?? []).filter((entry: RoomView['players'][number]) => entry.online).length;
 
     const roomCard = room
@@ -848,6 +967,7 @@ export function createPlugin(React: any) {
       : null;
 
     const lobby = h('div', { key: 'lobby', style: { display: 'flex', flexDirection: 'column', gap: 8 } }, [
+      missingSessionHint,
       h('div', { key: 'base', style: CSS.section }, [
         h('strong', { key: 't' }, '房主地址'),
         h('input', {
@@ -1134,16 +1254,42 @@ export function createPlugin(React: any) {
   return {
     inject: ['slots'],
     apply(ctx: ClientContext) {
-      /** 顶栏按钮点击：打开右侧栏 tab。服务懒取（点击时一定已就绪），没有则静默。 */
-      const openTableTab = (): void => {
+      /** 懒取右侧栏导航面：点击时一定已就绪；精简宿主没有该服务时返回 undefined。 */
+      const sidebarRight = (): SidebarRightService | undefined => {
         const service = ctx.get?.('sidebarRight') as SidebarRightService | undefined;
-        if (!service || typeof service.openTab !== 'function') return;
+        return service && typeof service.openTab === 'function' ? service : undefined;
+      };
+
+      /**
+       * 打开右侧栏「跑团桌」tab。
+       * @returns 成功返回 true；没有在屏会话面（openTab 会抛错）返回 false，由调用方决定引导方式。
+       */
+      const openTableTab = (): boolean => {
+        const service = sidebarRight();
+        if (!service) return false;
         try {
           service.openTab(TAB_KIND);
+          return true;
         } catch {
-          /* 没有已挂载的会话面（例如停在全局页面）时忽略 */
+          /* 没有已挂载的会话面（例如停在空态页）时由调用方改走「先新建会话」 */
+          return false;
         }
       };
+
+      /** 空态页没有会话时：请 DSH 走它自己的「新会话」导航（没有工作区时它自己不动作）。 */
+      const ensureSession = (): void => {
+        const navigation = ctx.get?.('uiWorkspace') as
+          | { startSession?: (workspaceId?: string) => void }
+          | undefined;
+        try {
+          navigation?.startSession?.();
+        } catch (error) {
+          console.warn('[dsh-trpg-table] 新建会话失败', error);
+        }
+      };
+
+      /** 读右侧栏「当前在屏会话」：空态页/全局页面为 undefined。 */
+      const readMounted = (): string | undefined => sidebarRight()?.mounted?.getSnapshot();
 
       // 1) 右侧栏 tab 类型：服务由 @deepseek-ai/dsh-client-ui-sidebar-right 提供，
       //    用 ctx.inject 惰性等待（它可能比本插件晚挂载；没有该服务的精简宿主只是没有这个 tab）。
@@ -1179,6 +1325,29 @@ export function createPlugin(React: any) {
               inject: () => ({ onOpen: openTableTab }),
             },
             OpenTableButton,
+          ),
+        ),
+      );
+
+      // 4) 全局入口：`conversation.header.leading` 是 root 作用域，空态新会话页（无会话头操作集群）也渲染。
+      //    该组件只在「没有会话面」或「空会话」时显示，正常对话页让位给上面的 chip，不出现重复入口。
+      ctx.effect?.(() =>
+        ctx.slots.inject('conversation.header.leading', () =>
+          ctx.slots.register(
+            {
+              name: 'conversation.header.leading',
+              inject: () => ({
+                onOpen: openTableTab,
+                readMounted,
+                subscribeMounted: (listener: () => void) => {
+                  const observable = sidebarRight()?.mounted;
+                  if (!observable || typeof observable.subscribe !== 'function') return () => {};
+                  return observable.subscribe(listener);
+                },
+                ensureSession,
+              }),
+            },
+            GlobalOpenTableEntry,
           ),
         ),
       );
