@@ -4,6 +4,7 @@
 > 仓库：`dsh-trpg` · npm 包（暂定）：`dsh-trpg-table` · 协议：MIT
 > 状态：v0.1 草案（2026-11-13），待项目主理人过目后开工
 > 定位：**局域网多人 AI 跑团桌**——房主建房、AI 当 KP/GM、玩家只负责 RP。以 DSH 插件形态交付，后期通过 IM（QQ 等）接入公网玩家。
+> 内容（模组/世界书/角色卡）的制作与数据模型见 [CONTENT-MODEL.md](./CONTENT-MODEL.md)（内容包 Content Pack，M8）。
 
 ---
 
@@ -169,6 +170,8 @@ dsh-trpg/
 ---
 
 ## 6. 内容格式（自研，结构参考 DiceFrame）
+
+> **v1 起统一为内容包（Content Pack，M8）**：一个包 = `pack.json` + 可选 `assets/`，以 `.trpgpack`（**ZIP**）制作/分发；下面 6.1–6.3 是包内对象 schema 的示意，字段名与迁移规则以 [CONTENT-MODEL.md](./CONTENT-MODEL.md) §2 为准（如 `id` → `cardId`、`scene.lore` → `scene.loreIds`、模组/世界书/卡都进同一个 `pack.json`）。
 
 ### 6.1 角色卡 `card.schema.json`
 

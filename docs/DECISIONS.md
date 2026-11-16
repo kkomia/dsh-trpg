@@ -1,7 +1,7 @@
 # 访谈决策账（Grill Ledger）
 
 > 本文记录立项访谈中主理人拍板的每一条决策、当时的备选与理由。后续所有实现都应能追溯到这里；改主意时请改这里并注明日期，不要悄悄漂移。
-> 访谈方式：每轮只问「前置已定」的分叉，每题给推荐答案；四轮共 22 条。M6 追加 1 条补记（第五轮）；空态入口修复追加 1 条（第六轮）。
+> 访谈方式：每轮只问「前置已定」的分叉，每题给推荐答案；四轮共 22 条。M6 追加 1 条补记（第五轮）；空态入口修复追加 1 条（第六轮）；内容模型统一追加 1 条（第七轮）。
 
 ## 第一轮：产品与玩法（2026-11-13）
 
@@ -56,6 +56,12 @@
 | # | 决策点 | 结论 | 备选与理由 |
 |---|---|---|---|
 | 24 | 新会话空态页入口 | **在 `conversation.header.leading`（root 作用域 single slot）加全局「🎲 跑团桌」入口**：空态页/空白会话页显示，有正常会话时让位给 `conversation.session.header.actions` chip，同一时刻只有一个入口；点击先 `uiWorkspace.startSession()` 准备会话，300ms 间隔短重试后 `sidebarRight.openTab('trpg-table')`，仍失败给引导文案。**否决**：a) 只留头部 chip、要求用户先手动建会话或先发一条消息再看到入口（空态页本来就点不到，正是用户报的 bug）；b) 在左侧栏/导航另挂一个常驻重复入口（同屏两个入口、语义重复且占位）。 | 根因：`conversation.session.header.actions` 在 `hideChrome=blank` 时整块不渲染（`ConversationSession.tsx:148,205-207`、`ConversationHeader.tsx:26`），空态页虽有 blank 会话但没有会话头操作集群；`conversation.header.leading` 无会话也渲染（`slots.ts:266`）。已知限制：single slot 若被其他插件占用会冲突 |
+
+## 第七轮：内容模型统一（Content Pack）补记（2026-11-16）✅ 已定稿
+
+| # | 决策点 | 结论 | 备选与理由 |
+|---|---|---|---|
+| 25 | 模组/世界书/角色卡三块内容的制作与数据模型 | **已定稿（2026-11-16，zip 容器）**：统一为内容包（Content Pack）单一 schema 家族 `trpg.pack/1`；制作/分发单元 = `.trpgpack`（**ZIP** 容器：`pack.json` + 可选 `assets/`，导出名 `<packId>-<version>.trpgpack`）；一个 pack = 元数据 + `ruleSystem` 引用 + 1 模组（`modules[]`）+ 1 世界书 + `cards[]`（pack 内置卡库）；玩家私卡仍本地；房间只存 `{packId, packVersion, moduleId, contentHash}` 引用，不复制内容；GM 提示改为按需检索并消费模组 checks/encounters/rewards/beats；M8 分 M8.1 地基（统一 schema + zip 编解码 + 导入导出/校验 + 内置包 `core-guimuya` 迁移）→ M8.2 房间接包 → M8.3 内容工坊 UI（主区域独立工具页 + 右栏轻量入口）→ M8.4 GM 检索与模组数据消费 → M8.5 分享与 DiceFrame 适配。**四个确认结论（2026-11-16）**：①编辑器 = 主区域独立页 + 右栏轻量入口；②包形态 = `.trpgpack`（ZIP；选它为了后续带图片/素材、单文件即一包便于分享，代价是 M8.1 需实现 zip 编解码与校验）；③卡归属 = 双轨（pack 内置卡库 + 玩家本地私卡）；④顺序 = 先 M8.1 地基 → M8.2 房间接包，UI（M8.3）随后 | 备选：只做角色卡可视化（见效快，但模组/世界书仍靠改源码，违背「三块统一考虑」）；角色卡独立卡库不进 pack（引用分散、导出分享不完整）；单 JSON 包（便于 diff，但带不了图片/素材）。详见 [`CONTENT-MODEL.md`](./CONTENT-MODEL.md)（D1–D12、zip 容器与字段表、能力矩阵、M8 排期、已确认决策）。**M8.1 已实现（2026-11-16，单测 114，zip 编解码零依赖）**。 |
 
 ## 已核实的环境事实（2026-11-13）
 
