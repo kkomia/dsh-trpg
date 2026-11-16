@@ -123,8 +123,8 @@ async function main() {
 
   manager = new GmManager({
     roomService,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    // M8.4 起 GM 按房间解析内容（内容包 registry 为权威来源）；smoke 固定用内置模组/世界书。
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     createAgent,
     log: (message) => console.log('[gm]', message),
   });
@@ -141,7 +141,7 @@ async function main() {
 
     // 等 GM 启动 + 开场
     await new Promise((resolve) => setTimeout(resolve, 120));
-    check('GM 会话已创建并注册工具', captured.tools.length === 11, `tools=${captured.tools.length}`);
+    check('GM 会话已创建并注册工具', captured.tools.length === 13, `tools=${captured.tools.length}`);
     check('GM 系统提示已注入', captured.sections.length === 1 && captured.sections[0].text().includes('硬规则'));
     check('GM 收到开场回合', captured.prompts.some((prompt) => prompt.includes('【开场】')));
 
