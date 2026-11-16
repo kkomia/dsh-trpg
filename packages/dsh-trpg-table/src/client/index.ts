@@ -31,6 +31,9 @@ import {
   upsertLocalCard,
   type LocalCardRecord,
 } from './cards.ts';
+import { callRpc } from './rpc.ts';
+import { createRulesStore, type MainViewKind } from './rules-store.ts';
+import { createRulesUi } from './rules-ui.ts';
 import {
   growthToCardPatch,
   loadGrowth,
@@ -104,6 +107,8 @@ interface ClientContext {
 const TAB_TYPE_ID = 'dsh-trpg-table:table';
 const TAB_KIND = 'trpg-table';
 const TAB_TITLE = '跑团桌';
+/** 主区域详细页的 keyed `main` 面板 id（`ctx.layout.selectPanel` 点名；M9.4）。 */
+const MAIN_PANEL_ID = 'trpg-view';
 
 const DEFAULT_BASE = 'http://127.0.0.1:45871';
 const STORAGE_KEY = 'dsh-trpg:session:v1';
@@ -121,12 +126,6 @@ interface StoredSession {
   roomId?: string;
   inviteCode?: string;
   playerName?: string;
-}
-
-interface RpcResult<T> {
-  ok: boolean;
-  result?: T;
-  error?: { code: string; message: string };
 }
 
 /** 右侧栏紧凑卡片样式：所有卡片铺满栏宽，靠外层 tab 容器滚动。 */
@@ -243,17 +242,6 @@ const CSS = {
   } as Record<string, unknown>,
   emptyDice: { color: 'var(--dsw-alias-label-secondary)', fontSize: 11 } as Record<string, unknown>,
 };
-
-async function callRpc<T>(base: string, method: string, params: unknown, token?: string): Promise<T> {
-  const response = await fetch(`${base.replace(/\/+$/, '')}/trpg/rpc`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ method, params, token, clientVersion: '0.2.0' }),
-  });
-  const payload = (await response.json()) as RpcResult<T>;
-  if (!payload.ok) throw new Error(payload.error?.message ?? `RPC 失败：${method}`);
-  return payload.result as T;
-}
 
 function loadSession(): StoredSession | null {
   try {
@@ -413,6 +401,10 @@ export function createPlugin(React: any) {
   const h = React.createElement;
   const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
+  // M9.4 规则投影：数据层（RPC + SSE + 命令）与渲染层（右栏紧凑三页签 + 主区域详细页）。
+  const rulesStore = createRulesStore();
+  const rulesUi = createRulesUi(React, rulesStore);
+
   /** 对话顶栏入口：打开右侧栏的跑团桌 tab；顺带记住当前会话，作为建房的兜底。 */
   function OpenTableButton(props: { onOpen?: () => void; sessionId?: string }) {
     useEffect(() => {
@@ -529,7 +521,7 @@ export function createPlugin(React: any) {
   }
 
   /** 右侧栏 tab 正文：紧凑常驻卡片。props.sessionId = 当前会话（右侧栏按会话作用域注入）。 */
-  function TrpgTableCard(props: { sessionId?: string }) {
+  function TrpgTableCard(props: { sessionId?: string; onOpenMain?: (view: MainViewKind) => boolean | void }) {
     const [session, setSession] = useState(loadSession() as StoredSession | null);
     const [room, setRoom] = useState(null as RoomView | null);
     const [feed, setFeed] = useState([] as GameEvent[]);
@@ -574,6 +566,19 @@ export function createPlugin(React: any) {
 
     const token = session?.hostToken ?? session?.playerToken;
     const isHost = Boolean(session?.hostToken);
+    /**
+     * 右栏「详细」/「世界地图」/「战斗视图」入口：由 apply() 注入（内部用 ctx.layout.selectPanel
+     * 切到 keyed `main` 面板 `trpg-view`）。返回 false = 当前宿主没有主区域面板机制。
+     */
+    const openMain = useCallback(
+      (view: MainViewKind) => {
+        const opened = props?.onOpenMain?.(view);
+        if (opened === false) {
+          setStatus({ kind: 'bad', text: '当前宿主不支持主区域工具页（keyed main 面板不可用），只能使用右栏紧凑卡片。' });
+        }
+      },
+      [props?.onOpenMain],
+    );
     /** 右侧栏 tab 的会话 id：绑定/建房优先用它，localStorage 只做兜底。 */
     const tabSessionId = typeof props?.sessionId === 'string' && props.sessionId.trim().length > 0 ? props.sessionId.trim() : undefined;
 
@@ -709,6 +714,12 @@ export function createPlugin(React: any) {
       setSession(next);
       setBase(next.base);
     }, []);
+
+    // M9.4：把规则投影数据层绑到当前房间会话（无 rules 的房间内部空转，不请求规则 RPC）。
+    // room 变化（SSE room 事件）时同步规则引用；同一会话重复 bind 只更新房间视图。
+    useEffect(() => {
+      rulesStore.bind(session, room);
+    }, [session, room]);
 
     /**
      * 读取房主的内容包目录（`content.list`，无需 token，玩家也可读）。
@@ -1567,7 +1578,19 @@ export function createPlugin(React: any) {
     const children: unknown[] = [statusLine];
     if (!session) children.push(lobby);
     else if (!room) children.push(connecting);
-    else children.push(roomCard, partySection, seatSection, gmConsole, diceSection, growthSection);
+    else {
+      children.push(
+        roomCard,
+        // M9.4：rule 房间才渲染的紧凑子页签（人物/装备/背包）与战斗紧凑条；无 rules 时组件自行返回 null。
+        h(rulesUi.SidebarRulesSection, { key: 'rules-tabs', onOpenMain: openMain }),
+        h(rulesUi.CombatCompact, { key: 'rules-combat', onOpenMain: openMain }),
+        partySection,
+        seatSection,
+        gmConsole,
+        diceSection,
+        growthSection,
+      );
+    }
 
     return h('div', { key: 'root', style: CSS.root }, children);
   }
@@ -1612,6 +1635,40 @@ export function createPlugin(React: any) {
       /** 读右侧栏「当前在屏会话」：空态页/全局页面为 undefined。 */
       const readMounted = (): string | undefined => sidebarRight()?.mounted?.getSnapshot();
 
+      /** layout 服务（ui-layout 提供）：切换 keyed `main` 主区域面板；精简宿主可能没有。 */
+      const layout = (): { selectPanel: (id: string | null) => void } | undefined => {
+        const service = ctx.get?.('layout') as { selectPanel?: (id: string | null) => void } | undefined;
+        return service && typeof service.selectPanel === 'function'
+          ? (service as { selectPanel: (id: string | null) => void })
+          : undefined;
+      };
+
+      /**
+       * 右栏「详细」入口：切主区域 keyed `main` 面板 `trpg-view` 并指定视图。
+       * @returns 成功 true；宿主没有 main 面板机制时 false（右栏显示可读提示）。
+       */
+      const openMainPanel = (view: MainViewKind): boolean => {
+        rulesStore.setMainView(view);
+        const service = layout();
+        if (!service) return false;
+        try {
+          service.selectPanel(MAIN_PANEL_ID);
+          return true;
+        } catch (error) {
+          console.warn('[dsh-trpg-table] 打开主区域详细页失败', error);
+          return false;
+        }
+      };
+
+      /** 主区域「返回对话」：selectPanel(null) 回到 Conversation。 */
+      const closeMainPanel = (): void => {
+        try {
+          layout()?.selectPanel(null);
+        } catch (error) {
+          console.warn('[dsh-trpg-table] 返回对话失败', error);
+        }
+      };
+
       // 1) 右侧栏 tab 类型：服务由 @deepseek-ai/dsh-client-ui-sidebar-right 提供，
       //    用 ctx.inject 惰性等待（它可能比本插件晚挂载；没有该服务的精简宿主只是没有这个 tab）。
       ctx.inject?.(['sidebarRightTabs'], (scoped) => {
@@ -1628,9 +1685,28 @@ export function createPlugin(React: any) {
       });
 
       // 2) tab 正文：按 tab 类型的 id 注册到 keyed slot（slot 由右侧栏拥有，inject 会等它就绪）。
+      //    inject 给正文一个「打开主区域详细页」的回调（M9.4 的人物/装备/背包/地图/战棋）。
       ctx.effect?.(() =>
         ctx.slots.inject('sidebar.right.pane.tab', () =>
-          ctx.slots.register({ name: 'sidebar.right.pane.tab', key: TAB_TYPE_ID }, TrpgTableCard),
+          ctx.slots.register(
+            { name: 'sidebar.right.pane.tab', key: TAB_TYPE_ID, inject: () => ({ onOpenMain: openMainPanel }) },
+            TrpgTableCard,
+          ),
+        ),
+      );
+
+      // 2b) 主区域 keyed `main` 面板：详细版人物/装备/背包/世界地图/战棋。
+      //     `main` 是 ui-layout 的 root keyed slot；inject 会等 layout 先挂载（精简宿主没有就不注册）。
+      ctx.effect?.(() =>
+        ctx.slots.inject('main', () =>
+          ctx.slots.register(
+            {
+              name: 'main',
+              key: MAIN_PANEL_ID,
+              inject: () => ({ goHome: closeMainPanel, readSession: loadSession }),
+            },
+            rulesUi.RulesMainPanel,
+          ),
         ),
       );
 
