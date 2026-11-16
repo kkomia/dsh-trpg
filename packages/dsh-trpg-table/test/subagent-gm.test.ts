@@ -76,7 +76,8 @@ test('subagent GM: 开场回合与玩家行动都通过 spawn 激活，叙事广
     registerTool: (definition) => tools.push(definition as (typeof tools)[number]),
   });
   manager.registerTools();
-  assert.equal(tools.length, 11);
+  // 全局注册：旧 11 个工具 + M8.4 的 scene/reward 与通用规则工具 use_action/move/combat。
+  assert.equal(tools.length, 16);
 
   manager.ensureRoom(action.roomId);
   assert.equal(await waitFor(() => hasNarration('夜色压在青石镇上。')), true);

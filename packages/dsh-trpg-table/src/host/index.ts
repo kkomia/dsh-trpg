@@ -13,6 +13,7 @@ import { RoomPersistence } from './persistence.ts';
 import { PackRegistry } from './pack-registry.ts';
 import { GmManager, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike, type GmContentResolver } from './gm/runtime.ts';
 import { SubagentGmManager, type SubagentsLike } from './gm/subagent-gm.ts';
+import { resetRevealedLore } from './gm/lore-reveal.ts';
 import { TableSessionBridge } from './table-session.ts';
 
 export const name = 'dsh-trpg-table';
@@ -149,7 +150,11 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       if (subagentRef.current) subagentRef.current.onPlayerAction(info);
       else managerRef.current?.onPlayerAction(info);
     },
-    onRoomClosed: (roomId) => tableBridge?.unbind(roomId),
+    onRoomClosed: (roomId) => {
+      tableBridge?.unbind(roomId);
+      // M8.4：本场「已揭示世界书」登记随房间一起释放。
+      resetRevealedLore(roomId);
+    },
     onChanged: () => persistence.schedule(),
   });
 
@@ -242,6 +247,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       log,
       service,
       contentCatalog: () => registry.publicCatalog(),
+      // 只读资产端点：内容包 zip 里的 assets/** 由注册表按需提供（M9.5b）。
+      assetOf: (packId, assetPath) => registry.assetOf(packId, assetPath),
       contentReload: () => {
         const reloaded = registry.reload();
         let recoveredRooms = 0;

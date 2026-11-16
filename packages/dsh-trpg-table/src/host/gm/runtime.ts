@@ -9,9 +9,18 @@ import { randomUUID } from 'node:crypto';
 import type { LorebookDef, ModuleDef } from '@dsh-trpg/content';
 import type { GameEvent } from '@dsh-trpg/protocol';
 import type { PlayerActionInfo, RoomService } from '@dsh-trpg/rooms';
-import { buildGmSystemPrompt, buildTurnPrompt, type PromptEvent, type PromptPlayer } from './prompt.ts';
+import {
+  buildActionContext,
+  buildGmSystemPrompt,
+  buildTurnPrompt,
+  currentSceneIndex,
+  loreContextOfScene,
+  type PromptEvent,
+  type PromptPlayer,
+} from './prompt.ts';
 import { createGmTools } from './tools.ts';
 import { CombatRuntime } from './combat.ts';
+import { revealedLoreIds } from './lore-reveal.ts';
 
 /** DSH Agent 的结构化最小面（不 import Harness 包，保持第三方插件可安装）。 */
 export interface GmAgentCtxLike {
@@ -127,20 +136,40 @@ export class GmRuntime {
   /** 创建 GM 会话并注册该 Agent 专属的工具与系统提示。 */
   async start(): Promise<void> {
     const { createAgent, roomService, roomId, log, resolveContent } = this.options;
-    const { module, lorebook } = resolveContent(roomId);
-    const systemPrompt = buildGmSystemPrompt(module, lorebook);
     this.handle = await createAgent({
       sessionId: this.sessionId,
       setup: (agentCtx) => {
-        for (const tool of createGmTools({ roomService, roomId, lorebook, combat: this.combat })) {
+        const gmTools = createGmTools({
+          roomService,
+          roomId,
+          lorebook: () => resolveContent(roomId).lorebook,
+          module: () => resolveContent(roomId).module,
+          combat: this.combat,
+        });
+        for (const tool of gmTools) {
           agentCtx.tools.register(tool);
         }
+        // 以实际注册的工具集为准（有规则运行时才会注册通用工具），提示与注册保持一致。
+        const hasRulesRuntime = gmTools.some((tool) => tool.name === 'use_action');
         agentCtx.systemPrompt.section({
           name: 'trpg-gm',
           order: 900,
           complete: true,
           interpolate: false,
-          text: () => systemPrompt,
+          // 每次渲染时重取：场景推进/世界书揭示后系统提示自动跟上（模块骨架 + alwaysOn/场景关联条目）。
+          text: () => {
+            const { module, lorebook } = resolveContent(roomId);
+            let sceneId: string | undefined;
+            try {
+              sceneId = roomService.gmView(roomId).scene?.sceneId;
+            } catch {
+              sceneId = undefined;
+            }
+            return buildGmSystemPrompt(module, lorebook, {}, {
+              hasRulesRuntime,
+              loreContext: loreContextOfScene(module, sceneId, revealedLoreIds(roomId)),
+            });
+          },
         });
         try {
           agentCtx.systemPrompt.suppressRuntimeContext?.();
@@ -164,10 +193,24 @@ export class GmRuntime {
     this.queue = this.queue
       .then(async () => {
         if (this.disposed || !this.handle) return;
+        const { module, lorebook } = this.options.resolveContent(this.roomId);
+        let sceneId: string | undefined;
+        try {
+          sceneId = this.options.roomService.gmView(this.roomId).scene?.sceneId;
+        } catch {
+          sceneId = undefined;
+        }
+        const context = buildActionContext({
+          module,
+          lorebook,
+          sceneIndex: currentSceneIndex(module, sceneId),
+          revealedIds: revealedLoreIds(this.roomId),
+        });
         const prompt = [
           '【开场】游戏开始。请朗读模组第一幕的开场，用 2–6 句把玩家引入剧情；',
           '不要替任何玩家角色写行动或台词，结尾抛出一个需要玩家回应的情境。',
-        ].join('');
+          ...(context.text.length > 0 ? ['', '【GM 幕后备注（玩家不可见）】', context.text] : []),
+        ].join('\n');
         await this.handle.agent.followup({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } });
         await this.handle.agent.whenIdle?.();
       })
@@ -201,7 +244,7 @@ export class GmRuntime {
   /** 拼一次行动的 prompt（公开方法便于单测断言）。 */
   buildTurnPrompt(info: PlayerActionInfo): string {
     const { roomService, roomId, resolveContent } = this.options;
-    const { module } = resolveContent(roomId);
+    const { module, lorebook } = resolveContent(roomId);
     const room = roomService.gmView(roomId);
     const party: PromptPlayer[] = roomService.gmParty(roomId).map((player) => ({
       playerId: player.playerId,
@@ -226,6 +269,11 @@ export class GmRuntime {
       private: info.private,
       party,
       recent,
+      sceneIndex: currentSceneIndex(module, room.scene?.sceneId),
+      ...(room.scene?.sceneId !== undefined ? { sceneId: room.scene.sceneId } : {}),
+      lorebook,
+      revealedIds: revealedLoreIds(roomId),
+      hasRulesRuntime: roomService.runtimeOf(roomId) !== undefined,
     });
   }
 

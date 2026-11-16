@@ -9,10 +9,20 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes, randomUUID } from 'node:crypto';
+import type { LorebookDef, ModuleDef } from '@dsh-trpg/content';
 import type { PlayerActionInfo, RoomService } from '@dsh-trpg/rooms';
-import { buildGmSystemPrompt, buildTurnPrompt, type PromptEvent, type PromptPlayer } from './prompt.ts';
+import {
+  buildActionContext,
+  buildGmSystemPrompt,
+  buildTurnPrompt,
+  currentSceneIndex,
+  loreContextOfScene,
+  type PromptEvent,
+  type PromptPlayer,
+} from './prompt.ts';
 import { createGmTools } from './tools.ts';
 import { CombatRuntime } from './combat.ts';
+import { revealedLoreIds } from './lore-reveal.ts';
 import { eventToPromptEvent, type GmContentResolver } from './runtime.ts';
 
 export interface LiveAgentLike {
@@ -114,9 +124,25 @@ export class SubagentGmManager {
    */
   private readonly toolSuffix = `_${randomBytes(3).toString('hex')}`;
   private readonly toolNames: Record<string, string> = Object.fromEntries(
-    ['roll_check', 'roll_dice', 'secret_note', 'reveal_lore', 'check_lore', 'list_party', 'start_combat', 'attack', 'next_turn', 'combat_status', 'end_combat'].map(
-      (name) => [name, `${name}${this.toolSuffix}`],
-    ),
+    [
+      'roll_check',
+      'roll_dice',
+      'secret_note',
+      'reveal_lore',
+      'check_lore',
+      'list_party',
+      'start_combat',
+      'attack',
+      'next_turn',
+      'combat_status',
+      'end_combat',
+      // M8.4 通用规则工具 + 模组数据工具
+      'use_action',
+      'move',
+      'combat',
+      'scene',
+      'reward',
+    ].map((name) => [name, `${name}${this.toolSuffix}`]),
   );
 
   constructor(options: SubagentGmOptions) {
@@ -136,9 +162,14 @@ export class SubagentGmManager {
     const definitions = createGmTools({
       roomService: this.options.roomService,
       roomId: roomOf,
-      // 每条工具调用时按房间解析世界书（不同房间可能引用不同内容包）。
+      // 每条工具调用时按房间解析世界书/模组（不同房间可能引用不同内容包）。
       lorebook: () => this.options.resolveContent(roomOf()).lorebook,
+      module: () => this.options.resolveContent(roomOf()).module,
       combat: () => manager.rooms.get(roomOf())?.combat,
+      // 全局注册时无法按房间裁剪：通用工具始终注册，无规则运行时的房间执行时报可读错误；
+      // 每个房间的系统提示按 runtimeOf 决定是否列出它们。
+      includeGenericTools: true,
+      toolNames: this.toolNames,
     });
     for (const definition of definitions) {
       const wrapped = {
@@ -180,9 +211,18 @@ export class SubagentGmManager {
     this.rooms.set(roomId, channel);
     this.options.roomService.gmNarrate(roomId, `AI 主持人已就位。《${module.title}》即将开始。`);
     if (options.opening === false) return;
+    const sceneIndex = this.sceneIndexOf(roomId, module);
+    const context = buildActionContext({
+      module,
+      lorebook,
+      sceneIndex,
+      revealedIds: revealedLoreIds(roomId),
+      toolNames: this.toolNames,
+    });
     const opening = [
-      buildGmSystemPrompt(module, lorebook, this.toolNames),
+      this.systemPromptFor(roomId, module, lorebook),
       '',
+      ...(context.text.length > 0 ? ['---', '', '【GM 幕后备注（玩家不可见）】', context.text, ''] : []),
       '---',
       '',
       '【开场】游戏开始。请朗读模组第一幕的开场，用 2–6 句把玩家引入剧情；',
@@ -191,12 +231,39 @@ export class SubagentGmManager {
     this.enqueue(roomId, opening);
   }
 
+  /** 当前场景下标（房间 gmScene 推进过就按房间场景）。 */
+  private sceneIndexOf(roomId: string, module: ModuleDef): number {
+    let sceneId: string | undefined;
+    try {
+      sceneId = this.options.roomService.gmView(roomId).scene?.sceneId;
+    } catch {
+      sceneId = undefined;
+    }
+    return currentSceneIndex(module, sceneId);
+  }
+
+  /** 按房间当前场景/揭示状态组装系统提示（工具清单按是否有规则运行时切换）。 */
+  private systemPromptFor(roomId: string, module: ModuleDef, lorebook: LorebookDef): string {
+    const hasRulesRuntime = (() => {
+      try {
+        return this.options.roomService.runtimeOf(roomId) !== undefined;
+      } catch {
+        return false;
+      }
+    })();
+    const sceneIndex = this.sceneIndexOf(roomId, module);
+    return buildGmSystemPrompt(module, lorebook, this.toolNames, {
+      hasRulesRuntime,
+      loreContext: loreContextOfScene(module, module.scenes[sceneIndex]?.id, revealedLoreIds(roomId)),
+    });
+  }
+
   onPlayerAction(info: PlayerActionInfo): void {
     if (!this.rooms.has(info.roomId)) return;
     this.enqueue(info.roomId, this.buildTurnText(info));
   }
 
-  /** 组装一次行动的用户消息（系统守则 + 当前行动）。 */
+  /** 组装一次行动的用户消息（系统守则 + 当前场景/世界书上下文 + 当前行动）。 */
   buildTurnText(info: PlayerActionInfo): string {
     const { roomService, resolveContent } = this.options;
     const { module, lorebook } = resolveContent(info.roomId);
@@ -224,8 +291,13 @@ export class SubagentGmManager {
       private: info.private,
       party,
       recent,
+      sceneIndex: currentSceneIndex(module, room.scene?.sceneId),
+      ...(room.scene?.sceneId !== undefined ? { sceneId: room.scene.sceneId } : {}),
+      lorebook,
+      revealedIds: revealedLoreIds(info.roomId),
+      hasRulesRuntime: roomService.runtimeOf(info.roomId) !== undefined,
     });
-    return `${buildGmSystemPrompt(module, lorebook, this.toolNames)}\n\n---\n\n${turn}`;
+    return `${this.systemPromptFor(info.roomId, module, lorebook)}\n\n---\n\n${turn}`;
   }
 
   private enqueue(roomId: string, promptText: string): void {

@@ -68,7 +68,7 @@ test('TableSessionBridge: 会话未打开（没有存活 Agent）时拒绝绑定
   assert.equal(bridge.sessionOfRoom(roomId), undefined);
 });
 
-test('TableSessionBridge: 玩家行动以【角色名】前缀注入会话', () => {
+test('TableSessionBridge: 玩家行动以【角色名】前缀注入会话，并附 GM 幕后备注（M8.4）', () => {
   const { bridge, service, roomId, prompted } = setup();
   bridge.bind(roomId, 'session-probe');
   const player = service.join({ inviteCode: service.hostSession(roomId).room.inviteCode ?? '', playerName: '阿青' });
@@ -83,7 +83,12 @@ test('TableSessionBridge: 玩家行动以【角色名】前缀注入会话', () 
   });
   assert.equal(prompted.length, 1);
   assert.equal(prompted[0]?.sessionId, 'session-probe');
-  assert.equal(prompted[0]?.text, '【阿青】我推开门');
+  assert.ok(prompted[0]?.text.startsWith('【阿青】我推开门'));
+  // 模组数据消费：本场判定/奖励以 GM 幕后备注形式注入；标「玩家不可见」。
+  assert.ok(prompted[0]?.text.includes('本轮 GM 幕后备注（玩家不可见'));
+  assert.ok(prompted[0]?.text.includes('scene_qingshi'));
+  assert.ok(prompted[0]?.text.includes('persuasion DC 12'));
+  assert.ok(prompted[0]?.text.includes('本次相关世界书'));
 });
 
 test('TableSessionBridge: AI 的 assistant 消息作为 GM 旁白广播回房间', () => {

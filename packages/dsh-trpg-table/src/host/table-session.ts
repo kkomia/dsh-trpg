@@ -11,10 +11,16 @@
  */
 import type { LorebookDef, ModuleDef } from '@dsh-trpg/content';
 import type { PlayerActionInfo, RoomService } from '@dsh-trpg/rooms';
-import { buildGmSystemPrompt } from './gm/prompt.ts';
+import {
+  buildActionContext,
+  buildGmSystemPrompt,
+  currentSceneIndex,
+  loreContextOfScene,
+} from './gm/prompt.ts';
 import { createGmTools } from './gm/tools.ts';
 import { CombatRuntime } from './gm/combat.ts';
-import { extractAssistantText } from './gm/runtime.ts';
+import { eventToPromptEvent, extractAssistantText } from './gm/runtime.ts';
+import { revealedLoreIds } from './gm/lore-reveal.ts';
 
 /** 会话原生牌桌的内容解析：按房间取当前模组/世界书（host 注入 pack registry）。 */
 export type TableContentResolver = (roomId: string) => { module: ModuleDef; lorebook: LorebookDef };
@@ -92,13 +98,19 @@ export class TableSessionBridge {
       // 工具名加前缀：避免与 subagent GM 的全局工具（带 generation 后缀/同名）冲突，
       // 同时把映射交给系统提示，保证 GM 看到的就是实际注册的名字。
       const toolNames: Record<string, string> = {};
-      for (const tool of createGmTools({
+      const gmTools = createGmTools({
         roomService: this.deps.roomService,
         roomId,
-        // 每次工具调用时按房间解析世界书：房间可能引用数据目录里的其他内容包。
+        // 每次工具调用时按房间解析世界书/模组：房间可能引用数据目录里的其他内容包。
         lorebook: () => this.deps.resolveContent(roomId).lorebook,
+        module: () => this.deps.resolveContent(roomId).module,
         combat,
-      })) {
+        // 有规则运行时才注册通用规则工具；无运行时保留旧工具（兼容旧房间）。
+        includeGenericTools: this.deps.roomService.runtimeOf(roomId) !== undefined,
+        // 工具返回文本里的命令提示也用真实注册名（映射在注册循环里回填）。
+        toolNames: () => toolNames,
+      });
+      for (const tool of gmTools) {
         const definition = tool as { name?: unknown };
         if (typeof definition.name !== 'string') continue;
         const prefixed = { ...(tool as unknown as Record<string, unknown>), name: `${TABLE_TOOL_PREFIX}${definition.name}` };
@@ -111,10 +123,20 @@ export class TableSessionBridge {
           order: 900,
           complete: false,
           interpolate: false,
-          // 每次渲染时解析：内容包重扫/房间降级回退后，GM 提示自动跟上。
+          // 每次渲染时解析：内容包重扫/房间降级回退/场景推进后，GM 提示自动跟上。
           text: () => {
             const { module, lorebook } = this.deps.resolveContent(roomId);
-            return buildGmSystemPrompt(module, lorebook, toolNames);
+            let sceneId: string | undefined;
+            try {
+              sceneId = this.deps.roomService.gmView(roomId).scene?.sceneId;
+            } catch {
+              sceneId = undefined;
+            }
+            return buildGmSystemPrompt(module, lorebook, toolNames, {
+              // 以「实际注册了通用工具」为准，避免提示里列出没注册的工具。
+              hasRulesRuntime: toolNames.use_action !== undefined,
+              loreContext: loreContextOfScene(module, sceneId, revealedLoreIds(roomId)),
+            });
           },
         }),
       );
@@ -160,6 +182,8 @@ export class TableSessionBridge {
 
   /**
    * 玩家行动入会话：注入为一条用户消息，由会话 Agent（GM）原生回复。
+   * 消息里附「本轮 GM 幕后备注」：当前场景的模组数据（判定/遭遇/奖励/节拍）+ 按行动检索到的
+   * 世界书条目——原生会话的历史不随房间场景变化，所以每轮单独注入（玩家不可见，只是模型输入）。
    * @param roomId - 房间 id。
    * @param info - 房间服务提供的玩家行动。
    */
@@ -168,7 +192,8 @@ export class TableSessionBridge {
     if (!binding) return;
     const who = info.characterName ?? info.playerName;
     const tag = info.private ? '（悄悄话给 GM）' : '';
-    const text = `【${who}】${info.text}${tag}`;
+    const base = `【${who}】${info.text}${tag}`;
+    const text = `${base}${this.actionContextBlock(roomId, info)}`;
     void this.deps.prompt(binding.sessionId, text).catch((error: unknown) => {
       this.deps.log?.(`table session prompt failed: ${error instanceof Error ? error.message : String(error)}`);
       try {
@@ -177,6 +202,36 @@ export class TableSessionBridge {
         /* ignore */
       }
     });
+  }
+
+  /** 本轮行动附带的 GM 幕后备注（模组场景数据 + 检索到的世界书）；没有内容时返回空串。 */
+  private actionContextBlock(roomId: string, info: PlayerActionInfo): string {
+    try {
+      const { module, lorebook } = this.deps.resolveContent(roomId);
+      const room = this.deps.roomService.gmView(roomId);
+      const sceneIndex = currentSceneIndex(module, room.scene?.sceneId);
+      const hasRulesRuntime = this.deps.roomService.runtimeOf(roomId) !== undefined;
+      const recentActions = this.deps.roomService
+        .gmRecentEvents(roomId, 8)
+        .map(eventToPromptEvent)
+        .filter((event): event is NonNullable<typeof event> => event !== null)
+        .map((event) => event.text);
+      const context = buildActionContext({
+        module,
+        lorebook,
+        sceneIndex,
+        ...(room.scene?.sceneId !== undefined ? { sceneId: room.scene.sceneId } : {}),
+        actionText: info.text,
+        recentActions,
+        revealedIds: revealedLoreIds(roomId),
+        hasRulesRuntime,
+      });
+      if (context.text.length === 0) return '';
+      return `\n\n---\n\n【本轮 GM 幕后备注（玩家不可见，不要原样朗读）】\n${context.text}`;
+    } catch (error) {
+      this.deps.log?.(`table session context failed: ${error instanceof Error ? error.message : String(error)}`);
+      return '';
+    }
   }
 
   /**

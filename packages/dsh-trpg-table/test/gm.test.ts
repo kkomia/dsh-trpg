@@ -88,13 +88,36 @@ test('extractAssistantText: joins text blocks and ignores tool calls/reasoning',
   assert.equal(extractAssistantText({ content: [] }), '');
 });
 
-test('prompt: system prompt carries GM hard rules, module, lore and secrets', () => {
+test('prompt: system prompt carries GM hard rules and module skeleton, but only selected lore (M8.4)', () => {
   const system = buildGmSystemPrompt(GUIMUYA_MODULE, GUIMUYA_LOREBOOK);
   assert.ok(system.includes(GUIMUYA_MODULE.title));
   assert.ok(system.includes('绝不替玩家角色写行动'));
   assert.ok(system.includes('骰子、检定、伤害数值只能来自工具结果'));
-  assert.ok(system.includes('〔GM 秘密〕'));
-  assert.ok(system.includes('entry_gm_zhenfa'));
+  // M8.4：系统提示不再全量注入世界书，未被选中的秘密不出现。
+  assert.ok(system.includes('世界书（按需检索）'));
+  assert.equal(system.includes('entry_gm_zhenfa'), false);
+  assert.equal(system.includes('太阴续命阵'), false, '没有 alwaysOn/场景上下文时不应塞入 GM 秘密正文');
+  // 传场景上下文后才注入场景关联条目（含 GM 秘密标记）。
+  const scoped = buildGmSystemPrompt(GUIMUYA_MODULE, GUIMUYA_LOREBOOK, {}, {
+    loreContext: {
+      sceneIndex: 2,
+      sceneTitle: GUIMUYA_MODULE.scenes[2]?.title,
+      sceneLoreIds: GUIMUYA_MODULE.scenes[2]?.lore,
+    },
+  });
+  assert.ok(scoped.includes('entry_gm_zhenfa'));
+  assert.ok(scoped.includes('〔GM 秘密〕'));
+  // alwaysOn 条目无条件入选（预算内）。
+  const withAlwaysOn = buildGmSystemPrompt(
+    GUIMUYA_MODULE,
+    {
+      ...GUIMUYA_LOREBOOK,
+      entries: GUIMUYA_LOREBOOK.entries.map((entry) =>
+        entry.id === 'entry_gm_chishan' ? { ...entry, alwaysOn: true } : entry,
+      ),
+    },
+  );
+  assert.ok(withAlwaysOn.includes('entry_gm_chishan'));
 });
 
 test('prompt: turn prompt names the single actor and includes party + recent events', () => {
@@ -128,7 +151,7 @@ test('runtime: start registers GM tools scoped to the agent and system section',
     createAgent,
   });
   await runtime.start();
-  assert.equal(ctx.tools.length, 11, '应注册 11 个 GM 工具');
+  assert.equal(ctx.tools.length, 13, '无规则运行时：应在 11 个旧工具外新增 scene/reward 两个模组数据工具');
   assert.deepEqual(ctx.tools.map((tool) => tool.name).sort(), [
     'attack',
     'check_lore',
@@ -137,8 +160,10 @@ test('runtime: start registers GM tools scoped to the agent and system section',
     'list_party',
     'next_turn',
     'reveal_lore',
+    'reward',
     'roll_check',
     'roll_dice',
+    'scene',
     'secret_note',
     'start_combat',
   ]);
