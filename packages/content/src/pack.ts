@@ -22,6 +22,8 @@ import {
   type SkillId,
 } from '@dsh-trpg/engine';
 import type { LorebookDef, ModuleDef, SceneDef, Visibility } from './schema.ts';
+import { verifyPackScripts, type PackScriptsInput } from './pack-scripts.ts';
+import { RULE_PACK_SCHEMA_VERSION, validateRulePack, type RulePack } from './rules-bridge.ts';
 
 export const CONTENT_PACK_SCHEMA_VERSION = 'trpg.pack/1';
 
@@ -56,6 +58,13 @@ export interface PackValidateOptions {
   assetPaths?: Iterable<string>;
   /** 规则数据索引（怪物/物品/法术 id）；由调用方按规则系统提供。 */
   ruleData?: PackRuleDataIndex;
+  /**
+   * 包内实际携带的规则脚本（`rules/scripts/**.js`）：传入后校验 `pack.rules.scripts[]`
+   * 声明的文件都存在且 sha256 一致（docs/RULES-MODEL §3/§6/§10）。
+   * 不传 = 只做结构校验并跳过 sha256（host 列内置包等「没读字节」的场景）；
+   * 导出/导入/加载这些包边界一律会传（见 `pack-zip.ts` / `pack-io.ts`）。
+   */
+  scripts?: PackScriptsInput;
 }
 
 export interface PackValidationReport {
@@ -190,6 +199,12 @@ export interface ContentPack {
   /** 封面/图标：`assets/...` 相对路径，或内联 SVG 小图标（≤ 32 KiB 建议）。 */
   icon?: string;
   ruleSystem: PackRuleSystem;
+  /**
+   * 内联规则包（`trpg.rules/1`，docs/RULES-MODEL §3）：属性/资源/公式/动作/物品/成长/行动经济等数据段。
+   * 规则脚本**不内联**：`rules.scripts[].file` 指向 zip 内的 `rules/scripts/*.js` 独立条目，
+   * 这里只记 `{ file, sha256 }`（见 `pack-scripts.ts`）。缺省 = 内容包引用宿主内置规则。
+   */
+  rules?: RulePack;
   /** v1 必须等于 `modules[0].moduleId`。 */
   defaultModuleId: string;
   modules: PackModuleDef[];
@@ -449,6 +464,44 @@ export function validatePack(input: unknown, options: PackValidateOptions = {}):
         }
       }
     });
+  }
+
+  // ---- 规则包（可选段：trpg.rules/1） ----
+  const rules = input.rules;
+  if (rules !== undefined) {
+    if (!isRecord(rules)) {
+      fail('rules 必须是对象（trpg.rules/1 规则包数据段）');
+    } else {
+      let ruleReport: ReturnType<typeof validateRulePack> | undefined;
+      try {
+        ruleReport = validateRulePack(rules);
+      } catch (error) {
+        fail(`规则包校验异常：${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (ruleReport !== undefined) {
+        for (const error of ruleReport.errors) fail(`规则包（pack.rules）：${error}`);
+        for (const warning of ruleReport.warnings) warnings.push(`规则包（pack.rules）：${warning}`);
+        const declaredRulesId = rules.rulesId;
+        if (
+          ruleSystemId !== undefined &&
+          isNonEmptyString(declaredRulesId) &&
+          declaredRulesId !== ruleSystemId
+        ) {
+          fail(`规则包 rulesId "${declaredRulesId}" 与 pack.ruleSystem.id "${ruleSystemId}" 不一致`);
+        }
+      }
+      // 脚本条目 ↔ `pack.rules.scripts` 清单（存在性 + sha256）；规则包结构坏了就不重复报脚本错误
+      if (ruleReport === undefined || ruleReport.ok) {
+        const scriptReport = verifyPackScripts(ruleReport?.value, options.scripts);
+        for (const error of scriptReport.errors) fail(error);
+        for (const warning of scriptReport.warnings) warnings.push(warning);
+      }
+    }
+  } else if (options.scripts !== undefined) {
+    // 有脚本条目但规则包没声明：当作孤立脚本提示（不阻断，便于作者暂存草稿）
+    const scriptReport = verifyPackScripts(undefined, options.scripts);
+    for (const error of scriptReport.errors) fail(error);
+    for (const warning of scriptReport.warnings) warnings.push(warning);
   }
 
   // ---- 素材引用 ----
@@ -875,12 +928,22 @@ export function migratePack(input: unknown): PackMigrationResult {
     ...(input.license !== undefined ? { license: input.license } : {}),
     ...(input.icon !== undefined ? { icon: input.icon } : {}),
     ruleSystem,
+    // 规则包数据段（trpg.rules/1）原样透传；注意旧草案里的 `rules: { ruleId }` 是「规则系统引用」，
+    // 已在上面迁移成 ruleSystem，不能误当规则包（用 schemaVersion/sheet 判别）。
+    ...(isRulePackObject(input.rules) ? { rules: input.rules } : {}),
     defaultModuleId: pickString(input.defaultModuleId, input.defaultModule),
     modules,
     lorebook: loreMigration.lorebook,
     cards,
   };
   return { pack, warnings, migrated: migrated || warnings.length > 0 };
+}
+
+/** 判断是否是 `trpg.rules/1` 规则包（而不是旧草案里 `rules: { ruleId }` 的规则系统引用）。 */
+function isRulePackObject(value: unknown): value is RulePack {
+  if (!isRecord(value)) return false;
+  if (value.schemaVersion === RULE_PACK_SCHEMA_VERSION) return true;
+  return isRecord(value.sheet) && typeof value.rulesId === 'string';
 }
 
 function normalizeRuleSystem(value: unknown): PackRuleSystem | undefined {

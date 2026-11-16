@@ -31,12 +31,16 @@ import {
 import { contentHashOfPack } from '../src/pack-zip.ts';
 import { validatePack as validatePackFromPackModule } from '../src/pack.ts';
 import { importPackFile, readPackFile, readPackJsonFile, writePackFile } from '../src/pack-io.ts';
+import { DND5E_LITE_SCRIPT_SOURCES } from '../src/rules-pack/index.ts';
 
 const RULE_DATA = {
   monsterIds: MONSTERS.map((monster) => monster.id),
   itemIds: ITEMS.map((item) => item.id),
   spellIds: SPELLS.map((spell) => spell.id),
 };
+
+/** 内置规则包的脚本源码（校验 `pack.rules.scripts` 的 sha256 需要）。 */
+const SCRIPTS = new Map(DND5E_LITE_SCRIPT_SOURCES.map((source) => [source.file, source.code]));
 
 function clonePack(): ContentPack {
   return JSON.parse(JSON.stringify(CORE_GUIMUYA_PACK)) as ContentPack;
@@ -47,7 +51,7 @@ function packErrors(report: { errors: string[] }): string {
 }
 
 test('pack: 内置包 core-guimuya 校验通过，模组/世界书/卡数量符合约定', () => {
-  const report = validatePack(CORE_GUIMUYA_PACK, { ruleData: RULE_DATA });
+  const report = validatePack(CORE_GUIMUYA_PACK, { ruleData: RULE_DATA, scripts: SCRIPTS });
   assert.equal(report.ok, true, packErrors(report));
   assert.deepEqual(report.errors, []);
   assert.deepEqual(report.warnings, []);
@@ -57,6 +61,8 @@ test('pack: 内置包 core-guimuya 校验通过，模组/世界书/卡数量符�
   assert.equal(CORE_GUIMUYA_PACK.version, '1.0.0');
   assert.equal(CORE_GUIMUYA_PACK.name, '鬼木崖·异光');
   assert.deepEqual(CORE_GUIMUYA_PACK.ruleSystem, { id: 'dnd5e-lite', name: 'D&D 5e-lite' });
+  assert.equal(CORE_GUIMUYA_PACK.rules?.rulesId, 'dnd5e-lite');
+  assert.equal(CORE_GUIMUYA_PACK.rules?.rulesVersion, '2.0.0');
   assert.equal(CORE_GUIMUYA_PACK.modules.length, 1);
   assert.equal(CORE_GUIMUYA_PACK.modules[0]?.moduleId, 'guimuya');
   assert.equal(CORE_GUIMUYA_PACK.defaultModuleId, CORE_GUIMUYA_PACK.modules[0]?.moduleId);
@@ -335,14 +341,14 @@ test('pack: validatePack 与 pack.ts 导出的同一函数（index 重导出）'
   assert.equal(validatePack, validatePackFromPackModule);
 });
 
-test('pack-io: writePackFile → readPackFile → importPackFile 往返（pack.json 与素材落盘）', async () => {
+test('pack-io: writePackFile → readPackFile → importPackFile 往返（pack.json / 素材 / 规则脚本落盘）', async () => {
   const workDir = await mkdtemp(join(tmpdir(), 'dsh-trpg-pack-io-'));
   try {
     const pack = clonePack();
     pack.icon = 'assets/cover.svg';
     const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
     const filePath = join(workDir, 'core-guimuya-1.0.0.trpgpack');
-    const written = await writePackFile(filePath, pack, { assets: new Map([['assets/cover.svg', svg]]) });
+    const written = await writePackFile(filePath, pack, { assets: new Map([['assets/cover.svg', svg]]), scripts: SCRIPTS });
     assert.equal(written.contentHash, contentHashOfPack(pack));
     assert.ok((await readFile(filePath)).length > 0);
 
@@ -350,6 +356,7 @@ test('pack-io: writePackFile → readPackFile → importPackFile 往返（pack.j
     assert.equal(readBack.ok, true, readBack.errors.join('\n'));
     assert.equal(readBack.pack?.packId, 'core-guimuya');
     assert.ok(readBack.assets.has('assets/cover.svg'));
+    assert.equal(readBack.scripts.size, SCRIPTS.size, '规则脚本条目应随包解码');
 
     const imported = await importPackFile(filePath, join(workDir, 'content', 'packs'));
     assert.equal(imported.ok, true, imported.errors.join('\n'));
@@ -359,16 +366,20 @@ test('pack-io: writePackFile → readPackFile → importPackFile 往返（pack.j
     assert.ok(outputDir);
     assert.ok((await stat(join(outputDir, 'pack.json'))).isFile());
     assert.ok((await stat(join(outputDir, 'assets', 'cover.svg'))).isFile());
+    assert.deepEqual(imported.scriptPaths, [...SCRIPTS.keys()].sort());
+    assert.ok((await stat(join(outputDir, 'rules', 'scripts', 'combat.js'))).isFile());
 
     const revalidated = await readPackJsonFile(join(outputDir, 'pack.json'), { loadAssets: true });
     assert.equal(revalidated.ok, true, revalidated.errors.join('\n'));
     assert.deepEqual(revalidated.assetPaths, ['assets/cover.svg']);
+    assert.deepEqual(revalidated.scriptPaths, [...SCRIPTS.keys()].sort());
     assert.equal(revalidated.contentHash, contentHashOfPack(pack));
     assert.deepEqual([...(revalidated.assets.get('assets/cover.svg') ?? [])], [...svg]);
 
     // 源码目录形状 → 再导出，必须与原 .trpgpack 字节一致（contentHash 相同 + 固定 zip 元数据）
     const reexported = await writePackFile(join(workDir, 'reexported.trpgpack'), revalidated.pack!, {
       assets: revalidated.assets,
+      scripts: revalidated.scripts,
     });
     assert.equal(Buffer.compare(Buffer.from(reexported.bytes), Buffer.from(written.bytes)), 0);
   } finally {

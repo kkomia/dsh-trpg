@@ -3,9 +3,12 @@
  *
  * 只做「字节 ↔ 文件 / 目录」的搬运，校验/编解码全部复用 `pack-zip.ts` / `pack.ts`：
  * - `readPackFile`     读 `.trpgpack`（zip）→ 解码 + 校验，不落盘；
- * - `readPackJsonFile` 读源码目录里的 `pack.json`（含同目录 `assets/`），同样走 migrate + validate；
+ * - `readPackJsonFile` 读源码目录里的 `pack.json`（含同目录 `assets/` 与 `rules/scripts/`），同样走 migrate + validate；
  * - `writePackFile`    校验后原子写 `.trpgpack`（临时文件 + rename，坏包不留半成品）；
- * - `importPackFile`   解包到 `<target>/<packId>/pack.json`（+ `assets/`），供 CLI / 工坊使用。
+ * - `importPackFile`   解包到 `<target>/<packId>/pack.json`（+ `assets/` + `rules/scripts/`），供 CLI / 工坊使用。
+ *
+ * 规则脚本（M9.3）：源码目录形状是 `<dir>/rules/scripts/*.js`，与 zip 条目路径一致；
+ * 读取时把脚本内容交给 `validatePack()` 校验 `pack.rules.scripts` 的 sha256。
  *
  * 该模块含 node:fs，不进入浏览器 bundle；从 `@dsh-trpg/content/pack-io` 子路径导入。
  */
@@ -21,6 +24,12 @@ import {
   type TrpgpackDecodeResult,
 } from './pack-zip.ts';
 import { isSafePackAssetPath, migratePack, validatePack, type ContentPack } from './pack.ts';
+import {
+  SCRIPT_ENTRY_PREFIX,
+  isSafeScriptPath,
+  normalizePackScripts,
+  type PackScriptsInput,
+} from './pack-scripts.ts';
 
 export interface PackFileReadResult extends TrpgpackDecodeResult {
   /** 实际读取的文件路径（绝对或相对，取决于入参）。 */
@@ -39,11 +48,17 @@ export interface PackJsonReadResult {
   assetPaths: string[];
   /** `loadAssets: true` 时带出素材字节，供「源码目录 → .trpgpack」导出。 */
   assets: Map<string, Uint8Array>;
+  /** 同目录下扫描到的规则脚本路径（`rules/scripts/*.js`）。 */
+  scriptPaths: string[];
+  /** 规则脚本字节（默认总是读取：脚本很小，且校验 sha256 必须要内容）。 */
+  scripts: Map<string, Uint8Array>;
 }
 
 export interface PackJsonReadOptions {
   /** 是否把 assets/ 下的文件读进内存（导出时需要；只看校验结果时关闭）。 */
   loadAssets?: boolean;
+  /** 是否读取 `rules/scripts/` 下的脚本源码（默认 true；校验 sha256 需要）。 */
+  loadScripts?: boolean;
 }
 
 export interface PackFileWriteResult {
@@ -67,6 +82,8 @@ export interface ImportPackResult {
   outputDir?: string;
   packJsonPath?: string;
   assetPaths: string[];
+  /** 落盘的规则脚本路径（`rules/scripts/*.js`）。 */
+  scriptPaths: string[];
   contentHash?: string;
 }
 
@@ -79,6 +96,7 @@ export async function readPackFile(filePath: string): Promise<PackFileReadResult
       errors: [`文件不存在或不是普通文件：${filePath}`],
       warnings: [],
       assets: new Map(),
+      scripts: new Map(),
       filePath,
     };
   }
@@ -86,37 +104,35 @@ export async function readPackFile(filePath: string): Promise<PackFileReadResult
   return { ...trpgpackToPack(bytes), filePath };
 }
 
-/** 读取源码目录里的 `pack.json`（并收集同目录 `assets/**` 用于素材引用校验）。 */
+/** 读取源码目录里的 `pack.json`（并收集同目录 `assets/**`、`rules/scripts/**`）。 */
 export async function readPackJsonFile(
   filePath: string,
   options: PackJsonReadOptions = {},
 ): Promise<PackJsonReadResult> {
   const assetPaths: string[] = [];
   const assets = new Map<string, Uint8Array>();
+  const scriptPaths: string[] = [];
+  const scripts = new Map<string, Uint8Array>();
+  const empty = (errors: string[]): PackJsonReadResult => ({
+    ok: false,
+    errors,
+    warnings: [],
+    filePath,
+    assetPaths,
+    assets,
+    scriptPaths,
+    scripts,
+  });
   const info = await stat(filePath).catch(() => undefined);
   if (!info || !info.isFile()) {
-    return {
-      ok: false,
-      errors: [`pack.json 不存在或不是普通文件：${filePath}`],
-      warnings: [],
-      filePath,
-      assetPaths,
-      assets,
-    };
+    return empty([`pack.json 不存在或不是普通文件：${filePath}`]);
   }
   let parsed: unknown;
   try {
     const text = (await readFile(filePath, 'utf8')).replace(/^\uFEFF/u, '');
     parsed = JSON.parse(text);
   } catch (error) {
-    return {
-      ok: false,
-      errors: [`pack.json 解析失败：${error instanceof Error ? error.message : String(error)}`],
-      warnings: [],
-      filePath,
-      assetPaths,
-      assets,
-    };
+    return empty([`pack.json 解析失败：${error instanceof Error ? error.message : String(error)}`]);
   }
   const assetRoot = join(dirname(filePath), 'assets');
   const assetRootInfo = await stat(assetRoot).catch(() => undefined);
@@ -129,11 +145,28 @@ export async function readPackJsonFile(
     }
     assetPaths.sort();
   }
+  // 规则脚本：`<dir>/rules/scripts/**.js`（zip 条目路径与源码目录一致）
+  const scriptRoot = join(dirname(filePath), ...SCRIPT_ENTRY_PREFIX.replace(/\/+$/u, '').split('/'));
+  const scriptRootInfo = await stat(scriptRoot).catch(() => undefined);
+  if (scriptRootInfo?.isDirectory()) {
+    const files = await walkFiles(scriptRoot);
+    for (const absolutePath of files) {
+      const relativePath = relative(scriptRoot, absolutePath).split(/[\\/]+/u).join('/');
+      const scriptPath = `${SCRIPT_ENTRY_PREFIX}${relativePath}`;
+      if (!isSafeScriptPath(scriptPath)) continue;
+      scriptPaths.push(scriptPath);
+      if (options.loadScripts !== false) scripts.set(scriptPath, new Uint8Array(await readFile(absolutePath)));
+    }
+    scriptPaths.sort();
+  }
   const migration = migratePack(parsed);
-  const report = validatePack(migration.pack, { assetPaths });
+  const report = validatePack(migration.pack, {
+    assetPaths,
+    ...(options.loadScripts === false ? {} : { scripts }),
+  });
   const warnings = [...migration.warnings, ...report.warnings];
   if (!report.ok || !report.value) {
-    return { ok: false, errors: report.errors, warnings, filePath, assetPaths, assets };
+    return { ok: false, errors: report.errors, warnings, filePath, assetPaths, assets, scriptPaths, scripts };
   }
   return {
     ok: true,
@@ -144,6 +177,8 @@ export async function readPackJsonFile(
     filePath,
     assetPaths,
     assets,
+    scriptPaths,
+    scripts,
   };
 }
 
@@ -151,7 +186,7 @@ export async function readPackJsonFile(
 export async function writePackFile(
   filePath: string,
   pack: ContentPack,
-  options: { assets?: AssetsInput } = {},
+  options: { assets?: AssetsInput; scripts?: PackScriptsInput } = {},
 ): Promise<PackFileWriteResult> {
   const bytes = packToTrpgpack(pack, options);
   const targetDir = dirname(filePath);
@@ -174,12 +209,12 @@ export async function writePackFile(
   };
 }
 
-/** 把 pack 写成源码目录形状：`<dir>/pack.json` + `<dir>/assets/**`（便于 diff/评审）。 */
+/** 把 pack 写成源码目录形状：`<dir>/pack.json` + `<dir>/assets/**` + `<dir>/rules/scripts/**`（便于 diff/评审）。 */
 export async function writePackJsonFile(
   dirPath: string,
   pack: ContentPack,
-  options: { assets?: AssetsInput } = {},
-): Promise<{ packJsonPath: string; assetPaths: string[] }> {
+  options: { assets?: AssetsInput; scripts?: PackScriptsInput } = {},
+): Promise<{ packJsonPath: string; assetPaths: string[]; scriptPaths: string[] }> {
   await mkdir(dirPath, { recursive: true });
   const packJsonPath = join(dirPath, 'pack.json');
   await writeFile(packJsonPath, `${JSON.stringify(pack, null, 2)}\n`, 'utf8');
@@ -197,12 +232,25 @@ export async function writePackJsonFile(
     }
     assetPaths.sort();
   }
-  return { packJsonPath, assetPaths };
+  // 规则脚本：落到 `<dir>/rules/scripts/*.js`（与 zip 条目路径一致）
+  const scriptPaths: string[] = [];
+  if (options.scripts !== undefined) {
+    // 复用 pack-scripts 的规范化：路径/大小/sha256 一次校验，写盘内容与清单同源
+    const normalized = normalizePackScripts(options.scripts);
+    for (const [scriptPath, entry] of normalized) {
+      const absolutePath = join(dirPath, ...scriptPath.split('/'));
+      await mkdir(dirname(absolutePath), { recursive: true });
+      await writeFile(absolutePath, Buffer.from(entry.code, 'utf8'));
+      scriptPaths.push(scriptPath);
+    }
+    scriptPaths.sort();
+  }
+  return { packJsonPath, assetPaths, scriptPaths };
 }
 
 /**
- * 导入 `.trpgpack`：解到 `<target>/<packId>/`（`pack.json` + `assets/**`）。
- * 先全量解码校验，失败不落盘；目标已存在时覆盖同名 `pack.json`（v1 CLI 行为，M8.2 再做冲突策略）。
+ * 导入 `.trpgpack`：解到 `<target>/<packId>/`（`pack.json` + `assets/**` + `rules/scripts/**`）。
+ * 先全量解码校验（含规则脚本 sha256），失败不落盘；目标已存在时覆盖同名文件（v1 CLI 行为）。
  */
 export async function importPackFile(
   filePath: string,
@@ -211,7 +259,7 @@ export async function importPackFile(
 ): Promise<ImportPackResult> {
   const decoded = await readPackFile(filePath);
   if (!decoded.ok || !decoded.pack) {
-    return { ok: false, errors: decoded.errors, warnings: decoded.warnings, assetPaths: [] };
+    return { ok: false, errors: decoded.errors, warnings: decoded.warnings, assetPaths: [], scriptPaths: [] };
   }
   const pack = decoded.pack;
   const outputDir = join(targetDir, pack.packId);
@@ -227,6 +275,16 @@ export async function importPackFile(
     }
   }
   assetPaths.sort();
+  // 规则脚本：解码期已按 pack.rules.scripts 校验过 sha256，这里原样落盘（脚本很小，不受 --no-assets 影响）
+  const scriptPaths: string[] = [];
+  for (const [scriptPath, data] of decoded.scripts) {
+    if (!isSafeScriptPath(scriptPath)) continue;
+    const absolutePath = join(outputDir, ...scriptPath.split('/'));
+    await mkdir(dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, data);
+    scriptPaths.push(scriptPath);
+  }
+  scriptPaths.sort();
   return {
     ok: true,
     errors: [],
@@ -236,6 +294,7 @@ export async function importPackFile(
     outputDir,
     packJsonPath,
     assetPaths,
+    scriptPaths,
     contentHash: decoded.contentHash,
   };
 }

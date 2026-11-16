@@ -8,6 +8,11 @@
     ".": "./src/index.ts",
     "./pack-zip": "./src/pack-zip.ts",
     "./pack-io": "./src/pack-io.ts",
-    "./zip": "./src/zip.ts"
+    "./zip": "./src/zip.ts",
+    "./rules-pack": "./src/rules-pack/index.ts"
+  },
+  "dependencies": {
+    "@dsh-trpg/engine": "workspace:*",
+    "@dsh-trpg/rules": "workspace:*"
   }
 }

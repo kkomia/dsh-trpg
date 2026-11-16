@@ -20,8 +20,12 @@ import {
   trpgpackToPack,
 } from '../src/pack-zip.ts';
 import { CORE_GUIMUYA_PACK, PackValidationError, type ContentPack } from '../src/index.ts';
+import { DND5E_LITE_SCRIPT_SOURCES } from '../src/rules-pack/index.ts';
 
 const encoder = new TextEncoder();
+
+/** dnd5e-lite 规则脚本（内置包 `rules/scripts/*.js` 的源码，导出/解码测试都要带上）。 */
+const SCRIPTS = new Map(DND5E_LITE_SCRIPT_SOURCES.map((source) => [source.file, source.code]));
 
 function bytesOf(text: string): Uint8Array {
   return encoder.encode(text);
@@ -29,6 +33,11 @@ function bytesOf(text: string): Uint8Array {
 
 function clonePack(): ContentPack {
   return JSON.parse(JSON.stringify(CORE_GUIMUYA_PACK)) as ContentPack;
+}
+
+/** 导出内置包（带规则脚本条目）；测试里所有 encode 都走它，避免每处重复传 scripts。 */
+function encodeCorePack(pack: ContentPack = CORE_GUIMUYA_PACK, assets?: Map<string, Uint8Array>): Uint8Array {
+  return packToTrpgpack(pack, { scripts: SCRIPTS, ...(assets !== undefined ? { assets } : {}) });
 }
 
 function findSignature(bytes: Uint8Array, signature: readonly number[], from = 0): number {
@@ -101,6 +110,11 @@ function buildRawZip(entries: readonly RawZipEntry[]): Uint8Array {
   return new Uint8Array(Buffer.concat([...locals, centralDirectory, eocd]));
 }
 
+/** 把规则脚本包成 zip 写入条目（手工构造 zip 的测试用）。 */
+function scriptZipEntries(): Array<{ name: string; data: Uint8Array }> {
+  return [...SCRIPTS.entries()].map(([name, code]) => ({ name, data: bytesOf(code) }));
+}
+
 function zipErrorCode(code: string): (error: unknown) => boolean {
   return (error: unknown) => error instanceof ZipError && error.code === code;
 }
@@ -142,8 +156,8 @@ test('zip: 手写 stored / deflate 两种 zip 读取都支持', () => {
 });
 
 test('zip: 导出时间戳/UTF-8 标志/顺序固定，同一 pack 字节可复现', () => {
-  const first = packToTrpgpack(CORE_GUIMUYA_PACK);
-  const second = packToTrpgpack(CORE_GUIMUYA_PACK);
+  const first = encodeCorePack();
+  const second = encodeCorePack();
   assert.equal(Buffer.compare(Buffer.from(first), Buffer.from(second)), 0, '同一 pack 两次导出必须字节一致');
 
   const view = new DataView(first.buffer, first.byteOffset, first.byteLength);
@@ -158,20 +172,21 @@ test('zip: 导出时间戳/UTF-8 标志/顺序固定，同一 pack 字节可复�
 });
 
 test('pack-zip: 解码 → 重导出字节一致，contentHash/packHash 稳定', () => {
-  const bytes = packToTrpgpack(CORE_GUIMUYA_PACK);
+  const bytes = encodeCorePack();
   const decoded = trpgpackToPack(bytes);
   assert.equal(decoded.ok, true, decoded.errors.join('\n'));
   assert.equal(decoded.contentHash, contentHashOfPack(CORE_GUIMUYA_PACK));
   assert.equal(decoded.packHash, packHashOfBytes(bytes));
   assert.ok(decoded.pack);
-  const reencoded = packToTrpgpack(decoded.pack, { assets: decoded.assets });
+  assert.equal(decoded.scripts.size, SCRIPTS.size, '规则脚本条目应随包解码出来');
+  const reencoded = packToTrpgpack(decoded.pack, { assets: decoded.assets, scripts: decoded.scripts });
   assert.equal(Buffer.compare(Buffer.from(reencoded), Buffer.from(bytes)), 0);
   assert.equal(decodePackZip(bytes).ok, true);
-  assert.equal(encodePackZip(CORE_GUIMUYA_PACK).length, bytes.length);
+  assert.equal(encodePackZip(CORE_GUIMUYA_PACK, undefined, SCRIPTS).length, bytes.length);
 });
 
 test('zip: CRC 损坏被拒（错误信息带 CRC 与条目号）', () => {
-  const bytes = packToTrpgpack(CORE_GUIMUYA_PACK);
+  const bytes = encodeCorePack();
   const centralOffset = findSignature(bytes, [0x50, 0x4b, 0x01, 0x02]);
   assert.ok(centralOffset >= 0, '应能定位中央目录');
   bytes[centralOffset + 16] = ((bytes[centralOffset + 16] as number) ^ 0xff) & 0xff;
@@ -271,6 +286,7 @@ test('pack-zip: 非 zip 字节 / 缺 pack.json / 嵌套包目录被拒', () => {
 test('pack-zip: 未识别条目 warning 后忽略（__MACOSX 等），不影响解码', () => {
   const zipBytes = writeZip([
     { name: 'pack.json', data: canonicalJsonBytes(CORE_GUIMUYA_PACK) },
+    ...scriptZipEntries(),
     { name: '__MACOSX/._pack.json', data: bytesOf('macos resource fork') },
     { name: '.DS_Store', data: bytesOf('junk') },
   ]);
@@ -285,33 +301,41 @@ test('pack-zip: pack.json 带 UTF-8 BOM 也能解析（Windows 编辑器常见�
   const withBom = new Uint8Array(body.length + 3);
   withBom.set([0xef, 0xbb, 0xbf], 0);
   withBom.set(body, 3);
-  const decoded = trpgpackToPack(writeZip([{ name: 'pack.json', data: withBom }]));
+  const decoded = trpgpackToPack(writeZip([{ name: 'pack.json', data: withBom }, ...scriptZipEntries()]));
   assert.equal(decoded.ok, true, decoded.errors.join('\n'));
   assert.equal(decoded.pack?.packId, 'core-guimuya');
   assert.equal(decoded.contentHash, contentHashOfPack(CORE_GUIMUYA_PACK));
 });
 
-test('pack-zip: 素材 roundtrip（icon 引用 + assets 拷贝），缺失素材导出即报错', () => {
+test('pack-zip: 素材 roundtrip（icon 引用 + assets 拷贝）+ 规则脚本条目，缺失素材/脚本导出即报错', () => {
   const withIcon = clonePack();
   withIcon.icon = 'assets/cover.svg';
   const svg = bytesOf('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
-  const bytes = packToTrpgpack(withIcon, { assets: new Map([['assets/cover.svg', svg]]) });
+  const bytes = encodeCorePack(withIcon, new Map([['assets/cover.svg', svg]]));
   const decoded = trpgpackToPack(bytes);
   assert.equal(decoded.ok, true, decoded.errors.join('\n'));
   assert.equal(decoded.pack?.icon, 'assets/cover.svg');
   const decodedSvg = decoded.assets.get('assets/cover.svg');
   assert.ok(decodedSvg);
   assert.deepEqual([...decodedSvg], [...svg]);
-  assert.deepEqual(decoded.warnings, [], '唯一素材被 icon 引用，不应有孤立素材告警');
+  assert.deepEqual(decoded.warnings, [], '唯一素材被 icon 引用、脚本与清单一致，不应有告警');
+  const combat = decoded.scripts.get('rules/scripts/combat.js');
+  assert.ok(combat, '规则脚本应作为独立 zip 条目解出来');
+  assert.equal(new TextDecoder().decode(combat), SCRIPTS.get('rules/scripts/combat.js'));
 
   assert.throws(
-    () => packToTrpgpack(withIcon),
+    () => encodeCorePack(withIcon),
     (error: unknown) =>
       error instanceof PackValidationError && error.errors.some((message) => message.includes('素材不存在')),
   );
   assert.throws(
-    () => packToTrpgpack(CORE_GUIMUYA_PACK, { assets: { 'cover.svg': bytesOf('x') } }),
+    () => packToTrpgpack(CORE_GUIMUYA_PACK, { assets: { 'cover.svg': bytesOf('x') }, scripts: SCRIPTS }),
     (error: unknown) =>
       error instanceof PackValidationError && error.errors.some((message) => message.includes('assets/')),
   );
+  // 内置规则包的脚本源码随代码发布：不传 scripts 也能导出（pack-zip 按 rulesId 取内置源码）
+  const autoScripts = packToTrpgpack(CORE_GUIMUYA_PACK);
+  const autoDecoded = trpgpackToPack(autoScripts);
+  assert.equal(autoDecoded.ok, true, autoDecoded.errors.join('\n'));
+  assert.equal(autoDecoded.scripts.size, SCRIPTS.size, '内置规则包应自动带上 4 个脚本条目');
 });
