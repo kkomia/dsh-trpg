@@ -41,11 +41,14 @@ export type GmCreateAgent = (options: {
   setup: (agentCtx: GmAgentCtxLike) => void;
 }) => Promise<GmHandleLike>;
 
+/** 按房间解析当前模组/世界书（host 注入 pack registry；房间只存 packId/moduleId 引用）。 */
+export type GmContentResolver = (roomId: string) => { module: ModuleDef; lorebook: LorebookDef };
+
 export interface GmRuntimeOptions {
   roomId: string;
   roomService: RoomService;
-  module: ModuleDef;
-  lorebook: LorebookDef;
+  /** 房间内容解析：每次开始/组 prompt 时按房间取模组与世界书。 */
+  resolveContent: GmContentResolver;
   createAgent: GmCreateAgent;
   log?: (message: string) => void;
 }
@@ -123,7 +126,8 @@ export class GmRuntime {
 
   /** 创建 GM 会话并注册该 Agent 专属的工具与系统提示。 */
   async start(): Promise<void> {
-    const { module, lorebook, createAgent, roomService, roomId, log } = this.options;
+    const { createAgent, roomService, roomId, log, resolveContent } = this.options;
+    const { module, lorebook } = resolveContent(roomId);
     const systemPrompt = buildGmSystemPrompt(module, lorebook);
     this.handle = await createAgent({
       sessionId: this.sessionId,
@@ -196,7 +200,8 @@ export class GmRuntime {
 
   /** 拼一次行动的 prompt（公开方法便于单测断言）。 */
   buildTurnPrompt(info: PlayerActionInfo): string {
-    const { module, roomService, roomId } = this.options;
+    const { roomService, roomId, resolveContent } = this.options;
+    const { module } = resolveContent(roomId);
     const room = roomService.gmView(roomId);
     const party: PromptPlayer[] = roomService.gmParty(roomId).map((player) => ({
       playerId: player.playerId,
@@ -277,8 +282,8 @@ export class GmRuntime {
 
 export interface GmManagerOptions {
   roomService: RoomService;
-  module: ModuleDef;
-  lorebook: LorebookDef;
+  /** 房间内容解析（host 注入 pack registry）。 */
+  resolveContent: GmContentResolver;
   createAgent: GmCreateAgent;
   log?: (message: string) => void;
 }
@@ -306,8 +311,7 @@ export class GmManager {
     const runtime = new GmRuntime({
       roomId,
       roomService: this.options.roomService,
-      module: this.options.module,
-      lorebook: this.options.lorebook,
+      resolveContent: this.options.resolveContent,
       createAgent: this.options.createAgent,
       log: this.options.log,
     });
@@ -315,7 +319,8 @@ export class GmManager {
     try {
       await runtime.start();
       this.bySession.set(runtime.sessionId, runtime);
-      this.options.roomService.gmNarrate(roomId, `AI 主持人已就位。《${this.options.module.title}》即将开始。`);
+      const { module } = this.options.resolveContent(roomId);
+      this.options.roomService.gmNarrate(roomId, `AI 主持人已就位。《${module.title}》即将开始。`);
       runtime.notifyOpening();
     } catch (error) {
       this.runtimes.delete(roomId);

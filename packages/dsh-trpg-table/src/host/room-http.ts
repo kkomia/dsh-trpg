@@ -21,6 +21,7 @@ import {
   validateGmScene,
   validateGmSecret,
   validateRpcRequest,
+  type CatalogPack,
   type RpcResponse,
   type RpcRequest,
 } from '@dsh-trpg/protocol';
@@ -32,6 +33,10 @@ export interface RoomHttpOptions {
   service?: RoomService;
   /** 把房间绑定到 DSH 会话（房主本机；host/index 注入实现）。 */
   bindSession?: (roomId: string, sessionId: string | null) => unknown | Promise<unknown>;
+  /** 内容包脱敏目录（`content.list`，玩家可调、只读）。 */
+  contentCatalog?: () => CatalogPack[];
+  /** 重扫内容包（`content.reload`，仅 loopback + host token）。 */
+  contentReload?: () => { packs: number; warnings: string[]; recoveredRooms?: number };
 }
 
 export interface RoomHttpServer {
@@ -81,6 +86,19 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
   const startedAt = Date.now();
 
   const dispatch = async (request: IncomingMessage, rpc: RpcRequest): Promise<unknown> => {
+    // 内容包目录：玩家可读的脱敏清单，不需要房间 token（建房前/大厅就要用）。
+    if (rpc.method === 'content.list') {
+      if (!options.contentCatalog) throw new RoomError('internal', '内容包注册表未就绪');
+      return { packs: options.contentCatalog() };
+    }
+    if (rpc.method === 'content.reload') {
+      if (!isLoopback(request)) throw new RoomError('forbidden', '只有房主本机可以重扫内容包');
+      if (!options.contentReload) throw new RoomError('internal', '内容包注册表未就绪');
+      // loopback + host token：内容重扫会影响所有房间，只许房主触发。
+      const hostPrincipal = service.login(rpc.token);
+      if (hostPrincipal.kind !== 'host') throw new RoomError('forbidden', '只有房主可以重扫内容包');
+      return options.contentReload();
+    }
     if (rpc.method === 'room.create') {
       if (!isLoopback(request)) throw new RoomError('forbidden', '只有房主本机可以创建房间');
       return service.createRoom(rpc.params);

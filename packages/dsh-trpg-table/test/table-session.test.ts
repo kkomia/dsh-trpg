@@ -35,8 +35,7 @@ function setup() {
   let agentAvailable = true;
   const bridge = new TableSessionBridge({
     roomService: service,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     getAgent: () => (agentAvailable ? agent : undefined),
     prompt: async (sessionId, text) => {
       prompted.push({ sessionId, text });

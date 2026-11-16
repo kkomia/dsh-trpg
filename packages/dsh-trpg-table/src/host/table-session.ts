@@ -16,6 +16,9 @@ import { createGmTools } from './gm/tools.ts';
 import { CombatRuntime } from './gm/combat.ts';
 import { extractAssistantText } from './gm/runtime.ts';
 
+/** 会话原生牌桌的内容解析：按房间取当前模组/世界书（host 注入 pack registry）。 */
+export type TableContentResolver = (roomId: string) => { module: ModuleDef; lorebook: LorebookDef };
+
 /** 牌桌工具名前缀：避开 subagent GM 的全局同名工具。 */
 const TABLE_TOOL_PREFIX = 'trpg_';
 
@@ -30,8 +33,8 @@ export interface TableAgentLike {
 
 export interface TableSessionDeps {
   roomService: RoomService;
-  module: ModuleDef;
-  lorebook: LorebookDef;
+  /** 按房间解析当前模组/世界书（房间只存 packId/moduleId 引用）。 */
+  resolveContent: TableContentResolver;
   /** 按会话 id 取当前存活的 Agent（没有说明会话没打开）。 */
   getAgent: (sessionId: string) => TableAgentLike | undefined;
   /** 把一段文本作为用户消息送进会话。 */
@@ -89,7 +92,13 @@ export class TableSessionBridge {
       // 工具名加前缀：避免与 subagent GM 的全局工具（带 generation 后缀/同名）冲突，
       // 同时把映射交给系统提示，保证 GM 看到的就是实际注册的名字。
       const toolNames: Record<string, string> = {};
-      for (const tool of createGmTools({ roomService: this.deps.roomService, roomId, lorebook: this.deps.lorebook, combat })) {
+      for (const tool of createGmTools({
+        roomService: this.deps.roomService,
+        roomId,
+        // 每次工具调用时按房间解析世界书：房间可能引用数据目录里的其他内容包。
+        lorebook: () => this.deps.resolveContent(roomId).lorebook,
+        combat,
+      })) {
         const definition = tool as { name?: unknown };
         if (typeof definition.name !== 'string') continue;
         const prefixed = { ...(tool as unknown as Record<string, unknown>), name: `${TABLE_TOOL_PREFIX}${definition.name}` };
@@ -102,7 +111,11 @@ export class TableSessionBridge {
           order: 900,
           complete: false,
           interpolate: false,
-          text: () => buildGmSystemPrompt(this.deps.module, this.deps.lorebook, toolNames),
+          // 每次渲染时解析：内容包重扫/房间降级回退后，GM 提示自动跟上。
+          text: () => {
+            const { module, lorebook } = this.deps.resolveContent(roomId);
+            return buildGmSystemPrompt(module, lorebook, toolNames);
+          },
         }),
       );
     } catch (error) {

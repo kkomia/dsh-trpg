@@ -21,6 +21,8 @@ import {
   type SkillId,
 } from '@dsh-trpg/engine';
 import {
+  DEFAULT_CONTENT_MODULE_ID,
+  DEFAULT_CONTENT_PACK_ID,
   PROTOCOL_VERSION,
   validateCreateRoom,
   validateJoin,
@@ -41,6 +43,7 @@ import {
   type PlayerId,
   type RoomListResult,
   type RoomPhase,
+  type RoomSceneSummary,
   type RoomStateResult,
   type RoomView,
   type RollParams,
@@ -65,6 +68,58 @@ export class RoomError extends Error {
   }
 }
 
+/** 房间引用的内容解析结果（由 host 的 pack registry 实现；rooms 包因此不依赖 @dsh-trpg/content）。 */
+export interface RoomContentModule {
+  packId: string;
+  /** 包版本（semver），续团时用于检测内容漂移。 */
+  packVersion: string;
+  packName?: string;
+  moduleId: string;
+  moduleTitle: string;
+  /** 内容指纹：sha256(规范化 pack.json)，用于检测「同版本内容被替换」。 */
+  contentHash: string;
+  /** 模组场景公开摘要（只含 sceneId 与公开标题）。 */
+  scenes: RoomSceneSummary[];
+}
+
+/**
+ * 内容解析器：host 启动时注入（内置包 + 数据目录 .trpgpack 的注册表）。
+ * 不注入时房间按缺省引用记账、不校验存在性（向后兼容旧调用/单测）。
+ */
+export interface RoomContentResolver {
+  /** 缺省包 id（旧客户端/旧快照的兜底，通常是内置包）。 */
+  readonly defaultPackId: string;
+  /** 解析包内模组；moduleId 缺省用该包的 defaultModuleId。找不到返回 undefined。 */
+  resolveModule(packId: string, moduleId?: string): RoomContentModule | undefined;
+  /** 包是否已安装（用于区分「包不存在」与「模组不存在」的可读错误）。 */
+  hasPack?(packId: string): boolean;
+}
+
+/** 房间记录里的内容引用 + 派生场景快照（只存引用，不复制整包内容）。 */
+export interface RoomContentState {
+  packId: string;
+  packVersion: string;
+  moduleId: string;
+  contentHash: string;
+  packName?: string;
+  moduleTitle?: string;
+  scenes: RoomSceneSummary[];
+  /** true = host 上找不到该包/模组（或版本已变），房间以降级方式续团。 */
+  degraded?: boolean;
+}
+
+/** 存档里的内容引用（字段与 `RoomContentState` 一致，独立声明避免存档受运行时字段影响）。 */
+export interface RoomSnapshotContent {
+  packId: string;
+  packVersion: string;
+  moduleId: string;
+  contentHash: string;
+  packName?: string;
+  moduleTitle?: string;
+  scenes?: RoomSceneSummary[];
+  degraded?: boolean;
+}
+
 /** 存档结构（JSON 可序列化；v1）。 */
 export interface RoomSnapshot {
   schemaVersion: 1;
@@ -84,6 +139,8 @@ export interface RoomSnapshot {
     sessionId?: string;
     createdAt: number;
     scene?: { sceneId: string; title?: string };
+    /** 内容引用 + 派生场景快照（M8.2 起；旧快照缺省视为内置包默认模组）。 */
+    content?: RoomSnapshotContent;
     players: Array<{
       id: string;
       name: string;
@@ -131,6 +188,8 @@ interface RoomRecord {
   listeners: Set<Listener>;
   createdAt: number;
   scene?: { sceneId: string; title?: string };
+  /** 内容引用 + 派生场景快照（host 内容权威，房间只存引用）。 */
+  content: RoomContentState;
   /** 绑定为牌桌的 DSH 会话 id（原生对话即牌桌）。 */
   sessionId?: string;
 }
@@ -158,6 +217,8 @@ export interface RoomServiceOptions {
   onRoomClosed?: (roomId: string) => void;
   /** 房间状态有任何变更（用于存档 debounce）。 */
   onChanged?: () => void;
+  /** 内容解析器（host 注入 pack registry）；缺省时按内置包缺省引用记账、不校验存在性。 */
+  content?: RoomContentResolver;
 }
 
 function randomToken(): string {
@@ -188,6 +249,7 @@ export class RoomService {
   private readonly onRoomCreated?: (roomId: string, sessionId?: string) => void;
   private readonly onRoomClosed?: (roomId: string) => void;
   private readonly onChanged?: () => void;
+  private readonly content?: RoomContentResolver;
 
   constructor(options: RoomServiceOptions = {}) {
     this.maxRooms = options.maxRooms ?? 8;
@@ -197,6 +259,7 @@ export class RoomService {
     this.onRoomCreated = options.onRoomCreated;
     this.onRoomClosed = options.onRoomClosed;
     this.onChanged = options.onChanged;
+    this.content = options.content;
   }
 
   // -------------------------------------------------------------------------
@@ -208,6 +271,7 @@ export class RoomService {
     if (this.rooms.size >= this.maxRooms) {
       throw new RoomError('conflict', '房间数已达上限，请先关闭一个房间');
     }
+    const content = this.resolveContentForCreate(params);
     const room: RoomRecord = {
       id: randomUUID(),
       title: params.title,
@@ -215,6 +279,7 @@ export class RoomService {
       ...(typeof params.sessionId === 'string' && params.sessionId.trim().length > 0
         ? { sessionId: params.sessionId.trim() }
         : {}),
+      content,
       phase: 'lobby',
       inviteCode: this.uniqueInviteCode(),
       hostToken: randomToken(),
@@ -231,6 +296,12 @@ export class RoomService {
     this.tokens.set(room.hostToken, { kind: 'host', roomId: room.id });
     const event = this.emit(room, 'room', 'all', this.publicView(room));
     void event;
+    if (content.degraded) {
+      this.emit(room, 'alert', 'all', {
+        level: 'warning',
+        text: '内容包不可用，房间已按降级内容开局：GM 提示会回退到内置内容包；导入对应 .trpgpack 后可重扫内容包。',
+      } satisfies AlertPayload);
+    }
     try {
       this.onRoomCreated?.(room.id, room.sessionId);
     } catch {
@@ -486,6 +557,38 @@ export class RoomService {
 
   gmView(roomId: string): RoomView {
     return this.publicView(this.requireRoom(roomId));
+  }
+
+  /**
+   * 房间当前的内容引用（GM 运行时按它到 pack registry 解析模组/世界书）。
+   * 返回副本，含派生场景与降级标记。
+   */
+  gmContent(roomId: string): RoomContentState {
+    const room = this.requireRoom(roomId);
+    return cloneContentState(room.content);
+  }
+
+  /**
+   * 内容包重扫后调用：对仍处于降级状态的房间重新解析内容引用。
+   * 解析成功的房间清除 degraded 并广播提示；返回恢复数量。
+   */
+  revalidateContent(): { recovered: number } {
+    const resolver = this.content;
+    if (!resolver) return { recovered: 0 };
+    let recovered = 0;
+    for (const room of this.rooms.values()) {
+      if (!room.content.degraded) continue;
+      const resolved = resolver.resolveModule(room.content.packId, room.content.moduleId);
+      if (!resolved) continue;
+      room.content = contentStateFromModule(resolved);
+      recovered += 1;
+      this.emit(room, 'alert', 'all', {
+        level: 'info',
+        text: `内容包「${resolved.packName ?? resolved.packId}」已就绪，房间内容引用重新生效。`,
+      } satisfies AlertPayload);
+      this.emit(room, 'room', 'all', this.publicView(room));
+    }
+    return { recovered };
   }
 
   gmModeOf(roomId: string): GMMode {
@@ -758,6 +861,7 @@ export class RoomService {
         createdAt: room.createdAt,
         ...(room.sessionId ? { sessionId: room.sessionId } : {}),
         ...(room.scene ? { scene: room.scene } : {}),
+        content: snapshotContentOf(room.content),
         players: [...room.players.values()].map((player) => ({
           id: player.id,
           name: player.name,
@@ -788,6 +892,7 @@ export class RoomService {
         connections: 0,
       });
     }
+    const restoredContent = this.restoreContent(source.content);
     const room: RoomRecord = {
       id: source.id,
       title: source.title,
@@ -805,11 +910,16 @@ export class RoomService {
       createdAt: source.createdAt,
       ...(source.sessionId ? { sessionId: source.sessionId } : {}),
       ...(source.scene ? { scene: source.scene } : {}),
+      content: restoredContent.content,
     };
     this.rooms.set(room.id, room);
     this.tokens.set(room.hostToken, { kind: 'host', roomId: room.id });
     for (const player of players.values()) {
       this.tokens.set(player.token, { kind: 'player', roomId: room.id, playerId: player.id });
+    }
+    // 包缺失/版本漂移：房间照样恢复（不卡死），用一条 GM 警告说明降级与补救方式。
+    if (restoredContent.alert) {
+      this.emit(room, 'alert', 'all', { level: 'warning', text: restoredContent.alert } satisfies AlertPayload);
     }
     return true;
   }
@@ -837,6 +947,108 @@ export class RoomService {
   private parse<T>(result: { ok: boolean; value?: T; error?: string }): T {
     if (!result.ok || result.value === undefined) throw new RoomError('bad-request', result.error ?? '参数非法');
     return result.value;
+  }
+
+  /**
+   * 建房时解析内容引用：显式指定的包/模组必须存在（给中文错误）；
+   * 缺省引用不可用时不卡建房，标记 degraded 让 GM 回退内置包。
+   */
+  private resolveContentForCreate(params: CreateRoomParams): RoomContentState {
+    const resolver = this.content;
+    const explicitPackId = params.packId?.trim();
+    const explicitModuleId = params.moduleId?.trim();
+    const defaultPackId = resolver?.defaultPackId ?? DEFAULT_CONTENT_PACK_ID;
+    const packId = explicitPackId && explicitPackId.length > 0 ? explicitPackId : defaultPackId;
+    const moduleId = explicitModuleId && explicitModuleId.length > 0 ? explicitModuleId : undefined;
+    if (!resolver) {
+      // 未注入内容解析器（旧调用/单测）：按缺省引用记账，不校验存在性。
+      return {
+        packId,
+        packVersion: '0.0.0',
+        moduleId: moduleId ?? DEFAULT_CONTENT_MODULE_ID,
+        contentHash: '',
+        scenes: [],
+        ...(packId !== defaultPackId || moduleId !== undefined ? { degraded: true } : {}),
+      };
+    }
+    const resolved = resolver.resolveModule(packId, moduleId);
+    if (resolved) return contentStateFromModule(resolved);
+    if (explicitPackId) {
+      if (resolver.hasPack && !resolver.hasPack(packId)) {
+        throw new RoomError('bad-request', `内容包 "${packId}" 不存在（可用内容包见 content.list）`);
+      }
+      throw new RoomError(
+        'bad-request',
+        `内容包 "${packId}" 里没有模组 "${moduleId ?? '（默认模组）'}"（该包可能只带默认模组）`,
+      );
+    }
+    if (moduleId) {
+      throw new RoomError('bad-request', `缺省内容包 "${packId}" 里没有模组 "${moduleId}"`);
+    }
+    // 缺省包自己不可用（内置包加载失败/内容损坏）：降级开局，不卡住房东。
+    return {
+      packId,
+      packVersion: '0.0.0',
+      moduleId: DEFAULT_CONTENT_MODULE_ID,
+      contentHash: '',
+      scenes: [],
+      degraded: true,
+    };
+  }
+
+  /**
+   * 恢复时解析内容引用：
+   * - 旧快照无 content 字段 → 按内置包默认模组补齐（向后兼容）；
+   * - 包缺失/内容版本漂移 → 房间仍恢复，degraded + 返回警告文案（GM 回退内置包）。
+   */
+  private restoreContent(source?: RoomSnapshotContent): { content: RoomContentState; alert?: string } {
+    const resolver = this.content;
+    const defaultPackId = resolver?.defaultPackId ?? DEFAULT_CONTENT_PACK_ID;
+    if (!source) {
+      const resolved = resolver?.resolveModule(defaultPackId);
+      if (resolved) return { content: contentStateFromModule(resolved) };
+      return {
+        content: {
+          packId: defaultPackId,
+          packVersion: '0.0.0',
+          moduleId: DEFAULT_CONTENT_MODULE_ID,
+          contentHash: '',
+          scenes: [],
+        },
+      };
+    }
+    const base: RoomContentState = {
+      packId: source.packId,
+      packVersion: source.packVersion,
+      moduleId: source.moduleId,
+      contentHash: source.contentHash,
+      ...(source.packName !== undefined ? { packName: source.packName } : {}),
+      ...(source.moduleTitle !== undefined ? { moduleTitle: source.moduleTitle } : {}),
+      scenes: (source.scenes ?? []).map((scene) => ({ sceneId: scene.sceneId, title: scene.title })),
+      ...(source.degraded ? { degraded: true } : {}),
+    };
+    if (!resolver) return { content: base };
+    const resolved = resolver.resolveModule(source.packId, source.moduleId);
+    if (!resolved) {
+      return {
+        content: { ...base, degraded: true },
+        alert:
+          `内容包「${source.packId}」或模组「${source.moduleId}」在本机不可用，房间已降级恢复：` +
+          'GM 提示回退到内置内容包。导入该 .trpgpack 后重扫内容包即可恢复原内容。',
+      };
+    }
+    const content = contentStateFromModule(resolved);
+    const versionChanged = resolved.packVersion !== source.packVersion;
+    const hashChanged = source.contentHash.length > 0 && resolved.contentHash !== source.contentHash;
+    if (versionChanged || hashChanged) {
+      return {
+        content: { ...content, degraded: true },
+        alert:
+          `房间引用的内容已变化（${source.packId} ${source.packVersion} → ${resolved.packVersion}），` +
+          '已按本机现有内容继续；如需原版本请导入对应 .trpgpack 后重扫。',
+      };
+    }
+    return { content };
   }
 
   private parseCard(input: unknown): CharacterCard {
@@ -876,6 +1088,7 @@ export class RoomService {
   }
 
   private publicView(room: RoomRecord): RoomView {
+    const content = room.content;
     return {
       roomId: room.id,
       title: room.title,
@@ -884,6 +1097,19 @@ export class RoomService {
       gmMode: room.gmMode,
       locked: room.locked,
       ...(room.scene ? { scene: room.scene } : {}),
+      ...(content
+        ? {
+            content: {
+              packId: content.packId,
+              packVersion: content.packVersion,
+              moduleId: content.moduleId,
+              ...(content.packName !== undefined ? { packName: content.packName } : {}),
+              ...(content.moduleTitle !== undefined ? { moduleTitle: content.moduleTitle } : {}),
+              ...(content.degraded ? { degraded: true } : {}),
+            },
+            ...(content.scenes.length > 0 ? { scenes: content.scenes.map((scene) => ({ ...scene })) } : {}),
+          }
+        : {}),
       players: [...room.players.values()].map((player) => ({
         playerId: player.id,
         displayName: player.name,
@@ -948,6 +1174,28 @@ export class RoomService {
       room.listeners.delete(listener);
     }
   }
+}
+
+/** 解析结果 → 房间记录里的内容引用（派生场景只留公开字段）。 */
+function contentStateFromModule(module: RoomContentModule): RoomContentState {
+  return {
+    packId: module.packId,
+    packVersion: module.packVersion,
+    moduleId: module.moduleId,
+    contentHash: module.contentHash,
+    ...(module.packName !== undefined ? { packName: module.packName } : {}),
+    moduleTitle: module.moduleTitle,
+    scenes: module.scenes.map((scene) => ({ sceneId: scene.sceneId, title: scene.title })),
+  };
+}
+
+function cloneContentState(content: RoomContentState): RoomContentState {
+  return { ...content, scenes: content.scenes.map((scene) => ({ ...scene })) };
+}
+
+/** 存档里的内容引用（深拷贝，避免存档与运行时状态共享引用）。 */
+function snapshotContentOf(content: RoomContentState): RoomSnapshotContent {
+  return cloneContentState(content);
 }
 
 export type { GameEvent, RoomView };

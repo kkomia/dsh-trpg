@@ -124,8 +124,7 @@ test('runtime: start registers GM tools scoped to the agent and system section',
   const runtime = new GmRuntime({
     roomId: action.roomId,
     roomService,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     createAgent,
   });
   await runtime.start();
@@ -157,8 +156,7 @@ test('runtime: player action becomes a followup prompt with actor binding', asyn
   const runtime = new GmRuntime({
     roomId: action.roomId,
     roomService,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     createAgent,
     log: () => {},
   });
@@ -177,8 +175,7 @@ test('runtime: assistant message is broadcast to the room as GM narration', asyn
   const runtime = new GmRuntime({
     roomId: action.roomId,
     roomService,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     createAgent,
     log: () => {},
   });
@@ -227,8 +224,7 @@ test('manager: routes actions and session events, and announces readiness', asyn
   const { createAgent } = fakeAgentFactory(state);
   const manager = new GmManager({
     roomService,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     createAgent,
     log: () => {},
   });
@@ -265,8 +261,7 @@ test('manager: human GM mode does not start an AI agent', async () => {
   const { createAgent } = fakeAgentFactory(state);
   const manager = new GmManager({
     roomService,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     createAgent,
     log: () => {},
   });

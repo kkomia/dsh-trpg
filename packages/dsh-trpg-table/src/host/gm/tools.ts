@@ -35,12 +35,14 @@ export function createGmTools(options: {
   roomService: RoomService;
   /** 固定房间 id，或解析器（subagent 模式按 childId 动态解析）。 */
   roomId: string | (() => string);
-  lorebook: LorebookDef;
+  /** 世界书：固定对象，或按房间解析（不同房间可能引用不同内容包）。 */
+  lorebook: LorebookDef | (() => LorebookDef);
   combat?: CombatRuntime | (() => CombatRuntime | undefined);
 }): GmToolDefinition[] {
-  const { roomService, lorebook } = options;
+  const { roomService } = options;
   const combat = options.combat;
   const roomOf = (): string => (typeof options.roomId === 'string' ? options.roomId : options.roomId());
+  const lorebookOf = (): LorebookDef => (typeof options.lorebook === 'function' ? options.lorebook() : options.lorebook);
   const combatOf = (): CombatRuntime | undefined => (typeof combat === 'function' ? combat() : combat);
   const render = (_args: Record<string, unknown>, value: { text: string }) => [{ type: 'text' as const, text: value.text }];
   const output = { schema: { type: 'object' }, render };
@@ -133,6 +135,7 @@ export function createGmTools(options: {
       },
       output,
       execute(args) {
+        const lorebook = lorebookOf();
         const entry = lorebook.entries.find((item) => item.id === String(args.entryId ?? ''));
         if (!entry) throw new Error(`世界书没有条目：${String(args.entryId ?? '')}；可用条目：${lorebook.entries.map((item) => item.id).join('、')}`);
         roomService.gmNarrate(roomOf(), entry.content);
@@ -153,6 +156,7 @@ export function createGmTools(options: {
       execute(args) {
         const query = String(args.query ?? '').trim();
         if (!query) throw new Error('query 不能为空');
+        const lorebook = lorebookOf();
         const matches = lorebook.entries
           .filter(
             (entry) =>

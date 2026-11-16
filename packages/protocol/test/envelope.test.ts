@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_CONTENT_MODULE_ID,
+  DEFAULT_CONTENT_PACK_ID,
   PROTOCOL_VERSION,
   validateRpcRequest,
   validateCreateRoom,
@@ -23,6 +25,22 @@ test('validateCreateRoom: requires title and gmMode', () => {
   assert.equal(validateCreateRoom({ title: '', gmMode: 'ai' }).ok, false);
   assert.equal(validateCreateRoom({ title: 'x', gmMode: 'robot' }).ok, false);
   assert.equal(validateCreateRoom({ title: 'x'.repeat(61), gmMode: 'ai' }).ok, false);
+});
+
+test('validateCreateRoom: optional packId/moduleId（内容包引用）', () => {
+  // 旧客户端不传 → 仍是合法请求（缺省内置包默认模组）
+  assert.equal(validateCreateRoom({ title: '鬼木崖', gmMode: 'ai' }).ok, true);
+  assert.equal(validateCreateRoom({ title: '鬼木崖', gmMode: 'ai', packId: 'core-guimuya', moduleId: 'guimuya' }).ok, true);
+  assert.equal(validateCreateRoom({ title: 'x', gmMode: 'ai', packId: '' }).ok, false);
+  assert.equal(validateCreateRoom({ title: 'x', gmMode: 'ai', packId: 'x'.repeat(65) }).ok, false);
+  assert.equal(validateCreateRoom({ title: 'x', gmMode: 'ai', moduleId: 42 }).ok, false);
+  assert.equal(DEFAULT_CONTENT_PACK_ID, 'core-guimuya');
+  assert.equal(DEFAULT_CONTENT_MODULE_ID, 'guimuya');
+});
+
+test('validateRpcRequest: content.list / content.reload 是已知方法', () => {
+  assert.equal(validateRpcRequest({ method: 'content.list' }).ok, true);
+  assert.equal(validateRpcRequest({ method: 'content.reload' }).ok, true);
 });
 
 test('validateJoin: requires invite code and player name', () => {

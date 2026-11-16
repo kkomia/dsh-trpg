@@ -70,8 +70,7 @@ test('subagent GM: 开场回合与玩家行动都通过 spawn 激活，叙事广
   const manager = new SubagentGmManager({
     subagents,
     roomService,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     getParents: () => [{ id: 'host-session' }],
     log: () => {},
     registerTool: (definition) => tools.push(definition as (typeof tools)[number]),
@@ -101,8 +100,7 @@ test('subagent GM: 没有可用父会话时给出明确提示而不是静默失�
   const manager = new SubagentGmManager({
     subagents,
     roomService,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: () => ({ module: GUIMUYA_MODULE, lorebook: GUIMUYA_LOREBOOK }),
     getParents: () => [],
     log: () => {},
     registerTool: () => {},

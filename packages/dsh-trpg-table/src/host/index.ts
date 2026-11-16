@@ -7,11 +7,11 @@
  *   GM 的工具在这里执行引擎结算（掷骰/检定/私密消息/世界书）。
  */
 import { randomUUID } from 'node:crypto';
-import { GUIMUYA_LOREBOOK, GUIMUYA_MODULE } from '@dsh-trpg/content';
 import { RoomError, RoomService } from '@dsh-trpg/rooms';
 import { createRoomHttpServer, type RoomHttpServer } from './room-http.ts';
 import { RoomPersistence } from './persistence.ts';
-import { GmManager, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike } from './gm/runtime.ts';
+import { PackRegistry } from './pack-registry.ts';
+import { GmManager, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike, type GmContentResolver } from './gm/runtime.ts';
 import { SubagentGmManager, type SubagentsLike } from './gm/subagent-gm.ts';
 import { TableSessionBridge } from './table-session.ts';
 
@@ -115,10 +115,20 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   const subagentRef: { current: SubagentGmManager | null } = { current: null };
   const persistence = new RoomPersistence({ log });
   let restoredRooms: string[] = [];
+  /** 内容包注册表：host 是内容权威，房间只按 {packId, moduleId} 引用。 */
+  const registry = new PackRegistry({ log });
+  try {
+    const loaded = registry.reload();
+    log(`content packs ready: ${loaded.packs} pack(s)${loaded.warnings.length > 0 ? `, ${loaded.warnings.length} warning(s)` : ''}`);
+  } catch (error) {
+    // 注册表加载失败不应该拖垮房间服务：内置包已尽量加载，房间按降级内容开局。
+    log(`content pack registry load failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   /** 会话原生牌桌桥（房间 ↔ DSH 会话）；服务就绪后创建。 */
   let tableBridge: TableSessionBridge | null = null;
   const service = new RoomService({
     maxRooms: config.maxRooms ?? 8,
+    content: registry,
     onRoomCreated: (roomId, sessionId) => {
       // 会话原生牌桌：绑定会话后不再起 subagent GM（AI 就是会话 Agent）。
       if (sessionId && tableBridge) {
@@ -140,10 +150,30 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     onRoomClosed: (roomId) => tableBridge?.unbind(roomId),
     onChanged: () => persistence.schedule(),
   });
+
+  /**
+   * 按房间解析内容：房间只存 `{packId, moduleId}`，内容始终从注册表取。
+   * 包缺失/降级（房间内容不可用）时回退到缺省内置包，保证 GM 提示不卡死。
+   */
+  const resolveGmContent: GmContentResolver = (roomId) => {
+    let packId: string | undefined;
+    let moduleId: string | undefined;
+    try {
+      const content = service.gmContent(roomId);
+      packId = content.packId;
+      moduleId = content.moduleId;
+    } catch {
+      /* 房间可能已关闭：走缺省包 */
+    }
+    const chosen =
+      (packId ? registry.resolveLegacy(packId, moduleId) : undefined) ?? registry.resolveLegacy(registry.defaultPackId);
+    if (!chosen) throw new Error('没有可用的内容包（内置包加载失败），无法启动 GM');
+    return { module: chosen.module, lorebook: chosen.lorebook };
+  };
+
   tableBridge = new TableSessionBridge({
     roomService: service,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: resolveGmContent,
     getAgent: (sessionId) => agentsService?.get?.(sessionId),
     prompt: async (sessionId, text) => {
       const controller = sessionController as unknown as {
@@ -209,6 +239,17 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       bindHost,
       log,
       service,
+      contentCatalog: () => registry.publicCatalog(),
+      contentReload: () => {
+        const reloaded = registry.reload();
+        let recoveredRooms = 0;
+        try {
+          recoveredRooms = service.revalidateContent().recovered;
+        } catch (error) {
+          log(`content revalidate failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return { ...reloaded, ...(recoveredRooms > 0 ? { recoveredRooms } : {}) };
+      },
       bindSession: async (roomId, sessionId) => {
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           tableBridge?.unbind(roomId);
@@ -422,8 +463,7 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     const subagentManager: SubagentGmManager = new SubagentGmManager({
       subagents: subagentsService,
       roomService: service,
-      module: GUIMUYA_MODULE,
-      lorebook: GUIMUYA_LOREBOOK,
+      resolveContent: resolveGmContent,
       getParents: (): Array<{ id: string }> => {
         const live: Array<{ id: string }> = agentsService?.list?.() ?? [];
         return live.filter((agent) => !gmSessionIds.has(agent.id) && !subagentManager.isChild(agent.id));
@@ -442,8 +482,7 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
 
   const manager = new GmManager({
     roomService: service,
-    module: GUIMUYA_MODULE,
-    lorebook: GUIMUYA_LOREBOOK,
+    resolveContent: resolveGmContent,
     createAgent,
     log,
   });

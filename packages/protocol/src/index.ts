@@ -10,6 +10,14 @@
 
 export const PROTOCOL_VERSION = 1 as const;
 
+/**
+ * 缺省内容包（内置包）与缺省模组：旧客户端不传 `packId`/`moduleId` 时按这套引用建房
+ * （CONTENT-MODEL §2.6「都缺省 = 内置包 core-guimuya + 其默认模组」）。
+ * 实际默认值以 host 的 pack registry 为准，这两个常量是协议层兜底常量。
+ */
+export const DEFAULT_CONTENT_PACK_ID = 'core-guimuya';
+export const DEFAULT_CONTENT_MODULE_ID = 'guimuya';
+
 export type PlayerId = string;
 export type RoomId = string;
 export type Seq = number;
@@ -45,8 +53,34 @@ export interface RoomView {
   inviteCode?: string;
   /** 当前场景进度（真人 GM / AI 推进后可显示）。 */
   scene?: { sceneId: string; title?: string };
+  /** 房间引用的内容（host 是内容权威，房间只存引用，不复制内容）。 */
+  content?: RoomContentView;
+  /** 该模组的场景公开摘要（GM 控制台场景下拉用；只含 sceneId + 公开标题）。 */
+  scenes?: RoomSceneSummary[];
   players: RoomPlayerView[];
   createdAt: number;
+}
+
+/** 房间引用的内容：`{ packId, moduleId }` 的解析结果（脱敏投影，不含模组内容）。 */
+export interface RoomContentView {
+  packId: string;
+  packVersion: string;
+  moduleId: string;
+  /** 包展示名（可选；包缺失时可能没有）。 */
+  packName?: string;
+  /** 模组标题（可选；包缺失时可能没有）。 */
+  moduleTitle?: string;
+  /**
+   * true = host 上找不到该包/模组，或内容版本与快照不一致：房间已降级续团，
+   * GM 提示回退到内置内容包。玩家端只做提示，不要按缺失包渲染。
+   */
+  degraded?: boolean;
+}
+
+/** 场景公开摘要（GM 控制台场景下拉）。 */
+export interface RoomSceneSummary {
+  sceneId: string;
+  title: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,13 +177,19 @@ export type RpcMethod =
   | 'gm.award'
   | 'room.close'
   | 'room.closeAll'
-  | 'room.bind';
+  | 'room.bind'
+  | 'content.list'
+  | 'content.reload';
 
 export interface CreateRoomParams {
   title: string;
   gmMode: GMMode;
   /** 开局即绑定的 DSH 会话 id（房主当前打牌的会话）；缺省为不绑定。 */
   sessionId?: string;
+  /** 内容包 id；缺省 = host 的缺省包（内置包 core-guimuya）。 */
+  packId?: string;
+  /** 模组 id；缺省 = 该包的 defaultModuleId。 */
+  moduleId?: string;
 }
 
 /** 把房间绑定到（或解绑）一个 DSH 会话。 */
@@ -266,6 +306,54 @@ export interface RoomListResult {
 }
 
 // ---------------------------------------------------------------------------
+// 内容包目录（content.list / content.reload）
+// ---------------------------------------------------------------------------
+
+/** 模组摘要（公开字段；不含场景内容、GM 备注、秘密、遭遇/判定等）。 */
+export interface CatalogModuleSummary {
+  moduleId: string;
+  title: string;
+  level: [number, number];
+  playerCount: [number, number];
+  sceneCount: number;
+}
+
+/**
+ * 内容包的**脱敏投影**（给玩家/客户端选包用）：只有元数据与计数，
+ * 绝不包含 gmNotes / secrets / encounters / checks / rewards / 世界书正文。
+ */
+export interface CatalogPack {
+  packId: string;
+  name: string;
+  version: string;
+  description?: string;
+  author?: string;
+  ruleSystem: { id: string; name: string };
+  defaultModuleId: string;
+  modules: CatalogModuleSummary[];
+  /** pack 内置预制卡数量（不展开卡内容）。 */
+  cardCount: number;
+  /** 世界书条目数量（不展开条目内容）。 */
+  loreCount: number;
+  /** builtin = 随插件内置；data = 数据目录里的 .trpgpack。 */
+  source: 'builtin' | 'data';
+}
+
+/** `content.list` 结果；玩家可调、只读。 */
+export interface ContentListResult {
+  packs: CatalogPack[];
+}
+
+/** `content.reload` 结果（仅 loopback + host token）：重扫数据目录后的清单概要。 */
+export interface ContentReloadResult {
+  packs: number;
+  /** 可读警告：坏包、重复 packId、被忽略的条目等。 */
+  warnings: string[];
+  /** 重扫后从降级恢复的房间数。 */
+  recoveredRooms?: number;
+}
+
+// ---------------------------------------------------------------------------
 // 校验（手写守卫，零依赖）
 // ---------------------------------------------------------------------------
 
@@ -287,6 +375,11 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+/** 可选的非空短字符串（id 类字段）。 */
+function isOptionalShortId(value: unknown, max = 64): boolean {
+  return value === undefined || (isNonEmptyString(value) && value.length <= max);
+}
+
 const METHODS: readonly RpcMethod[] = [
   'room.create',
   'room.join',
@@ -306,6 +399,8 @@ const METHODS: readonly RpcMethod[] = [
   'room.close',
   'room.closeAll',
   'room.bind',
+  'content.list',
+  'content.reload',
 ];
 
 export function isRpcMethod(value: unknown): value is RpcMethod {
@@ -326,6 +421,8 @@ export function validateCreateRoom(params: unknown): ValidationResult<CreateRoom
   if (params.title.length > 60) return fail('房间标题过长（最多 60 字）');
   if (params.gmMode !== 'ai' && params.gmMode !== 'human') return fail('gmMode 必须是 ai 或 human');
   if (params.sessionId !== undefined && !isNonEmptyString(params.sessionId)) return fail('sessionId 必须是非空字符串');
+  if (!isOptionalShortId(params.packId)) return fail('packId 必须是非空字符串（最多 64 字符）');
+  if (!isOptionalShortId(params.moduleId)) return fail('moduleId 必须是非空字符串（最多 64 字符）');
   return { ok: true, value: params as unknown as CreateRoomParams };
 }
 

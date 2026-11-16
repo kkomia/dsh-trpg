@@ -9,12 +9,11 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes, randomUUID } from 'node:crypto';
-import type { LorebookDef, ModuleDef } from '@dsh-trpg/content';
 import type { PlayerActionInfo, RoomService } from '@dsh-trpg/rooms';
 import { buildGmSystemPrompt, buildTurnPrompt, type PromptEvent, type PromptPlayer } from './prompt.ts';
 import { createGmTools } from './tools.ts';
 import { CombatRuntime } from './combat.ts';
-import { eventToPromptEvent } from './runtime.ts';
+import { eventToPromptEvent, type GmContentResolver } from './runtime.ts';
 
 export interface LiveAgentLike {
   id: string;
@@ -37,8 +36,8 @@ export interface SubagentsLike {
 export interface SubagentGmOptions {
   subagents: SubagentsLike;
   roomService: RoomService;
-  module: ModuleDef;
-  lorebook: LorebookDef;
+  /** 按房间解析当前模组/世界书（host 注入 pack registry）。 */
+  resolveContent: GmContentResolver;
   /** 选择一个宿主活跃会话作为子 Agent 的父会话（可给多个候选，池满时轮换）。 */
   getParents: () => LiveAgentLike[];
   log?: (message: string) => void;
@@ -137,7 +136,8 @@ export class SubagentGmManager {
     const definitions = createGmTools({
       roomService: this.options.roomService,
       roomId: roomOf,
-      lorebook: this.options.lorebook,
+      // 每条工具调用时按房间解析世界书（不同房间可能引用不同内容包）。
+      lorebook: () => this.options.resolveContent(roomOf()).lorebook,
       combat: () => manager.rooms.get(roomOf())?.combat,
     });
     for (const definition of definitions) {
@@ -172,15 +172,16 @@ export class SubagentGmManager {
   /** 房间创建/恢复：准备战斗运行时；只有新建房间才自动开场（续团房间等玩家行动）。 */
   ensureRoom(roomId: string, options: { opening?: boolean } = {}): void {
     if (this.rooms.has(roomId)) return;
+    const { module, lorebook } = this.options.resolveContent(roomId);
     const channel: RoomChannel = {
       combat: new CombatRuntime({ roomService: this.options.roomService, roomId, log: this.options.log }),
       queue: Promise.resolve(),
     };
     this.rooms.set(roomId, channel);
-    this.options.roomService.gmNarrate(roomId, `AI 主持人已就位。《${this.options.module.title}》即将开始。`);
+    this.options.roomService.gmNarrate(roomId, `AI 主持人已就位。《${module.title}》即将开始。`);
     if (options.opening === false) return;
     const opening = [
-      buildGmSystemPrompt(this.options.module, this.options.lorebook, this.toolNames),
+      buildGmSystemPrompt(module, lorebook, this.toolNames),
       '',
       '---',
       '',
@@ -197,7 +198,8 @@ export class SubagentGmManager {
 
   /** 组装一次行动的用户消息（系统守则 + 当前行动）。 */
   buildTurnText(info: PlayerActionInfo): string {
-    const { module, roomService } = this.options;
+    const { roomService, resolveContent } = this.options;
+    const { module, lorebook } = resolveContent(info.roomId);
     const room = roomService.gmView(info.roomId);
     const party: PromptPlayer[] = roomService.gmParty(info.roomId).map((player) => ({
       playerId: player.playerId,
@@ -223,7 +225,7 @@ export class SubagentGmManager {
       party,
       recent,
     });
-    return `${buildGmSystemPrompt(module, this.options.lorebook, this.toolNames)}\n\n---\n\n${turn}`;
+    return `${buildGmSystemPrompt(module, lorebook, this.toolNames)}\n\n---\n\n${turn}`;
   }
 
   private enqueue(roomId: string, promptText: string): void {
