@@ -525,7 +525,7 @@ packages/content/src/rules/dnd5e-lite/     # 作者源码：可 diff、可单测
 
 | 阶段 | 目标 | 交付 | 验收标准 |
 |---|---|---|---|
-| **M9.1** | 规则 schema + 公式编译/求值 + 卡实例/迁移 + 投影 DTO（纯库 + 测试） | `@dsh-trpg/rules` 包骨架：types、`validateRulesPack()`（含 `space` zone-grid / `time` round / `turn` 行动经济段）、公式 parser/compiler/evaluator、卡实例与迁移、投影 DTO（`SheetView` / `CombatView` / `WorldMapView` 的形状定义）；不接 host | 公式 40+ 例单测（含编译期/运行期错误）、schema 校验（含 zone-grid/round/turn 各 1 组正反例）、旧卡迁移；typecheck 0；不新增运行时依赖 |
+| **M9.1** ✅ 完成 2026-11-16 | 规则 schema + 公式编译/求值 + 卡实例/迁移 + 投影 DTO（纯库 + 测试） | `@dsh-trpg/rules` 已交付：types、`validateRulePack()`（含 `space` zone-grid / `time` round / `turn` 行动经济段）、公式 parser/compiler/evaluator、卡实例与迁移（`validateCard` / `buildSheetProjection` / `migrateLegacyCard`）、`fixtures.ts` 最小 d20 规则包、投影 DTO（`SheetView` / `CombatView` / `WorldMapView` 的形状定义）；不接 host。**实测：新增 172 用例（总 306 全过）、typecheck 0** | 公式 40+ 例单测（含编译期/运行期错误）、schema 校验（含 zone-grid/round/turn 各 1 组正反例）、旧卡迁移；typecheck 0；不新增运行时依赖 |
 | **M9.2** | 核心运行时 + 脚本沙箱 | 种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `vm` 沙箱 + 核心 8 + 场地/时间/上限 9 钩子调度 + 超时/sha256/错误事件 | 核心 8 + 场地/时间/上限 9 各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界 |
 | **M9.3** | dnd5e-lite 示例规则包 + 迁移 | `rules.json` + 4 个脚本；`core-guimuya` pack 带 rules 段（含 `space`/`time`/`turn` 数据）；旧卡迁移器；与旧实现对照测试 | CLI 用「鬼木崖·异光」跑完一幕，骰面/命中/伤害/AC/先攻逐项一致；单测迁移后全绿（134 → 新增规则测试） |
 | **M9.4** | 协议/房间/客户端卡面与地图视图（主机权威投影） | `sheet.view`/`combat.view`/`worldMap.view` + `sheet`/`rules` 事件 + 重连重算；客户端只读卡面（分组/资源条/装备槽/可用动作/状态）+ **世界地图页（主区域独立页）** + **战棋战斗视图（底图+网格+token+行动经济条）** | 双实例：落座→检定→攻击→移动→断线重连后投影一致；世界地图热点/连线与战棋网格/token/回合/行动经济条正常；玩家端构建产物不含规则执行代码；320–420px 栏宽可读 |
@@ -550,7 +550,7 @@ packages/content/src/rules/dnd5e-lite/     # 作者源码：可 diff、可单测
 ## 15. 与现有代码的差异 / 迁移清单
 
 ```
-packages/rules/（新）                # @dsh-trpg/rules：核心运行时 + 公式编译/求值 + 沙箱 + 卡实例/投影 DTO + 地图结构校验器（M9.5e）
+packages/rules/（新，M9.1 ✅ 2026-11-16）  # @dsh-trpg/rules 已建包：types + validate-rules + formula + sheet + migrate + fixtures（M9.1）；核心运行时/沙箱（M9.2）、地图结构校验器（M9.5e）后续补
 packages/engine/                     # 瘦身：dice/rng 迁入 rules；checks/characters/spells/combat 的 dnd5e 实现移除
 packages/content/src/rules/dnd5e-lite/     # 新：示例规则包源码（rules.json + scripts/*.js；space/time/turn 数据段）
 packages/content/src/packs/core-guimuya.ts # 新增 pack.rules 段（M9.3）；pack.ts 加 rules 段 schema 与 zip 内脚本 sha256 校验

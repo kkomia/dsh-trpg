@@ -101,7 +101,7 @@
       "beats": [{ "beatId": "beat_accept", "trigger": "玩家接下悬赏或承诺救人", "effect": "进入 scene_guimuya" }],
       "rewardIds": ["reward_qingshi"]
     }],
-    "encounters": [{ "encounterId": "enc_guihuo", "monsters": [{ "monsterId": "guihuo", "count": 2 }, { "monsterId": "zhiren", "count": 2 }], "note": "惊动洞口的守卫。" }],
+    "encounters": [{ "encounterId": "enc_guihuo", "monsters": [{ "monsterId": "guihuo", "count": 2 }, { "monsterId": "zhiren", "count": 2 }], "maxRounds": 8, "battleMapId": "map_cave_mouth", "note": "惊动洞口的守卫。" }],
     "rewards": [{ "rewardId": "reward_qingshi", "xp": 20, "items": [] }],
     "secrets": [{ "secretId": "secret_aman", "content": "阿满被摄入阵中，还活着。", "revealWhen": "场景 3 进入密室时揭示" }]
   }],
@@ -135,6 +135,7 @@
 | module | `moduleId` / `startSceneId` | 必填 | `startSceneId` 必须是本模组场景之一 |
 | module | `scenes[].{loreIds,npcIds,encounterIds,rewardIds}` | 可选数组 | 跨对象引用；`validatePack()` 检查存在性（含 `loreIds` 必须命中 lorebook `loreId`） |
 | module | `encounters[]` / `checks[].checkId` | 模组级集合 / 必填 | 场景用 `encounterIds` 引用；判定是数据 + GM 提示，不自动执行 |
+| module | `encounters[].{maxRounds?,battleMapId?}` | 可选：正整数 / `mapId` 引用 | 覆盖本场回合上限（缺省取 `rules.time.defaultMaxRounds`）与指定本场战斗地图（引用 `rules.space.battleMaps[].mapId`）；随房间快照固定，解析顺序见 [RULES-MODEL.md](./RULES-MODEL.md) §3 |
 | lorebook | `entries[].{loreId,visibility}` | 必填 | `visibility: public \| gm \| player:<id>`；`gm` 条目只进 GM 上下文、不进玩家可见上下文 |
 | cards | `cards[].cardId` / `owner.playerId` | 必填 | pack 卡库即 `owner.playerId = null` 的预制卡（§6.2）；卡可用显式 `ruleSystem: { id, name }`，缺省由 `pack.ruleSystem` 兜底、显式时 id 必须与 pack 一致；玩家私卡同一 schema，来源仍用 engine 旧形状 `source: { ruleId, ruleVersion, moduleId }` 标注 |
 | assets | 引用路径 | 相对路径 | 禁止绝对路径与 `..`；只允许 `assets/` 前缀；孤立素材给 warning（不阻断） |
@@ -225,11 +226,11 @@
 ```
 【本场可用（scene_qingshi）】
 - 判定：向柳掌柜打听绿光 → persuasion DC 12（成功：…；失败：…）
-- 遭遇：enc_guihuo（guihuo×2、zhiren×2）→ start_combat 的 monsters 参数
+- 遭遇：enc_guihuo（guihuo×2、zhiren×2）→ trpg_combat({action:'start'}) 的 monsters 参数（本场 maxRounds / battleMapId 取自遭遇数据）
 - 奖励：reward_qingshi（XP 20）→ 场景清完后 gmAward；推进：玩家接下悬赏 → scene_guimuya
 ```
 
-判定仍由 GM 调 `roll_check`；遭遇仍用 `start_combat`（按 encounterId 展开 monsters）；奖励用 `gmAward`。不引入新状态机，只把数据变成 GM 可读内容。可选：`list_scene` 工具返回当前场景可用判定/遭遇/奖励，供 GM 重查（M8.4）。
+判定由 GM 调 `trpg_roll_check`；遭遇用 `trpg_combat`（`action:'start'`，按 encounterId 展开 monsters，并覆盖本场回合上限/战斗地图）；动作与移动用 `trpg_use_action` / `trpg_move`，具体动作从当前房间规则包读（见 [RULES-MODEL.md](./RULES-MODEL.md) §7.1）；奖励用 `gmAward`。不引入新状态机，只把数据变成 GM 可读内容。可选：`list_scene` 工具返回当前场景可用判定/遭遇/奖励，供 GM 重查（M8.4）。（v1 旧工具名 `trpg_start_combat` / `trpg_attack` / `trpg_next_turn` 为历史口径；`trpg_roll_check` 名称保留、语义泛化为 `kind` 由规则包定义。）
 
 ## 6. 分发、版本与权限（D10/D11）
 

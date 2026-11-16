@@ -39,12 +39,14 @@
 
 ## 3. 战斗
 
-> v3 不再有「⚔ 战斗面板」；战斗由 AI 的 `trpg_*` 战斗工具推进，先攻/轮次/HP 以会话内原生工具卡呈现（`trpg_start_combat` / `trpg_combat_status` / `trpg_attack` / `trpg_next_turn`），右栏「掷骰」记录可对照。
+> v3 不再有「⚔ 战斗面板」；战斗由 AI 的 `trpg_combat`（`start` / `nextTurn` / `end`）与 `trpg_use_action` 等泛化工具推进，动作定义从当前房间规则包读（见 [RULES-MODEL.md](./RULES-MODEL.md) §7.1），先攻/轮次/HP 以会话内原生工具卡呈现，右栏「掷骰」记录可对照。
 
-- [ ] 进入遭遇后 AI 调用 `trpg_start_combat`：会话出现先攻顺序（第几轮、轮到谁、双方 HP）的工具卡
+- [ ] 进入遭遇后 AI 调用 `trpg_combat({action:'start'})`：会话出现先攻顺序（第几轮、轮到谁、双方 HP）的工具卡
 - [ ] 非当前行动者的攻击被引擎拒绝（工具返回「还没轮到你」之类，AI 不结算）
-- [ ] 怪物 HP 归零后显示阵亡；`trpg_combat_status` 显示战斗结束，不再推进
+- [ ] 怪物 HP 归零后显示阵亡；`trpg_combat` 返回的战斗状态显示战斗结束，不再推进
 - [ ] 战斗期间主区域始终是 DSH 原生对话（插件没有接管叙事区或输入框）
+
+> 战棋网格（zone-grid）验收待 M9.4/M9.5 后补。
 
 ## 4. 真人 GM 干预
 

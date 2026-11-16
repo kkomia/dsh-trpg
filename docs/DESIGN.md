@@ -32,7 +32,7 @@
 
 ### 1.4 v1 非目标
 
-- ❌ 网格战术地图 / 视野迷雾 / 距离测算（v1 用 theater-of-mind + 距离档位：接触 / 近距离 / 远距离）
+- ❌ v1 不做 3D/实时地图与玩家自制 UI；网格战术地图自 M9 起作为 zone-grid 战棋实现（见 [RULES-MODEL.md](./RULES-MODEL.md) §3/§6、[UI-CONTRACT.md](./UI-CONTRACT.md) §5.5）
 - ❌ 语音、配音、配图（留给社区插件，如 ComfyUI 联动）
 - ❌ 公网直连与账号中心（v1 只做局域网；QQ/公网 adapter 在 v2）
 - ❌ 多房间、多房主联邦、围观模式
