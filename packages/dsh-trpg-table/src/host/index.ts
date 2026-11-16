@@ -12,6 +12,7 @@ import { createRoomHttpServer, type RoomHttpServer } from './room-http.ts';
 import { RoomPersistence } from './persistence.ts';
 import { PackRegistry } from './pack-registry.ts';
 import { MediaService, RoomAssetStore } from './media/index.ts';
+import { createStudio } from './studio/index.ts';
 import { GmManager, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike, type GmContentResolver } from './gm/runtime.ts';
 import { SubagentGmManager, type SubagentsLike } from './gm/subagent-gm.ts';
 import { resetRevealedLore } from './gm/lore-reveal.ts';
@@ -127,6 +128,12 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   if (media.configured()) log(`media service ready (provider=${media.providerName})`);
   /** M9.5d 房间资产存储（`assets.upload` + `GET /trpg/room-assets/...`，与房间存档同父目录）。 */
   const roomAssets = new RoomAssetStore({ log });
+  /**
+   * M9.5e 工坊服务：地图/世界结构生成（AI 文本草稿 → 校验 → 程序化兜底）+ AI 底图 +
+   * 内容包工坊 RPC（`pack.detail/update/export/import/assetPut/assetDelete`，全部仅 loopback+host token）。
+   * 与生图服务共用同一套 OpenAI 兼容环境变量；`DSH_TRPG_MEDIA_FAKE=1` 时底图走内置假生成器。
+   */
+  const studio = createStudio({ registry, log });
   try {
     const loaded = registry.reload();
     log(`content packs ready: ${loaded.packs} pack(s)${loaded.warnings.length > 0 ? `, ${loaded.warnings.length} warning(s)` : ''}`);
@@ -261,6 +268,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       // M9.5d：玩家展示资产——生图（预览候选）与房间资产区（落座上传/无 token 只读）。
       media,
       roomAssets,
+      // M9.5e：地图/世界生成 + 内容包工坊（loopback + host token 在 room-http 里校验）。
+      studio,
       contentReload: () => {
         const reloaded = registry.reload();
         let recoveredRooms = 0;

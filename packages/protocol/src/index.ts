@@ -232,7 +232,16 @@ export type RpcMethod =
   | 'worldmap.get'
   // ---- M9.5d 玩家角色资产（生图 / 落座上传；UI-CONTRACT §4.4/§4.5/§7.2/§8） ----
   | 'assets.generate'
-  | 'assets.upload';
+  | 'assets.upload'
+  // ---- M9.5e 地图/世界生成 + 内容包工坊（仅 loopback + host token；UI-CONTRACT §5.4/§5.5/§10） ----
+  | 'map.generate'
+  | 'world.generate'
+  | 'pack.detail'
+  | 'pack.update'
+  | 'pack.export'
+  | 'pack.import'
+  | 'pack.assetPut'
+  | 'pack.assetDelete';
 
 export interface CreateRoomParams {
   title: string;
@@ -1211,6 +1220,14 @@ const METHODS: readonly RpcMethod[] = [
   'worldmap.get',
   'assets.generate',
   'assets.upload',
+  'map.generate',
+  'world.generate',
+  'pack.detail',
+  'pack.update',
+  'pack.export',
+  'pack.import',
+  'pack.assetPut',
+  'pack.assetDelete',
 ];
 
 export function isRpcMethod(value: unknown): value is RpcMethod {
@@ -1694,4 +1711,566 @@ export function validateCharacterAssetRefs(input: unknown): ValidationResult<Cha
 /** 事件的 SSE 线格式。 */
 export function encodeSseEvent(event: GameEvent): string {
   return `event: game\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+// ---------------------------------------------------------------------------
+// M9.5e 地图/世界生成 + 内容包工坊（docs/RULES-MODEL §3 生成小节、UI-CONTRACT §5.4/§5.5/§10）
+// 这 8 个方法全部只允许 **loopback + host token**（作者操作，玩家不可调用）。
+// ---------------------------------------------------------------------------
+
+/** 战斗地图底图风格档（RULES-MODEL §3：`topdown-2d` / `pixel-topdown`）。 */
+export type MapGenerateStyle = 'topdown-2d' | 'pixel-topdown';
+export const MAP_GENERATE_STYLES: readonly MapGenerateStyle[] = ['topdown-2d', 'pixel-topdown'];
+
+/** 世界地图底图风格档（v1 只有 2D 插画）。 */
+export type WorldGenerateStyle = '2d-illustration';
+export const WORLD_GENERATE_STYLES: readonly WorldGenerateStyle[] = ['2d-illustration'];
+
+/** 结构来源：AI 文本草稿过校验（`ai`）或本机程序化兜底（`procedural`）。 */
+export type MapGenerateMethod = 'ai' | 'procedural';
+
+/**
+ * 战棋格地形图例：**generator 与校验器共用同一份定义**（RULES-MODEL §3「校验器与程序兜底
+ * 生成器共用同一套约束定义」）。`terrain[][]` 里每个格子是这里的单字符 key；
+ * 落盘成 `space.battleMaps[].terrain` 时按 `id` 映射到规则包 `space.terrains[]` 的地形 id。
+ */
+export interface BattleTerrainSpec {
+  /** 对应规则包 `space.terrains[].id`。 */
+  id: string;
+  /** 中文展示名。 */
+  name: string;
+  /** 是否可通行（`blocksMove` 的反面；BFS 连通性只看这个）。 */
+  walkable: boolean;
+  /** 移动力消耗（不可通行为 0）。 */
+  moveCost: number;
+}
+
+export const BATTLE_TERRAIN_LEGEND: Readonly<Record<string, BattleTerrainSpec>> = {
+  g: { id: 'floor', name: '草地', walkable: true, moveCost: 1 },
+  '.': { id: 'floor', name: '地面', walkable: true, moveCost: 1 },
+  r: { id: 'rubble', name: '碎石', walkable: true, moveCost: 2 },
+  '+': { id: 'door', name: '门', walkable: true, moveCost: 1 },
+  t: { id: 'tree', name: '树木', walkable: false, moveCost: 0 },
+  '~': { id: 'water', name: '水域', walkable: false, moveCost: 0 },
+  w: { id: 'wall', name: '岩壁', walkable: false, moveCost: 0 },
+  '#': { id: 'wall', name: '墙', walkable: false, moveCost: 0 },
+};
+
+/** 合法地形字符（校验器与生成器共用；未知字符一律报错，不静默当墙）。 */
+export const BATTLE_TERRAIN_CHARS: readonly string[] = Object.keys(BATTLE_TERRAIN_LEGEND);
+
+/** 战棋结构硬约束（RULES-MODEL §3）。 */
+export const BATTLE_STRUCTURE_LIMITS = {
+  /** 单边 ≤ 32（1..32）。 */
+  maxCols: 32,
+  maxRows: 32,
+  /** 单图 spawn ≤ 20。 */
+  maxSpawns: 20,
+  /** 单侧出生点上限（= 队伍人数上限）。 */
+  maxSpawnSide: 8,
+  /** 生成参数里的队伍人数 1..8。 */
+  maxPartySize: 8,
+} as const;
+
+/** 出生点阵营（RULES-MODEL §3：`player/enemy/neutral`）。 */
+export type BattleSpawnSide = 'player' | 'enemy' | 'neutral';
+export const BATTLE_SPAWN_SIDES: readonly BattleSpawnSide[] = ['player', 'enemy', 'neutral'];
+
+/** 战棋障碍矩形（RULES-MODEL §3 `obstacles[]`）。 */
+export interface BattleStructureObstacle {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** 覆盖格的地形字符（缺省 = 纯装饰，不改变地形）。 */
+  terrain?: string;
+  /** 掩体 id（对应规则包 `space.covers[].id`）。 */
+  coverId?: string;
+}
+
+/** 战棋出生点（RULES-MODEL §3 `spawns[]`）。 */
+export interface BattleStructureSpawn {
+  x: number;
+  y: number;
+  side: BattleSpawnSide;
+  label?: string;
+  /** 关联怪物 id（敌方出生点可选；客户端/作者按规则包填）。 */
+  monsterId?: string;
+}
+
+/** 战棋地图结构（唯一权威；底图只是皮肤）。 */
+export interface BattleStructure {
+  cols: number;
+  rows: number;
+  /** rows × cols 地形字符矩阵，行优先；每行长度必须 = cols。 */
+  terrain: string[][];
+  obstacles: BattleStructureObstacle[];
+  spawns: BattleStructureSpawn[];
+}
+
+/** 生成的地图底图（已归一化到标准档：战斗图 1024×768 / 世界图 2048×1536）。 */
+export interface GeneratedMapBackground {
+  /** 归一化后 PNG 字节的 base64。 */
+  b64: string;
+  width: number;
+  height: number;
+  /** 归一化后字节的 sha256（内容寻址，与 `pack.assetPut` 同口径）。 */
+  sha256: string;
+  format: 'png';
+}
+
+export interface MapGenerateParams {
+  /** 这一战在哪、谁在场、什么地形（作者自然语言；AI 只做草稿，结构仍需过校验器）。 */
+  prompt: string;
+  style: MapGenerateStyle;
+  /** 列数 4..32；缺省按队伍人数推导。 */
+  cols?: number;
+  /** 行数 4..32；缺省按队伍人数推导。 */
+  rows?: number;
+  /** 玩家人数 1..8（决定玩家出生点数量）。 */
+  partySize?: number;
+  /** 复现种子 0..2^31-1；缺省按 prompt 派生（同 prompt 同结构）。 */
+  seed?: number;
+  /** 是否顺带生成 AI 底图（失败只进 warnings，不阻断结构）。 */
+  withBackground?: boolean;
+}
+
+export interface MapGenerateResult {
+  structure: BattleStructure;
+  warnings: string[];
+  method: MapGenerateMethod;
+  background?: GeneratedMapBackground | null;
+}
+
+/** 世界地图热点（归一化坐标 0..1 的矩形；契约里 zone.hotspot 只存中心点，w/h 用于避让与渲染）。 */
+export interface WorldZoneHotspot {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 区域连线（双向各存一条；`kind` 决定渲染样式：道路实线 / 河流蓝 / 楼梯虚线）。 */
+export interface WorldZoneConnection {
+  to: string;
+  kind?: string;
+}
+
+/** 世界地图区域（`space.zones[]` 的生成结构：热点 + 连线 + 可选描述）。 */
+export interface WorldZoneStructure {
+  /** 区域 id（包内唯一；允许中文，与规则包 zoneId 同规则）。 */
+  zoneId: string;
+  name: string;
+  description?: string;
+  hotspot: WorldZoneHotspot;
+  connections: WorldZoneConnection[];
+}
+
+export interface WorldStructure {
+  zones: WorldZoneStructure[];
+  /** 世界地图底图资产引用占位：结构生成阶段恒为 null，底图由背景生图/`pack.assetPut` 另行落盘。 */
+  background?: null;
+}
+
+export const WORLD_STRUCTURE_LIMITS = {
+  minZones: 3,
+  maxZones: 8,
+  /** 热点宽高合理区间（归一化）。 */
+  minHotspotSize: 0.02,
+  maxHotspotSize: 0.6,
+  /** 世界地图底图目标比例 4:3（2048×1536）。 */
+  backgroundWidth: 2048,
+  backgroundHeight: 1536,
+} as const;
+
+export interface WorldGenerateParams {
+  prompt: string;
+  /** 区域数量 3..8（缺省 5）。 */
+  zoneCount?: number;
+  /** 底图风格（缺省 `2d-illustration`）。 */
+  style?: WorldGenerateStyle;
+  /** 复现种子；缺省按 prompt 派生。 */
+  seed?: number;
+  /** 是否顺带生成 AI 底图（失败只进 warnings）。 */
+  withBackground?: boolean;
+}
+
+export interface WorldGenerateResult {
+  world: WorldStructure;
+  warnings: string[];
+  method: MapGenerateMethod;
+  background?: GeneratedMapBackground | null;
+}
+
+// ---------------------------------------------------------------------------
+// 内容包工坊（写操作只允许 loopback + host token）
+// ---------------------------------------------------------------------------
+
+/** 内容包资产种类（与 `assets/manifest.json` 的 `kind` 白名单一致）。 */
+export const PACK_ASSET_KINDS = [
+  'item',
+  'action',
+  'status',
+  'resource',
+  'attribute',
+  'slot',
+  'avatar',
+  'portrait',
+  'variant',
+  'spritesheet',
+  'npc',
+  'cover',
+] as const;
+export type PackAssetKind = (typeof PACK_ASSET_KINDS)[number];
+
+/** 资产归一化目标档（与 `@dsh-trpg/assets` 的 `NormalizeTargetId` 一致，工坊落盘用）。 */
+export const PACK_ASSET_TARGETS = [
+  'pixel-32',
+  'icon-128',
+  'avatar-256',
+  'portrait',
+  'variant',
+  'spritesheet',
+  'cover',
+  'world-map',
+  'battle-map',
+] as const;
+export type PackAssetTargetId = (typeof PACK_ASSET_TARGETS)[number];
+
+/** 工坊资产落盘的附加元数据（都可选；缺省按 kind 映射目标档）。 */
+export interface PackAssetPutMeta {
+  /** 清单里的 `style` 字段（缺省 `imported`）。 */
+  style?: string;
+  seed?: number;
+  /** AI 生成提示词（写入清单便于复现）。 */
+  prompt?: string;
+  /** 覆盖按 kind 推导的归一化目标档（如地图底图用 battle-map / world-map）。 */
+  target?: PackAssetTargetId;
+  /** 帧表行/列/单格尺寸（target=spritesheet 时用）。 */
+  rows?: number;
+  cols?: number;
+  frameSize?: number;
+}
+
+export interface PackDetailParams {
+  packId: string;
+}
+
+export interface PackDetailResult {
+  /**
+   * 完整内容包（`ContentPack`，含 rules/lorebook/modules/cards）。
+   * 协议包不依赖 `@dsh-trpg/content`，这里按文档形状给出；客户端按 ContentPack 断言即可。
+   */
+  pack: unknown;
+}
+
+export interface PackUpdateParams {
+  /** 目标包 id（= `pack.packId`；内置包不可改）。 */
+  packId: string;
+  /** 完整 `ContentPack`（host 侧 `validatePack()` 全量校验后再落盘）。 */
+  pack: unknown;
+}
+
+export interface PackUpdateResult {
+  packId: string;
+  version: string;
+  /** sha256(zip 字节)。 */
+  packHash: string;
+  warnings: string[];
+}
+
+export interface PackExportParams {
+  packId: string;
+}
+
+export interface PackExportResult {
+  /** `<packId>-<version>.trpgpack`。 */
+  fileName: string;
+  b64: string;
+  bytes: number;
+  packHash: string;
+}
+
+/** 同 id 冲突策略：拒绝 / 覆盖（仅数据目录包）/ 另存副本（新 packId 后缀 `-copy-N`）。 */
+export type PackImportStrategy = 'reject' | 'overwrite' | 'rename';
+export const PACK_IMPORT_STRATEGIES: readonly PackImportStrategy[] = ['reject', 'overwrite', 'rename'];
+
+/** 导入动作：新建 / 覆盖已有数据包 / 因冲突另存为新 id。 */
+export type PackImportAction = 'created' | 'overwritten' | 'renamed';
+
+export interface PackImportParams {
+  /** `.trpgpack` 文件字节的 base64。 */
+  b64: string;
+  /** 原始文件名（仅提示用；落盘名始终 `<packId>-<version>.trpgpack`）。 */
+  fileName?: string;
+  strategy: PackImportStrategy;
+}
+
+export interface PackImportResult {
+  packId: string;
+  version: string;
+  action: PackImportAction;
+  warnings: string[];
+}
+
+export interface PackAssetPutParams {
+  packId: string;
+  /** `<kind>.<scope>.<slug>`，包内唯一（同 id = 替换）。 */
+  assetId: string;
+  kind: PackAssetKind;
+  /** 图片字节（PNG/SVG）的 base64；host 会按 kind 归一化后再落盘。 */
+  b64: string;
+  meta?: PackAssetPutMeta;
+}
+
+export interface PackAssetPutResult {
+  assetId: string;
+  /** 归一化后字节的 sha256。 */
+  sha256: string;
+  /** 归一化后字节数。 */
+  bytes: number;
+  manifestUpdated: true;
+}
+
+export interface PackAssetDeleteParams {
+  packId: string;
+  assetId: string;
+}
+
+export interface PackAssetDeleteResult {
+  /** 是否真的删掉了一条资产（不存在时 false，幂等）。 */
+  removed: boolean;
+}
+
+/** 工坊 RPC 的资源上限（RPC 请求体 12 MiB 的既有约束内的可用余量）。 */
+export const PACK_WORKSHOP_LIMITS = {
+  /** `pack.assetPut` / `pack.import` 的 base64 近似字节上限（7.5 MiB）。 */
+  maxBase64Bytes: 7.5 * 1024 * 1024,
+  /** `pack.update` 的 pack JSON 序列化上限（4 MiB，与 zip 内 pack.json 上限一致）。 */
+  maxPackJsonBytes: 4 * 1024 * 1024,
+  maxPromptLength: 2000,
+  maxAssetIdLength: 128,
+} as const;
+
+const PACK_ID_RPC_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const ASSET_ID_RPC_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+const WORLD_ZONE_ID_PATTERN = /^[A-Za-z0-9_\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5.-]{0,63}$/;
+
+function isPackId(value: unknown): value is string {
+  return typeof value === 'string' && PACK_ID_RPC_PATTERN.test(value);
+}
+
+/** `assetId` 与资产清单同口径：`<kind>.<scope>.<slug>`，禁止路径字符。 */
+function isPackAssetId(value: unknown): value is string {
+  if (typeof value !== 'string' || !ASSET_ID_RPC_PATTERN.test(value)) return false;
+  if (value.length > PACK_WORKSHOP_LIMITS.maxAssetIdLength) return false;
+  if (value.includes('..') || value.includes('/') || value.includes('\\')) return false;
+  return value.split('.').length >= 2;
+}
+
+function isPackAssetKindValue(value: unknown): value is PackAssetKind {
+  return typeof value === 'string' && (PACK_ASSET_KINDS as readonly string[]).includes(value);
+}
+
+function isPackAssetTarget(value: unknown): value is PackAssetTargetId {
+  return typeof value === 'string' && (PACK_ASSET_TARGETS as readonly string[]).includes(value);
+}
+
+function isMapGenerateStyle(value: unknown): value is MapGenerateStyle {
+  return typeof value === 'string' && (MAP_GENERATE_STYLES as readonly string[]).includes(value);
+}
+
+function isWorldGenerateStyle(value: unknown): value is WorldGenerateStyle {
+  return typeof value === 'string' && (WORLD_GENERATE_STYLES as readonly string[]).includes(value);
+}
+
+function isImportStrategy(value: unknown): value is PackImportStrategy {
+  return typeof value === 'string' && (PACK_IMPORT_STRATEGIES as readonly string[]).includes(value);
+}
+
+/** `map.generate` 参数校验（生成档：cols/rows 4..32、partySize 1..8、seed 0..2^31-1）。 */
+export function validateMapGenerate(params: unknown): ValidationResult<MapGenerateParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.prompt)) return fail('prompt 不能为空（写清「这一战在哪、谁在场、什么地形」）');
+  if (params.prompt.length > PACK_WORKSHOP_LIMITS.maxPromptLength) {
+    return fail(`prompt 过长（最多 ${PACK_WORKSHOP_LIMITS.maxPromptLength} 字）`);
+  }
+  if (!isMapGenerateStyle(params.style)) {
+    return fail(`style 必须是 ${MAP_GENERATE_STYLES.join(' / ')}，收到 ${JSON.stringify(params.style)}`);
+  }
+  if (params.cols !== undefined && !isBoundedInteger(params.cols, 4, BATTLE_STRUCTURE_LIMITS.maxCols)) {
+    return fail(`cols 必须是 4–${BATTLE_STRUCTURE_LIMITS.maxCols} 的整数`);
+  }
+  if (params.rows !== undefined && !isBoundedInteger(params.rows, 4, BATTLE_STRUCTURE_LIMITS.maxRows)) {
+    return fail(`rows 必须是 4–${BATTLE_STRUCTURE_LIMITS.maxRows} 的整数`);
+  }
+  if (params.partySize !== undefined && !isBoundedInteger(params.partySize, 1, BATTLE_STRUCTURE_LIMITS.maxPartySize)) {
+    return fail(`partySize 必须是 1–${BATTLE_STRUCTURE_LIMITS.maxPartySize} 的整数`);
+  }
+  if (params.seed !== undefined && !isBoundedInteger(params.seed, 0, 2 ** 31 - 1)) {
+    return fail('seed 必须是 0–2147483647 的整数');
+  }
+  if (params.withBackground !== undefined && typeof params.withBackground !== 'boolean') {
+    return fail('withBackground 必须是布尔值');
+  }
+  return { ok: true, value: params as unknown as MapGenerateParams };
+}
+
+/** `world.generate` 参数校验（zoneCount 3..8）。 */
+export function validateWorldGenerate(params: unknown): ValidationResult<WorldGenerateParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.prompt)) return fail('prompt 不能为空（写清世界/区域的风格与氛围）');
+  if (params.prompt.length > PACK_WORKSHOP_LIMITS.maxPromptLength) {
+    return fail(`prompt 过长（最多 ${PACK_WORKSHOP_LIMITS.maxPromptLength} 字）`);
+  }
+  if (
+    params.zoneCount !== undefined &&
+    !isBoundedInteger(params.zoneCount, WORLD_STRUCTURE_LIMITS.minZones, WORLD_STRUCTURE_LIMITS.maxZones)
+  ) {
+    return fail(`zoneCount 必须是 ${WORLD_STRUCTURE_LIMITS.minZones}–${WORLD_STRUCTURE_LIMITS.maxZones} 的整数`);
+  }
+  if (params.style !== undefined && !isWorldGenerateStyle(params.style)) {
+    return fail(`style 必须是 ${WORLD_GENERATE_STYLES.join(' / ')}，收到 ${JSON.stringify(params.style)}`);
+  }
+  if (params.seed !== undefined && !isBoundedInteger(params.seed, 0, 2 ** 31 - 1)) {
+    return fail('seed 必须是 0–2147483647 的整数');
+  }
+  if (params.withBackground !== undefined && typeof params.withBackground !== 'boolean') {
+    return fail('withBackground 必须是布尔值');
+  }
+  return { ok: true, value: params as unknown as WorldGenerateParams };
+}
+
+export function validatePackDetail(params: unknown): ValidationResult<PackDetailParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isPackId(params.packId)) return fail('packId 必须是小写 slug（字母/数字/_/-，最多 64 字符）');
+  return { ok: true, value: { packId: params.packId } };
+}
+
+export function validatePackUpdate(params: unknown): ValidationResult<PackUpdateParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isPackId(params.packId)) return fail('packId 必须是小写 slug（字母/数字/_/-，最多 64 字符）');
+  if (!isRecord(params.pack)) return fail('pack 必须是对象（完整 pack.json）');
+  if (params.pack.packId !== params.packId) {
+    return fail(`pack.packId 必须与参数 packId 一致（参数 ${JSON.stringify(params.packId)}，pack ${JSON.stringify(params.pack.packId)}）`);
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(params.pack);
+  } catch {
+    return fail('pack 不是可序列化的 JSON 对象');
+  }
+  if (serialized.length > PACK_WORKSHOP_LIMITS.maxPackJsonBytes) {
+    return fail(`pack 过大（序列化后 ${serialized.length} 字节，上限 ${PACK_WORKSHOP_LIMITS.maxPackJsonBytes}）`);
+  }
+  return { ok: true, value: { packId: params.packId, pack: params.pack } };
+}
+
+export function validatePackExport(params: unknown): ValidationResult<PackExportParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isPackId(params.packId)) return fail('packId 必须是小写 slug（字母/数字/_/-，最多 64 字符）');
+  return { ok: true, value: { packId: params.packId } };
+}
+
+/** `pack.import` 参数校验：base64 + 冲突策略（近似字节上限见 `PACK_WORKSHOP_LIMITS`）。 */
+export function validatePackImport(params: unknown): ValidationResult<PackImportParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isNonEmptyString(params.b64)) return fail('b64 不能为空（应为 .trpgpack 文件字节的 base64）');
+  const approximate = approximateBase64Bytes(params.b64);
+  if (approximate > PACK_WORKSHOP_LIMITS.maxBase64Bytes) {
+    return fail(
+      `导入包过大：约 ${(approximate / (1024 * 1024)).toFixed(2)} MB / 上限 ${(
+        PACK_WORKSHOP_LIMITS.maxBase64Bytes / (1024 * 1024)
+      ).toFixed(1)} MB（RPC 请求体 12 MiB 的限制）`,
+    );
+  }
+  if (params.fileName !== undefined) {
+    if (typeof params.fileName !== 'string' || params.fileName.length > 255) {
+      return fail('fileName 必须是字符串（最多 255 字符）');
+    }
+  }
+  if (!isImportStrategy(params.strategy)) {
+    return fail(`strategy 必须是 ${PACK_IMPORT_STRATEGIES.join(' / ')}，收到 ${JSON.stringify(params.strategy)}`);
+  }
+  return {
+    ok: true,
+    value: {
+      b64: params.b64,
+      strategy: params.strategy,
+      ...(typeof params.fileName === 'string' ? { fileName: params.fileName } : {}),
+    },
+  };
+}
+
+/** `pack.assetPut` 参数校验：assetId/kind/base64/meta。 */
+export function validatePackAssetPut(params: unknown): ValidationResult<PackAssetPutParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isPackId(params.packId)) return fail('packId 必须是小写 slug（字母/数字/_/-，最多 64 字符）');
+  if (!isPackAssetId(params.assetId)) {
+    return fail('assetId 必须是 `<kind>.<scope>.<slug>`（只含字母/数字/_/./-，至少两段）');
+  }
+  if (!isPackAssetKindValue(params.kind)) {
+    return fail(`kind 必须是 ${PACK_ASSET_KINDS.join(' / ')} 之一`);
+  }
+  if (!isNonEmptyString(params.b64)) return fail('b64 不能为空（应为图片字节的 base64）');
+  const approximate = approximateBase64Bytes(params.b64);
+  if (approximate > PACK_WORKSHOP_LIMITS.maxBase64Bytes) {
+    return fail(
+      `图片过大：约 ${(approximate / (1024 * 1024)).toFixed(2)} MB / 上限 ${(
+        PACK_WORKSHOP_LIMITS.maxBase64Bytes / (1024 * 1024)
+      ).toFixed(1)} MB`,
+    );
+  }
+  let meta: PackAssetPutMeta | undefined;
+  if (params.meta !== undefined) {
+    if (!isRecord(params.meta)) return fail('meta 必须是对象');
+    if (params.meta.target !== undefined && !isPackAssetTarget(params.meta.target)) {
+      return fail(`meta.target 必须是 ${PACK_ASSET_TARGETS.join(' / ')} 之一`);
+    }
+    if (params.meta.style !== undefined) {
+      if (typeof params.meta.style !== 'string' || params.meta.style.length > 48) {
+        return fail('meta.style 必须是字符串（最多 48 字符）');
+      }
+    }
+    if (params.meta.seed !== undefined && !isBoundedInteger(params.meta.seed, 0, 2 ** 31 - 1)) {
+      return fail('meta.seed 必须是 0–2147483647 的整数');
+    }
+    if (params.meta.prompt !== undefined) {
+      if (typeof params.meta.prompt !== 'string' || params.meta.prompt.length > 8000) {
+        return fail('meta.prompt 必须是字符串（最多 8000 字符）');
+      }
+    }
+    if (params.meta.rows !== undefined && !isBoundedInteger(params.meta.rows, 1, 8)) {
+      return fail('meta.rows 必须是 1–8 的整数');
+    }
+    if (params.meta.cols !== undefined && !isBoundedInteger(params.meta.cols, 1, 8)) {
+      return fail('meta.cols 必须是 1–8 的整数');
+    }
+    if (params.meta.frameSize !== undefined && !isBoundedInteger(params.meta.frameSize, 16, 256)) {
+      return fail('meta.frameSize 必须是 16–256 的整数');
+    }
+    meta = params.meta as PackAssetPutMeta;
+  }
+  return {
+    ok: true,
+    value: {
+      packId: params.packId,
+      assetId: params.assetId,
+      kind: params.kind,
+      b64: params.b64,
+      ...(meta !== undefined ? { meta } : {}),
+    },
+  };
+}
+
+export function validatePackAssetDelete(params: unknown): ValidationResult<PackAssetDeleteParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isPackId(params.packId)) return fail('packId 必须是小写 slug（字母/数字/_/-，最多 64 字符）');
+  if (!isPackAssetId(params.assetId)) return fail('assetId 必须是 `<kind>.<scope>.<slug>`');
+  return { ok: true, value: { packId: params.packId, assetId: params.assetId } };
+}
+
+/** 世界地图区域 id 是否合法（与规则包 `space.zones[].zoneId` 同规则）。 */
+export function isWorldZoneId(value: unknown): value is string {
+  return typeof value === 'string' && WORLD_ZONE_ID_PATTERN.test(value);
 }

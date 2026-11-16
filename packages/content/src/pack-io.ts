@@ -224,8 +224,39 @@ export async function writePackFile(
   };
 }
 
-/** 把 pack 写成源码目录形状：`<dir>/pack.json` + `<dir>/assets/**` + `<dir>/rules/scripts/**`（便于 diff/评审）。 */
-export async function writePackJsonFile(
+export interface PackBytesWriteResult {
+  filePath: string;
+  bytes: number;
+  /** sha256(zip 字节)。 */
+  packHash: string;
+}
+
+/**
+ * 原子写入**已校验过的** `.trpgpack` 字节（临时文件 + rename）：工坊「导入他人包」直接用
+ * 原始字节落盘，保证导出的 `packHash` 与来源一致（重新编码会改变 zip 元数据/条目顺序）。
+ * 调用方负责先跑 `trpgpackToPack()` 校验；本函数只搬字节。
+ */
+export async function writePackBytesFile(
+  filePath: string,
+  bytes: Uint8Array,
+): Promise<PackBytesWriteResult> {
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
+    throw new Error('写入 .trpgpack 失败：字节为空');
+  }
+  const targetDir = dirname(filePath);
+  await mkdir(targetDir, { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile(temporaryPath, bytes);
+    await rename(temporaryPath, filePath);
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+  return { filePath, bytes: bytes.length, packHash: packHashOfBytes(bytes) };
+}
+
+/** 把 pack 写成源码目录形状：`<dir>/pack.json` + `<dir>/assets/**` + `<dir>/rules/scripts/**`（便于 diff/评审）。 */export async function writePackJsonFile(
   dirPath: string,
   pack: ContentPack,
   options: { assets?: AssetsInput; scripts?: PackScriptsInput } = {},

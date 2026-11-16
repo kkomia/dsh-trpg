@@ -9,6 +9,10 @@
  * - GET  /trpg/assets/<packId>/<assetPath>  host 只读资产（**无 token**，png/svg + ETag + immutable）
  * - GET  /trpg/room-assets/<roomId>/<sha256>.<ext>  房间资产（**无 token**，落座上传的展示图）
  *
+ * RPC 分三类鉴权：
+ * - 无 token（`content.list` / `room.join` / `room.list` / `host.session` 等）或 token → 房间身份；
+ * - **loopback + host token**（`content.reload`、M9.5e 工坊 8 个方法、`room.create` 等房主操作）。
+ *
  * 安全：room.create / host.session 只接受 loopback 请求（房主就坐在本机）；
  * 其余操作靠 token → principal 解析，客户端不能自称身份。
  * 资产端点是无鉴权只读：路径必须严格受限（无 `..` / 绝对路径 / 控制字符），只提供 png/svg，
@@ -28,7 +32,15 @@ import {
   validateGmNarrate,
   validateGmScene,
   validateGmSecret,
+  validateMapGenerate,
+  validatePackAssetDelete,
+  validatePackAssetPut,
+  validatePackDetail,
+  validatePackExport,
+  validatePackImport,
+  validatePackUpdate,
   validateRpcRequest,
+  validateWorldGenerate,
   type AssetsGenerateResult,
   type AssetsUploadResult,
   type CatalogPack,
@@ -37,6 +49,7 @@ import {
   type RpcRequest,
 } from '@dsh-trpg/protocol';
 import type { MediaAssetsService, RoomAssetsStore } from './media/index.ts';
+import type { StudioApi } from './studio/index.ts';
 
 /** 只读资产的解析结果（host 注入，一般来自 `PackRegistry.assetOf`）。 */
 export interface RoomAsset {
@@ -71,6 +84,18 @@ export interface RoomHttpOptions {
    * 未注入时上传返回可读中文错误，资产端点一律 404。
    */
   roomAssets?: RoomAssetsStore;
+  /**
+   * 内容包工坊 + 地图/世界生成（M9.5e）：`map.generate` / `world.generate` /
+   * `pack.detail` / `pack.update` / `pack.export` / `pack.import` / `pack.assetPut` /
+   * `pack.assetDelete`。这 8 个方法**只允许 loopback + host token**（作者操作）。
+   * 未注入时调用返回可读中文错误（`conflict`）。
+   */
+  studio?: StudioApi;
+  /**
+   * loopback 判定注入点（单测模拟"非本机请求"用；缺省按 socket.remoteAddress 判定）。
+   * 生产不要覆盖。
+   */
+  isLoopbackRequest?: (request: IncomingMessage) => boolean;
 }
 
 export interface RoomHttpServer {
@@ -115,7 +140,7 @@ async function readJsonBody(request: IncomingMessage, limitBytes = 256 * 1024): 
  */
 const RPC_MAX_BODY_BYTES = 12 * 1024 * 1024;
 
-function isLoopback(request: IncomingMessage): boolean {
+function isLoopbackAddress(request: IncomingMessage): boolean {
   const address = request.socket.remoteAddress ?? '';
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
@@ -254,6 +279,7 @@ function canonicalSeatParams(
 export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
   const log = options.log ?? (() => {});
   const service = options.service ?? new RoomService();
+  const isLoopback = options.isLoopbackRequest ?? isLoopbackAddress;
   const startedAt = Date.now();
 
   const dispatch = async (request: IncomingMessage, rpc: RpcRequest): Promise<unknown> => {
@@ -299,6 +325,17 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
     };
     const requireHost = (): void => {
       if (principal.kind !== 'host') throw new RoomError('forbidden', '只有房主能执行该操作');
+    };
+    /**
+     * 工坊方法（M9.5e）：写内容包/生成地图会影响 host 内容与 AI 配额，只允许**房主本机**调用
+     * （loopback + host token 双重校验，与 `content.reload` 同口径）。
+     */
+    const requireStudio = (): StudioApi => {
+      if (!isLoopback(request)) throw new RoomError('forbidden', '只有房主本机可以调用工坊操作（需要 loopback 请求）');      requireHost();
+      if (options.studio === undefined) {
+        throw new RoomError('conflict', '工坊服务未启用（host 未接入内容包注册表）');
+      }
+      return options.studio;
     };
     switch (rpc.method) {
       case 'room.state':
@@ -404,6 +441,47 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
         const ownerId = principal.kind === 'player' ? principal.playerId : 'host';
         const result: AssetsUploadResult = options.roomAssets.store(principal.roomId, ownerId, params.assets);
         return result;
+      }
+      // ---- M9.5e 地图/世界生成 + 内容包工坊（loopback + host token；作者操作，不广播 SSE） ----
+      case 'map.generate': {
+        const studio = requireStudio();
+        const params = take(validateMapGenerate(rpc.params));
+        return await studio.generateMap(params);
+      }
+      case 'world.generate': {
+        const studio = requireStudio();
+        const params = take(validateWorldGenerate(rpc.params));
+        return await studio.generateWorld(params);
+      }
+      case 'pack.detail': {
+        const studio = requireStudio();
+        const params = take(validatePackDetail(rpc.params));
+        return studio.packDetail(params);
+      }
+      case 'pack.update': {
+        const studio = requireStudio();
+        const params = take(validatePackUpdate(rpc.params));
+        return await studio.packUpdate(params);
+      }
+      case 'pack.export': {
+        const studio = requireStudio();
+        const params = take(validatePackExport(rpc.params));
+        return studio.packExport(params);
+      }
+      case 'pack.import': {
+        const studio = requireStudio();
+        const params = take(validatePackImport(rpc.params));
+        return await studio.packImport(params);
+      }
+      case 'pack.assetPut': {
+        const studio = requireStudio();
+        const params = take(validatePackAssetPut(rpc.params));
+        return await studio.packAssetPut(params);
+      }
+      case 'pack.assetDelete': {
+        const studio = requireStudio();
+        const params = take(validatePackAssetDelete(rpc.params));
+        return await studio.packAssetDelete(params);
       }
       default:
         throw new RoomError('bad-request', `未知方法：${rpc.method}`);
