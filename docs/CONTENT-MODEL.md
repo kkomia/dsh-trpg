@@ -1,6 +1,6 @@
 # 内容模型 v1：内容包（Content Pack）统一模组/世界书/角色卡
 
-> 状态：**已定稿（2026-11-16）**；**M8.1 已实现（2026-11-16，单测 114）**｜决策来源：[DECISIONS.md](./DECISIONS.md) 第七轮 #25｜关联：[DESIGN.md](./DESIGN.md) §6 内容格式、[ROADMAP.md](./ROADMAP.md) M8。
+> 状态：**已定稿（2026-11-16）**；**M8.1 已实现（2026-11-16，单测 114）/ M8.2 已实现（2026-11-16，单测 134）**｜决策来源：[DECISIONS.md](./DECISIONS.md) 第七轮 #25｜关联：[DESIGN.md](./DESIGN.md) §6 内容格式、[ROADMAP.md](./ROADMAP.md) M8。
 > 本文是 M8 内容工坊的实现依据。D1–D12 由 lead 拍定，§8 的 4 个 Open Questions 已于 2026-11-16 由用户拍板；其中 **Q2 把分发形态定为 ZIP 容器 `.trpgpack`**，§2、§6、§9 已按 zip 重写。实现中若发现结论冲突，回 DECISIONS.md 改，不在这里漂移。
 
 ## 0. 决策摘要
@@ -8,7 +8,7 @@
 **一个内容包（Content Pack）统管三件东西**：模组、世界书、角色卡以同一个容器制作、校验、导入导出与分享；房间只引用包，不再硬编码任何「鬼木崖」。
 
 - 唯一可制作/分发单元 = `.trpgpack`（ZIP 容器：`pack.json` + 可选 `assets/`）（D1）；单一 schema 家族 + 显式版本 `trpg.pack/1`（D2）；包内对象有稳定 id 与引用存在性校验（D3）。
-- 房间只存引用 + 派生场景快照（D4）；内容权威在 host：内置包零配置可用，数据目录包可加载、可重扫（D5）。
+- 房间只存引用 + 场景公开摘要（D4），包缺失/漂移时降级续团并回退内置包；内容权威在 host：内置包零配置可用，数据目录包可加载、可重扫（D5）。
 - zip 容器自带实现约定（§2.2）：零外部依赖（`node:zlib`）、读支持 stored/deflate、导入校验结构/大小/路径/CRC、导出时间戳固定保证可复现；编解码与校验已在 M8.1 完成（2026-11-16）。
 - 角色卡双轨（Q3，贯穿 §4/§6）：pack 内置卡库随包分发；玩家私卡存本地（`localStorage` 或 profile-data），落座上传后由 host 校验；玩家不能改 host pack。
 
@@ -16,9 +16,9 @@
 
 ### 1.1 三个现状痛点
 
-| 痛点 | 现状证据 | 后果 |
+| 痛点（M8 前） | 当时的证据 | 后果 |
 |---|---|---|
-| 硬编码单模组 | host/client 直接 `import { GUIMUYA_MODULE }`（`host/index.ts:10,145,425,445`、`client/index.ts:16,450` 场景下拉框写死 `GUIMUYA_MODULE.scenes`），建房不能选模组 | 第二个模组 = 改源码重新打包；玩家无法选择/预览 |
+| 硬编码单模组（**M8.2 已解决**：`room.create` 可选 `packId/moduleId`，host 按房间引用解析内容） | 当时 host/client 直接 `import { GUIMUYA_MODULE }`（`host/index.ts:10,145,425,445`、`client/index.ts:16,450` 场景下拉框写死 `GUIMUYA_MODULE.scenes`），建房无法选择内容包/模组 | 第二个模组 = 改源码重新打包；玩家无法选择/预览 |
 | 两套 id 与引用 | 角色卡 `id`、世界书/模组各自 `schemaVersion: 1`；模组 `scene.lore: ["qingshi", …]` 与世界书条目 `entry_qingshi` 对不上，且 `validateModule()` 不检查引用存在性 | 内容作者手改 JSON 不报错，运行时静默失效（场景关联 lore 目前根本没被消费） |
 | 制作无入口 | 改内容只能编辑 `packages/content/{cards,modules,lorebooks}/*.json` 再重编译；角色卡只有「导入/复制预制卡」，没有新建/编辑表单与只读卡面 | 门槛 = 会改源码；玩家卡不可视、不可改 |
 
@@ -149,32 +149,43 @@
 | 场景内联 encounters / checks / rewards | 模组级 `encounters[]` + 场景 `encounterIds`；checks/rewards 补 id | 遭遇值（`enc_guihuo` 等）不变；checks/rewards 原本无 id → 一次性手写补 `checkId/rewardId` |
 | `scene.lore: ["qingshi", …]` | `scene.loreIds: ["entry_qingshi", …]` | **现有值缺 `entry_` 前缀，全部对不上**；M8.1 已由 `migratePack()` 自动补齐并纳入 `validatePack()` 挡回归 |
 | `CONTENT_VERSION` / `RULE_ID` / `RULE_VERSION` / 模组 `ruleId` | `pack.version` / `ruleSystem.id`（+ 规则名 `ruleSystem.name`） | `CONTENT_VERSION` → `pack.version`；`RULE_ID` → `ruleSystem.id`；规则名（`RULE_SYSTEM_NAME`）→ `ruleSystem.name`；**v1 不单独记录规则版本**：`RULE_VERSION` 与模组 `ruleId` 不再进入 pack（随插件/pack 版本；兼容导出时由 `ruleSystem.id` 回填模组 `ruleId`）；`GUIMUYA_*` 旧导出保持不变（D12） |
-| 文件位置 `packages/content/{cards,modules,lorebooks}/*.json` | `packages/content/src/packs/core-guimuya.ts`（组装 `CORE_GUIMUYA_PACK`） | 旧源码 JSON 仍在仓库内（便于 diff），由 TS 模块经 `migratePack()` 组装；导出产物 `core-guimuya-<version>.trpgpack` 才是分发/导入形态（host 接 pack registry 见 M8.2） |
+| 文件位置 `packages/content/{cards,modules,lorebooks}/*.json` | `packages/content/src/packs/core-guimuya.ts`（组装 `CORE_GUIMUYA_PACK`） | 旧源码 JSON 仍在仓库内（便于 diff），由 TS 模块经 `migratePack()` 组装；导出产物 `core-guimuya-<version>.trpgpack` 才是分发/导入形态（host 已接 pack registry：M8.2） |
 | 玩家本地卡 `dsh-trpg:cards:v1`；DiceFrame `schema_version: 2` | pack card | 旧卡启动时一次性迁移（`id` → `cardId`，值不变），落座前转 `CharacterCard`（engine 校验不变）；DiceFrame 后置 M8.5 适配器，属性/技能/装备映射，`source.ruleId = "diceframe:freeform_wuxia"` 标注来源 |
 
-### 2.6 房间只引用不复制（D4）
+### 2.6 房间只引用不复制（D4，M8.2 已实现）
 
-`room.create` 增加 `{ packId, moduleId }`（都缺省 = 内置包 `core-guimuya` + 其默认模组）。房间视图与存档记录：
+`room.create` 增加可选 `{ packId, moduleId }`：
 
-- 引用：`content: { packId, packVersion, moduleId, contentHash }`（`RoomView` 新增字段）；兜底：`derived: { sceneId, title, entry, checks, encounters }` 派生场景快照。
+- 显式指定的包/模组必须已安装，否则中文报错（「内容包 X 不存在」/「内容包 X 里没有模组 Y」）；
+- 都缺省 = host 内容包 registry 的缺省包（内置 `core-guimuya`）+ 其 `defaultModuleId`；
+- 缺省包本身不可用（内置包加载失败）时不卡建房，按降级内容开局。
 
-快照不放整包，避免存档膨胀与版本漂移；旧快照无 `content` 字段时视为「内置包默认模组」（向后兼容）；缺包/版本变更用派生快照降级续团并提示（§9），不静默失败。
+房间记录（存档）与房间视图（`RoomView`）分开：
+
+- **存档引用**：`content: { packId, packVersion, moduleId, contentHash, packName?, moduleTitle?, scenes: [{sceneId, title}] }`。房间不复制整包，也不落完整派生场景（`entry/checks/encounters` 不进房间），只留**场景公开摘要**供视图与 GM 控制台使用；内容始终由 host 的 pack registry 按引用解析。
+- **视图投影**：`RoomView.content: { packId, packVersion, moduleId, packName?, moduleTitle?, degraded? }` + `RoomView.scenes: [{sceneId, title}]`；`contentHash` 只留在 host、不下发玩家。
+- **向后兼容**：旧快照无 `content` 字段时按「缺省包 + 默认模组」补齐。
+- **降级续团**：包/模组在本机缺失，或 `packVersion`/`contentHash` 与快照不一致 → 房间照常恢复，`content.degraded = true` 并广播 warning，GM 提示与工具回退内置包（不静默失败、不锁死房间）；导入对应 `.trpgpack` 后重扫（`content.reload` 或重启 DSH）可恢复原引用、清除降级（§9）。
 
 ### 2.7 内容来源与权威（D5）
 
-- **内置包**：`packages/content/src/packs/core-guimuya.ts` 由现有源码 JSON 经 `migratePack()` 组装出 `CORE_GUIMUYA_PACK`（注册在 `CORE_PACKS`；1.0.0 = 1 模组 / 10 条世界书 / 4 卡），随 `@dsh-trpg/content` 零配置可用、不往磁盘写临时文件；需要分发/归档时用 `packToTrpgpack()`（CLI `export`）产出 `.trpgpack`。host 接 pack registry 见 M8.2。
-- **数据目录包**：`<DSH_HOME>/profile-data/<profile>/dsh-trpg-table/content/packs/*.trpgpack`（一个包 = 一个文件）。host 启动扫描并解码校验，坏包不加载、保留上一份可用清单；「重扫」入口在 M8.2。该目录功能 M8.2 才落地，此前无存量需要迁移，因此**只支持 `.trpgpack`**，不保留目录式安装。
+- **内置包**：`packages/content/src/packs/core-guimuya.ts` 由现有源码 JSON 经 `migratePack()` 组装出 `CORE_GUIMUYA_PACK`（注册在 `CORE_PACKS`；1.0.0 = 1 模组 / 10 条世界书 / 4 卡），随 `@dsh-trpg/content` 零配置可用、不往磁盘写临时文件；需要分发/归档时用 `packToTrpgpack()`（CLI `export`）产出 `.trpgpack`。host 已接 pack registry（M8.2，`host/pack-registry.ts`），内置包永远优先、零配置可用。
+- **数据目录包**：`<DSH_HOME>/profile-data/<profile>/dsh-trpg-table/content/packs/*.trpgpack`（一个包 = 一个文件，与房间存档同一父目录）。host 启动扫描并解码校验（`trpgpackToPack()` → `migratePack()` → `validatePack()`）：坏包跳过并记 warning，重复 `packId` 内置包优先、其余按文件名先加载者优先；目录整体读取失败时保留上一份数据包清单。重扫入口 = RPC `content.reload`（仅 loopback + host token，重扫后让降级房间恢复）；客户端「导入包 / 重扫」按钮在 M8.3 工坊。**只支持 `.trpgpack`**，不保留目录式安装（此前无存量需要迁移）。
 - **统一解析路径**：内置包与数据目录包都走 `decodePackZip()` → `migratePack()` → `validatePack()`，不允许任何一条旁路直接 `import pack.json` 绕过校验。
-- **权威与只读拉取**：host 是内容权威，玩家不能改 host 包；玩家通过 `GET /trpg/content/packs`（列表摘要：`packId/name/version/module 概要/封面`）、`GET /trpg/content/packs/:packId`（返回解析后的 `pack.json`，供选模组/预览卡库）、`GET /trpg/content/packs/:packId/assets/*`（只读素材）拉取，与 `/trpg/*` 同一 token 体系。玩家私卡仍在本地，落座时上传、host 校验后入房。
+- **权威与只读拉取**：host 是内容权威，玩家不能改 host 包。选包/展示走同一条 `/trpg/rpc` 通道的 RPC（不是独立的 HTTP GET）：
+
+  - `content.list`：**无需 token**、玩家可读，返回**脱敏目录** `CatalogPack[]`——`packId/name/version/description?/author?/ruleSystem{id,name}/defaultModuleId/modules[]{moduleId,title,level,playerCount,sceneCount}/cardCount/loreCount/source('builtin'|'data')`；**不含** `gmNotes`/`secrets`/`encounters`/`checks`/`rewards`/世界书正文/场景开场（M8.2 单测断言不泄漏）。
+  - `content.reload`：**仅 loopback + host token**（重扫会影响所有房间）；返回 `{packs, warnings, recoveredRooms?}`（重扫后的包数与警告、从降级恢复的房间数）。
+  - M8.2 **不提供**整包 `pack.json` 与素材的只读下载接口：玩家端选包只需脱敏目录，GM 内容留在 host（M8.3 工坊/预览与 M8.5 分享再定接口）。玩家私卡仍在本地，落座时上传、host 校验后入房。
 
 ## 3. 三块内容的能力矩阵（D6/D9）
 
 | 内容块 | 制作 | 编辑 | 预览 | 导入/导出 | 分享 | 权限 |
 |---|---|---|---|---|---|---|
-| 内容包 | 源码 JSON + CLI 导出（M8.1 ✅）/ 工坊（M8.3） | 三个编辑器 tab（M8.3） | 校验结果 + 包概要 | `.trpgpack`（M8.1 库/CLI，M8.3 UI） | 单文件即一包 | host 安装/启用/重扫；玩家只读拉取 |
+| 内容包 | 源码 JSON + CLI 导出（M8.1 ✅）/ 工坊（M8.3） | 三个编辑器 tab（M8.3） | 校验结果 + 包概要 | `.trpgpack`（M8.1 库/CLI，M8.3 UI） | 单文件即一包 | host 安装/启用/重扫（M8.2 ✅ 内置 registry + 数据目录 + `content.reload`）；玩家只读脱敏目录（`content.list`） |
 | 角色卡 | 新建空白/预制模板（M8.3） | 字段表单（M8.3） | 只读卡面（M8.3，战斗可见 HP/AC/法术位） | 单卡 JSON（M8.1 库 + M8.3 UI）；pack 内卡随 `.trpgpack` | 本地卡可给朋友；pack 卡随包（M8.5） | 玩家本地真源；pack 卡只读、可复制成本地卡 |
 | 世界书 | 手写 JSON（M8.1）；表单（M8.3） | 条目表单 + 关键词/可见性（M8.3） | 检索试算（M8.4） | 随 `.trpgpack`（M8.1/M8.3） | 随包（M8.5） | host 包只读；`gm` 条目仅 GM |
-| 模组 | 手写 JSON（M8.1）；表单（M8.3） | 场景/遭遇/判定/奖励编辑（M8.3） | 场景大纲与开场预览（M8.3） | 随 `.trpgpack`；选包建房（M8.2） | 随包（M8.5） | host 安装/启用 |
+| 模组 | 手写 JSON（M8.1）；表单（M8.3） | 场景/遭遇/判定/奖励编辑（M8.3） | 场景大纲与开场预览（M8.3） | 随 `.trpgpack`；选包/选模组建房（M8.2 ✅） | 随包（M8.5） | host 安装/启用 |
 
 ## 4. 作者 UI：内容工坊（D6）与角色卡能力（D9）
 
@@ -254,15 +265,17 @@ node scripts/content-pack.mjs inspect dist/core-guimuya-1.0.0.trpgpack    # 打�
 | 阶段 | 目标 | 交付/验收 | 依赖 |
 |---|---|---|---|
 | M8.1 ✅ 完成 2026-11-16 | **地基**：统一 schema + 内置包迁移 + zip 编解码 + 导入导出/校验（库/CLI，无 UI） | ①✅ `@dsh-trpg/content` 统一 pack/card/lorebook/module schema 与 `validatePack()`/`migratePack()`；②✅ 内置包 `core-guimuya` 迁移（4 卡 + 10 条世界书）；③✅ `.trpgpack` zip 编解码（`packToTrpgpack/trpgpackToPack`，别名 `encodePackZip/decodePackZip`；stored+deflate、大小/路径/CRC 校验、固定时间戳可复现）；④✅ 导入导出/校验 CLI `scripts/content-pack.mjs`（`pack-check.mjs` 兼容别名，根 `package.json` 加 `content:pack`）；⑤✅ 引用完整性校验（`loreIds/npcIds/encounterIds/rewardIds/startSceneId` + assets 引用存在）；⑥✅ 修复已知数据 bug（模组 `scene.lore` 值缺 `entry_` 前缀、与世界书 entry id 不匹配）；⑦✅ 保留 `GUIMUYA_*`/`PRESET_CARDS` 兼容导出；⑧✅ 单测：编解码/可复现/恶意 zip（炸弹·路径穿越·CRC 损坏）/迁移（`pack.test.ts` 14 + `zip.test.ts` 13） | 无 |
-| M8.2 | **房间接包**：`{packId, moduleId}` + 模组选择 + 快照引用（去硬编码） | `room.create` 扩展、`RoomView.content`、pack registry（内置 + 数据目录 `.trpgpack`）与「重扫」、`GET /trpg/content*` 只读拉取、快照引用与降级、GM 提示改用房间包、host/client 去 `GUIMUYA_MODULE` 硬编码 | M8.1 |
+| M8.2 ✅ 完成 2026-11-16 | **房间接包**：`{packId, moduleId}` + 建房选模组 + 快照引用（去硬编码） | ①✅ `room.create` 可选 `packId/moduleId`（显式不存在给中文错误；缺省 = registry 缺省包 + `defaultModuleId`）；②✅ pack registry（内置 + 数据目录 `.trpgpack`，坏包跳过 / 重复 `packId` 内置优先 / 可重扫）；③✅ `RoomView.content` 与 `RoomView.scenes`；④✅ RPC `content.list`（脱敏目录，无 token）与 `content.reload`（loopback + host token）；⑤✅ 快照引用 + 包缺失/hash 漂移 `degraded` 降级续团、重扫恢复；⑥✅ GM 提示/工具按 `room.content` 解析、host 去 `GUIMUYA_*` 硬编码；⑦✅ 客户端大厅「内容包 / 模组」选择器、建房传 `packId/moduleId`、房间卡内容展示 + 降级红色告警、GM 场景下拉改吃 `room.scenes`；⑧✅ 单测新增（protocol 2 + rooms 9 + registry 6 + room-http 3）；真机验收通过 | M8.1 |
 | M8.3 | 内容工坊 UI（主区域独立页 + 右栏轻量入口；卡只读面板 → 卡编辑器 → 世界书编辑器 → 模组编辑器） | 3 tab + pack 选择 + `.trpgpack` 导入导出 + 校验结果 + 预览；**在 M8.1、M8.2 完成后开工** | M8.1、M8.2 |
 | M8.4 | GM 检索注入 + 模组数据消费 | 检索器 + token 预算、`revealedLoreIds`、本场可用内容提示段、`list_scene`、GM 秘密不泄露回归用例 | M8.1、M8.2 |
 | M8.5 | 分享与 DiceFrame 适配 | `.trpgpack` 分享/导入冲突处理、DiceFrame `schema_version: 2` 卡适配器、内容作者文档（含 zip 目录结构与用编码器打包说明） | M8.1、M8.3 |
 
-**M8.1 交付摘要（✅ 完成 2026-11-16）**：pack schema（`pack.ts`：`ContentPack` / `validatePack()` / `migratePack()` / `assertContentPack()` + D12 兼容适配）、内置包迁移（`packs/core-guimuya.ts`：`CORE_GUIMUYA_PACK` / `CORE_PACKS`，1.0.0 = 1 模组 / 10 条世界书 / 4 卡）、zip 编解码（`zip.ts` + `pack-zip.ts`：零依赖、stored+deflate、上限/路径/CRC、时间戳固定可复现）、文件落盘（`pack-io.ts`）、CLI（`scripts/content-pack.mjs` + `pack-check.mjs` 兼容别名，根 `package.json` 加 `content:pack`）、引用完整性校验、`scene.lore` 数据 bug 修复全部落地；单测 **87 → 114**（`pack.test.ts` 14 + `zip.test.ts` 13），`typecheck` 0 错误，`node scripts/build.mjs` 构建通过。
-**M8.1 已知限制**：不支持 zip64（包 ≥ 4 GiB 直接报错）与加密/分卷 zip；`assets/` 目前只校验 `icon` 引用与 `assets/**` 路径安全（其它素材引用待 M8.2/M8.3），孤立素材只 warning；内置包暂不带 `assets/`。
+**M8.1 交付摘要（✅ 完成 2026-11-16）**：pack schema（`pack.ts`：`ContentPack` / `validatePack()` / `migratePack()` / `assertContentPack()` + D12 兼容适配）、内置包迁移（`packs/core-guimuya.ts`：`CORE_GUIMUYA_PACK` / `CORE_PACKS`，1.0.0 = 1 模组 / 10 条世界书 / 4 卡）、zip 编解码（`zip.ts` + `pack-zip.ts`：零依赖、stored+deflate、上限/路径/CRC、时间戳固定可复现）、文件落盘（`pack-io.ts`）、CLI（`scripts/content-pack.mjs` + `pack-check.mjs` 兼容别名，根 `package.json` 加 `content:pack`）、引用完整性校验、`scene.lore` 数据 bug 修复全部落地；单测 **87 → 114**（M8.1 阶段，`pack.test.ts` 14 + `zip.test.ts` 13），`typecheck` 0 错误，`node scripts/build.mjs` 构建通过。
+**M8.2 交付摘要（✅ 完成 2026-11-16）**：host 内容权威 = `host/pack-registry.ts`（内置 `CORE_PACKS` + 数据目录 `<profile-data>/<profile>/dsh-trpg-table/content/packs/*.trpgpack`；统一走 `trpgpackToPack()` 校验；坏包跳过并记 warning、重复 `packId` 内置优先、目录整体读取失败保留上一份清单；`reload()` 可重扫）；协议 `room.create` 可选 `{packId, moduleId}`、`RoomView.{content, scenes}`、`content.list`（脱敏目录，无 token）与 `content.reload`（loopback + host token）；rooms 只存引用（`content: {packId, packVersion, moduleId, contentHash, packName?, moduleTitle?, scenes[]}`），旧快照按内置包补齐，包缺失/版本或 hash 漂移 → `degraded` + warning、GM 回退内置包，重扫后恢复原引用；host 去掉 `GUIMUYA_*` 直接依赖，GM 提示与 `trpg_*` 工具按房间解析模组/世界书；客户端大厅「内容包 / 模组」卡（`content.list` 失败静默降级内置包、不挡建房）、建房带内容引用、房间卡显示包/模组/版本 + degraded 红色告警、GM 控制台场景下拉优先 `room.scenes`（旧数据回退内置模组）。单测 **114 → 134**（protocol 2、rooms 9、registry 6、room-http 3），`typecheck` 0 错误，`node scripts/build.mjs` 构建通过；本机真机验收通过（大厅选择 / 建房后内容展示 / 场景下拉 3 场 / 关房回大厅，截图 `.tmp/verify3/`，gitignored）。
+**M8.1 已知限制**：不支持 zip64（包 ≥ 4 GiB 直接报错）与加密/分卷 zip；`assets/` 目前只校验 `icon` 引用与 `assets/**` 路径安全（其它素材引用待 M8.3 工坊与 M8.5 分享），孤立素材只 warning；内置包暂不带 `assets/`。
+**M8.2 已知限制**：没有客户端「导入包 / 重扫」UI——数据目录包需手工放入并重启 DSH（或走 `content.reload` RPC，工坊入口在 M8.3）；大厅内容目录失败只显示「目录不可用」并静默用内置包，不展示具体原因；`content.list` 不含封面/素材，包预览待 M8.3。
 
-- 顺序理由（D12）：先保证地基（M8.1/M8.2）再上 UI，避免 schema 返工；zip 编解码是 M8.1 的头等交付（导入、导出、CLI、内置包构建都依赖它），放在统一 schema 之后、UI 之前。`packages/content` 重构为「内置 pack 定义 + 兼容导出」，host 逐步走 pack registry，不一次性大爆炸。**M7 玩家侧镜像可并行**：它改 client 镜像/会话事件中继，与内容模型文件面基本不重叠；交叉点是 GM 提示组装（M8.4）与玩家投影，合入时一起回归。
+- 顺序理由（D12）：先保证地基（M8.1/M8.2）再上 UI，避免 schema 返工；zip 编解码是 M8.1 的头等交付（导入、导出、CLI、内置包构建都依赖它），放在统一 schema 之后、UI 之前。`packages/content` 重构为「内置 pack 定义 + 兼容导出」，host 已走 pack registry（M8.2），不一次性大爆炸。**M7 玩家侧镜像可并行**：它改 client 镜像/会话事件中继，与内容模型文件面基本不重叠；交叉点是 GM 提示组装（M8.4）与玩家投影，合入时一起回归。
 
 ## 8. 已确认决策（2026-11-16）
 
@@ -277,13 +290,13 @@ node scripts/content-pack.mjs inspect dist/core-guimuya-1.0.0.trpgpack    # 打�
 
 | 风险 | 说明 | 对策 |
 |---|---|---|
-| 生效方式 / 编译进 host | 内置包是 `@dsh-trpg/content` 的 TS 数据模块（`CORE_PACKS`），改动需重装插件；数据目录包启动时扫描（M8.2） | 内置包与 CLI 导出共用同一套 `packToTrpgpack()` 校验/编码；提供「重扫内容包」入口（M8.2），扫描失败给可读错误并保留上一份可用清单；`pack.version` 独立语义化，内置包变更走 `contentHash`，禁止运行时改内置包文件 |
+| 生效方式 / 编译进 host | 内置包是 `@dsh-trpg/content` 的 TS 数据模块（`CORE_PACKS`），改动需重装插件；数据目录包启动时扫描，运行中重扫走 `content.reload`（M8.2 ✅） | 内置包与 CLI 导出共用同一套 `packToTrpgpack()` 校验/编码；重扫失败给可读 warning 并保留上一份数据包清单（目录读取失败时）；`pack.version` 独立语义化，内置包变更走 `contentHash`，禁止运行时改内置包文件 |
 | zip 压缩炸弹 | 恶意/畸形包可声明巨大解压体积耗尽内存 | 整包 16 MiB / 单条目 8 MiB / 总量 32 MiB / `pack.json` 4 MiB / 条目数 512 上限，解压即累计计数、超限立刻中止；拒绝 zip64 与非常规压缩方法；常量集中导出、单测注入超限 fixture |
 | zip 路径穿越 / 结构异常 | 条目名 `../`、绝对路径、盘符、重复条目、加密条目、非 UTF-8 名 | 解析以中央目录为准；条目名规范化并白名单（仅 `pack.json` + `assets/**`）；拒绝绝对路径与 `..`；重复名（大小写不敏感）拒绝；不支持的标志/方法明确报错；解码只返回内存 Map、不直接落盘 |
 | 导出不可复现 | 同一内容不同机器导出字节不同，`packHash` 与快照比对失真 | 固定条目顺序、DOS 时间戳（1980-01-01）、压缩级别 6、无 extra/comment/数据描述符；`--verify` 重导出比对字节；fixture 断言 `packHash` |
-| CRC / 包损坏 | 传输截断或手改 zip 导致内容静默损坏 | 逐条 CRC32 与中央目录比对，失败报「第 N 个条目 CRC 校验失败」；校验不过不安装、不导出；已安装坏包不加载、保留上一份可用清单 |
+| CRC / 包损坏 | 传输截断或手改 zip 导致内容静默损坏 | 逐条 CRC32 与中央目录比对，失败报「第 N 个条目 CRC 校验失败」；校验不过不安装、不导出；registry 加载时坏包跳过并记 warning，不崩服务 |
 | 素材缺失 / 解码失败 | `pack.json` 引用不存在的素材，或玩家端拉取素材失败 | `validatePack()` 在导入时拦「引用不存在」；运行时（缺包/玩家端拉取失败）用占位图 + warning 降级，不阻断开局；孤立素材只 warning |
-| 快照引用失效 | 包被删/改版本/改 hash 后续团 | 用派生场景快照降级续团 + 明确提示；不足则只读（可导出战报/角色卡）；不静默换包 |
+| 快照引用失效 | 包被删/改版本/改 hash 后续团 | 房间照常恢复但标记 `degraded` + 广播 warning，GM 提示/工具回退内置包（场景摘要随快照保留，可继续玩）；导入对应 `.trpgpack` 后 `content.reload`（或重启 DSH）恢复原引用、清除降级；不静默换包 |
 | DiceFrame 格式漂移 | `schema_version: 2` 语义与 D&D-lite 差异大 | 适配器隔离、版本守卫（只认 2）、未知字段不猜、`source.ruleId` 标注、fixture 单测；失败给迁移报告 |
 | 现有引用已坏 | `scene.lore` 值与世界书 id 对不上（`qingshi` vs `entry_qingshi`） | M8.1 已由 `migratePack()` 自动补齐（`qingshi` → `entry_qingshi`）并靠 `validatePack()` 挡回归；旧导出保持兼容（D12） |
-| 兼容导出漂移 | `id` → `*Id` 会改变 `GUIMUYA_MODULE` 等导出形状 | 适配层 `toLegacyModuleDef()/toCharacterCard()` 在 M8.1 落地；M8.1 后现有 114 项测试作为回归门 |
+| 兼容导出漂移 | `id` → `*Id` 会改变 `GUIMUYA_MODULE` 等导出形状 | 适配层 `toLegacyModuleDef()/toCharacterCard()` 在 M8.1 落地；M8.2 后现有 **134** 项测试作为回归门（M8.1 时 114） |

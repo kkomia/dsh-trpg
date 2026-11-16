@@ -133,12 +133,12 @@ M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI 
 
 **验收**：玩家本机出现「【牌桌】…」镜像会话，原生渲染整局且全过程无模型请求、不消耗 key；或按 P0 先上线只读 transcript。
 
-## M8 — 内容工坊（统一内容模型）✅ 决策已定 · M8.1 完成 2026-11-16
+## M8 — 内容工坊（统一内容模型）✅ 决策已定 · M8.1 ✅ · M8.2 ✅ 2026-11-16
 
 **目标**：模组/世界书/角色卡统一为内容包（Content Pack）：一套 schema 制作、校验、导入导出、分享；制作/分发单元是 `.trpgpack`（**ZIP** 容器：`pack.json` + 可选 `assets/`），房间只引用 `{packId, moduleId}`，GM 按需消费模组数据。4 条分叉已于 2026-11-16 定稿（编辑器=主区域独立页+右栏轻量入口；包=zip；卡=双轨；先地基后 UI），数据形状、zip 结构与校验约定见 [`CONTENT-MODEL.md`](./CONTENT-MODEL.md)（§2、§8）。
 
 - [x] **M8.1 地基（无 UI）✅ 2026-11-16**：统一 pack/card/lorebook/module schema + `validatePack()`/`migratePack()`；内置包 `core-guimuya` 迁移（4 张预制卡 + 10 条世界书）；`.trpgpack` zip 编解码（`node:zlib` 零依赖，stored+deflate、大小上限/路径安全/CRC、时间戳固定可复现）；导入导出/校验 CLI `scripts/content-pack.mjs`（`pack-check.mjs` 兼容别名，根 `package.json` 加 `content:pack`）；引用完整性校验（`loreIds/npcIds/encounterIds/rewardIds/startSceneId` + assets）；修复已知数据 bug（模组 `scene.lore` 值缺 `entry_` 前缀、与世界书 entry id 不匹配）；保留 `GUIMUYA_*`/`PRESET_CARDS` 兼容导出；编解码/恶意 zip/迁移单测。**结果**：实现文件 `packages/content/src/{pack,zip,pack-zip,pack-io}.ts` + `packs/core-guimuya.ts`（`CORE_GUIMUYA_PACK` / `CORE_PACKS`）；单测 114 passed（新增 `pack.test.ts` 14 + `zip.test.ts` 13），typecheck 0 错误，构建通过。
-- [ ] **M8.2 房间接包**：`room.create` 带 `{packId, moduleId}`、建房选模组、房间记录 `{packVersion, moduleId, contentHash}` 快照引用、pack registry（内置 + 数据目录 `.trpgpack`）与玩家只读拉取、缺包/版本变更降级续团，去 host/client 硬编码
+- [x] **M8.2 房间接包 ✅ 2026-11-16**：`room.create` 带 `{packId, moduleId}`、建房选模组、房间记录 `{packVersion, moduleId, contentHash}` 快照引用、pack registry（内置 + 数据目录 `.trpgpack`）与玩家只读拉取、缺包/版本变更降级续团，去 host/client 硬编码。**结果**：`host/pack-registry.ts`（内置 `CORE_PACKS` + 数据目录 `<profile-data>/<profile>/dsh-trpg-table/content/packs/*.trpgpack`，坏包跳过、重复 `packId` 内置优先、可重扫）；协议 `room.create` 可选 `packId/moduleId`、`RoomView.content`/`RoomView.scenes`、RPC `content.list`（脱敏目录，无 token）与 `content.reload`（loopback + host token）；房间只存内容引用 + 场景摘要，包缺失/版本或 hash 漂移 → `degraded` + 警告、GM 回退内置包，重扫后恢复；host 去掉 `GUIMUYA_*` 硬编码，GM 提示/工具按房间解析；客户端大厅「内容包 / 模组」选择（失败静默降级内置包）、建房传内容引用、房间卡展示包/模组/版本 + 降级红色告警、GM 场景下拉改吃 `room.scenes`。单测 **114 → 134**（protocol 2、rooms 9、registry 6、room-http 3），typecheck 0 错误，构建通过；**本机真机验收通过**（大厅选择 / 建房内容展示 / 场景下拉 3 场 / 关房回大厅，截图 `.tmp/verify3/`，gitignored）。
 - [ ] **M8.3 内容工坊 UI（排在 M8.1、M8.2 之后）**：主区域独立工具页（角色卡编辑器 / 世界书编辑器 / 模组编辑器三 tab，含卡只读面板）+ 右栏轻量入口；pack 选择、`.trpgpack` 导入导出、校验结果、预览
 - [ ] **M8.4 GM 检索注入 + 模组数据消费**：世界书按需检索（alwaysOn/场景关联/已 reveal/关键词 + token 预算）、checks/encounters/rewards/beats 进提示与工具
 - [ ] **M8.5 分享与 DiceFrame 适配**：`.trpgpack` 导出/导入与同 `packId` 冲突处理、DiceFrame `schema_version: 2` 卡适配器、内容作者文档（zip 目录结构 + 用编码器打包说明）

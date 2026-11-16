@@ -17,6 +17,8 @@
 
 ✅ **M6 对话原生牌桌（本机实机验收通过，2026-11-16）**：房主把当前 DSH 会话绑定为牌桌，AI GM 就是这个会话的 Agent（插件注入 GM 系统提示 + `trpg_*` 工具），玩家行动以用户消息注入会话，GM 原生回复与工具卡由 DSH 原生渲染；插件只保留入口（正常对话页在对话头部、空态/新会话页在左上角）+ 右侧栏「跑团桌」tab 常驻卡片 + 建房/加入最小表单。协议/房间服务/会话桥/客户端已落地，单测 **87 passed / 0 failed**、`node scripts/build.mjs` 构建通过；本机 DSH 桌面端截图验收通过（主区域=DSH 原生对话、头部入口打开右侧栏页签、320/360px 栏宽布局正常、建房自动绑定会话、结束房间=关房解绑）。另：DSH「新会话」空态页左上「🎲 跑团桌」入口已修复（2026-11-16，点它先准备会话再打开右侧栏，真机截图验证）。**局域网双机（host + 另 1–3 台真机）验收待执行**。里程碑见 [docs/ROADMAP.md](./docs/ROADMAP.md)（M0–M7），M6 详情见 [docs/milestones/M6.md](./docs/milestones/M6.md)。
 
+✅ **M8 内容模型（M8.1 地基 + M8.2 房间接包，本机真机验收通过，2026-11-16）**：模组/世界书/角色卡统一为内容包（`.trpgpack` ZIP），host 内置包 `core-guimuya` + 数据目录 pack registry；建房可选内容包/模组，房间只存 `{packId, moduleId, packVersion, contentHash}` 引用，缺包/内容变更时降级续团（GM 回退内置包，重扫恢复）；大厅内容选择器、房间内容展示与 GM 场景下拉已真机验收。单测 **134 passed / 0 failed**、typecheck 0 错误、构建通过；M8.3 内容工坊 UI 待做，详见 [docs/CONTENT-MODEL.md](./docs/CONTENT-MODEL.md) 与 [docs/ROADMAP.md](./docs/ROADMAP.md) M8。
+
 当前可用：房主建房（绑定当前会话）→ 朋友用局域网地址 + 邀请码加入并落座 → AI GM 在房主的牌桌会话里原生带团；存档续团、真人 GM 控制台已具备。本机单机链路已验收，局域网双机联调与玩家侧原生会话镜像（M7）待做：`docs/research/player-mirror.md`。
 
 ## 文档
