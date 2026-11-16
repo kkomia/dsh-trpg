@@ -6,6 +6,7 @@
  * - 规则包校验：`./validate-rules.ts`（结构 + 引用完整性 + 场地/时间/行动经济）
  * - 卡：`./sheet.ts`（validateCard / buildSheetProjection / 词条聚合）
  * - 旧卡迁移：`./migrate.ts`
+ * - 外部卡适配：`./adapters/diceframe.ts`（DiceFrame schema_version 2 → 内部卡）
  * - 测试样例：`./fixtures.ts`
  * - 核心运行时（M9.2）：`./runtime/index.ts`（种子骰 / vm 沙箱 / 钩子事务 / 战斗回合 /
  *   检定动作移动 / zone-grid 场地 / 纯 JSON 快照）；也可从子路径 `@dsh-trpg/rules/runtime` 导入。
@@ -15,5 +16,6 @@ export * from './formula.ts';
 export * from './validate-rules.ts';
 export * from './sheet.ts';
 export * from './migrate.ts';
+export * from './adapters/diceframe.ts';
 export * from './fixtures.ts';
 export * from './runtime/index.ts';
