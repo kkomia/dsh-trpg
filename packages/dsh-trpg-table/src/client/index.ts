@@ -34,6 +34,8 @@ import {
 import { callRpc, rpcErrorMessage } from './rpc.ts';
 import { createRulesStore, type MainViewKind } from './rules-store.ts';
 import { createRulesUi } from './rules-ui.ts';
+import { WORKSHOP_PANEL_ID } from './workshop.ts';
+import { createWorkshopUi } from './workshop-ui.ts';
 import { canonicalRefs } from './assets.ts';
 import { cardMetaFromCard, createAssetStore } from './assets-store.ts';
 import {
@@ -409,6 +411,8 @@ export function createPlugin(React: any) {
   // M9.5d 玩家角色资产：本地 IndexedDB 私卡资产 + 生成/上传；落座时由 index 组装 characterAssets。
   const assetStore = createAssetStore();
   const rulesUi = createRulesUi(React, rulesStore, assetStore);
+  // M9.6a 内容工坊：主区域独立工具页（左栏内容包 + 右侧 8 页签）；聊天仍走原生会话。
+  const workshopUi = createWorkshopUi(React);
 
   /** 对话顶栏入口：打开右侧栏的跑团桌 tab；顺带记住当前会话，作为建房的兜底。 */
   function OpenTableButton(props: { onOpen?: () => void; sessionId?: string }) {
@@ -526,7 +530,12 @@ export function createPlugin(React: any) {
   }
 
   /** 右侧栏 tab 正文：紧凑常驻卡片。props.sessionId = 当前会话（右侧栏按会话作用域注入）。 */
-  function TrpgTableCard(props: { sessionId?: string; onOpenMain?: (view: MainViewKind) => boolean | void }) {
+  function TrpgTableCard(props: {
+    sessionId?: string;
+    onOpenMain?: (view: MainViewKind) => boolean | void;
+    /** M9.6a：切主区域 keyed `main` 面板 `trpg-workshop`（内容工坊）。 */
+    onOpenWorkshop?: () => boolean | void;
+  }) {
     const [session, setSession] = useState(loadSession() as StoredSession | null);
     const [room, setRoom] = useState(null as RoomView | null);
     const [feed, setFeed] = useState([] as GameEvent[]);
@@ -857,6 +866,57 @@ export function createPlugin(React: any) {
         setBusy(false);
       }
     }, [base, inviteCode, playerName, enterRoom]);
+
+    /**
+     * 房主本机恢复会话（M9.6a 附带）：本机 localStorage 会话丢失/指向旧地址时，
+     * 用 loopback 的 `room.list` + `host.session` 找回房主令牌并恢复牌桌会话。
+     * 只在本机房主本机有效（host.session 只接受 loopback 请求），不会创建/修改房间。
+     */
+    const recoverHostRoom = useCallback(async () => {
+      setBusy(true);
+      setStatus({ kind: 'idle', text: '正在本机查找可恢复的房主房间…' });
+      try {
+        const normalizedBase = (base.trim() || DEFAULT_BASE).replace(/\/+$/, '');
+        const list = await callRpc<{ rooms: Array<{ roomId: string; title?: string; phase?: string }> }>(
+          normalizedBase,
+          'room.list',
+          {},
+        );
+        const rooms = list.rooms ?? [];
+        if (rooms.length === 0) {
+          setStatus({ kind: 'bad', text: `本机 host（${normalizedBase}）上没有房间可恢复：请确认跑团桌 host 正在运行并已建房。` });
+          return;
+        }
+        // 优先恢复到 localStorage 里记过的房间；否则取第一个。
+        const remembered = session?.roomId;
+        const target = rooms.find((entry) => entry.roomId === remembered) ?? rooms[0]!;
+        const host = await callRpc<{ hostToken?: string; room?: { inviteCode?: string; title?: string } }>(
+          normalizedBase,
+          'host.session',
+          { roomId: target.roomId },
+        );
+        if (typeof host.hostToken !== 'string' || host.hostToken.length === 0) {
+          throw new Error('host.session 没有返回房主令牌');
+        }
+        lastSeqRef.current = 0;
+        feedRef.current = [];
+        setFeed([]);
+        enterRoom({
+          base: normalizedBase,
+          hostToken: host.hostToken,
+          roomId: target.roomId,
+          ...(typeof host.room?.inviteCode === 'string' ? { inviteCode: host.room.inviteCode } : {}),
+        });
+        setStatus({ kind: 'ok', text: `已恢复本机房主会话：${host.room?.title ?? target.title ?? target.roomId}` });
+      } catch (error) {
+        setStatus({
+          kind: 'bad',
+          text: `恢复失败：${error instanceof Error ? error.message : String(error)}（只有房主本机可恢复；需要 host 在运行）`,
+        });
+      } finally {
+        setBusy(false);
+      }
+    }, [base, enterRoom, session?.roomId]);
 
     /** 房主：把房间绑定到右侧栏 tab 所在的会话（原生对话即牌桌）。 */
     const bindCurrentSession = useCallback(async () => {
@@ -1400,6 +1460,16 @@ export function createPlugin(React: any) {
         h('button', { key: 'join-btn', type: 'button', style: CSS.buttonPrimary, disabled: busy, onClick: () => void joinRoom() }, '加入房间'),
         h('span', { key: 'hint', style: CSS.muted }, '进房后先「落座」，行动直接写在原生对话里。'),
       ]),
+      // M9.6a：本机 localStorage 会话丢失/指错地址时的房主自救入口（loopback + host.session，只读查找）。
+      h('div', { key: 'recover', style: { ...CSS.section, gap: 5 } }, [
+        h('strong', { key: 't' }, '房主本机恢复'),
+        h('span', { key: 'hint', style: CSS.muted }, '本机会话丢失（例如浏览器存储被清/换了地址）时，可在此找回本机 host 上已有房间的房主身份；不创建新房间。'),
+        h(
+          'button',
+          { key: 'go', type: 'button', style: { ...CSS.button, alignSelf: 'flex-start' }, disabled: busy, onClick: () => void recoverHostRoom() },
+          '恢复本机房主会话',
+        ),
+      ]),
     ]);
 
     const connecting = h('div', { key: 'loading', style: { ...CSS.section, gap: 4 } }, [
@@ -1637,7 +1707,32 @@ export function createPlugin(React: any) {
         ])
       : null;
 
-    const children: unknown[] = [statusLine];
+    // M9.6a：房主才显示「内容工坊」入口（切主区域独立工具页；玩家看不到）。
+    const workshopEntry = isHost
+      ? h('div', { key: 'workshop-entry', style: { ...CSS.section, flexDirection: 'row', alignItems: 'center', gap: 6, padding: '6px 8px' } }, [
+          h('span', { key: 'icon', style: { fontSize: 13, lineHeight: 1 } }, '🛠'),
+          h('span', { key: 't', style: { ...CSS.sectionTitle, fontSize: 12 } }, '内容工坊'),
+          h('span', { key: 's', style: { ...CSS.muted, flex: '1 1 auto', minWidth: 0 } }, '图标 · 地图 · 内容包'),
+          h(
+            'button',
+            {
+              key: 'open',
+              type: 'button',
+              style: CSS.button,
+              title: '在主区域打开内容工坊（内容包 / 图标 / 地图 / 分享）',
+              onClick: () => {
+                const opened = props?.onOpenWorkshop?.();
+                if (opened === false) {
+                  setStatus({ kind: 'bad', text: '当前宿主不支持主区域工具页（keyed main 面板不可用），工坊打不开。' });
+                }
+              },
+            },
+            '打开工坊',
+          ),
+        ])
+      : null;
+
+    const children: unknown[] = [workshopEntry, statusLine].filter((entry) => entry !== null && entry !== undefined);
     if (!session) children.push(lobby);
     else if (!room) children.push(connecting);
     else {
@@ -1731,6 +1826,22 @@ export function createPlugin(React: any) {
         }
       };
 
+      /**
+       * 右栏「内容工坊」入口：切主区域 keyed `main` 面板 `trpg-workshop`（M9.6a）。
+       * @returns 成功 true；宿主没有 main 面板机制时 false（右栏显示可读提示）。
+       */
+      const openWorkshopPanel = (): boolean => {
+        const service = layout();
+        if (!service) return false;
+        try {
+          service.selectPanel(WORKSHOP_PANEL_ID);
+          return true;
+        } catch (error) {
+          console.warn('[dsh-trpg-table] 打不开内容工坊', error);
+          return false;
+        }
+      };
+
       // 1) 右侧栏 tab 类型：服务由 @deepseek-ai/dsh-client-ui-sidebar-right 提供，
       //    用 ctx.inject 惰性等待（它可能比本插件晚挂载；没有该服务的精简宿主只是没有这个 tab）。
       ctx.inject?.(['sidebarRightTabs'], (scoped) => {
@@ -1751,7 +1862,7 @@ export function createPlugin(React: any) {
       ctx.effect?.(() =>
         ctx.slots.inject('sidebar.right.pane.tab', () =>
           ctx.slots.register(
-            { name: 'sidebar.right.pane.tab', key: TAB_TYPE_ID, inject: () => ({ onOpenMain: openMainPanel }) },
+            { name: 'sidebar.right.pane.tab', key: TAB_TYPE_ID, inject: () => ({ onOpenMain: openMainPanel, onOpenWorkshop: openWorkshopPanel }) },
             TrpgTableCard,
           ),
         ),
@@ -1768,6 +1879,20 @@ export function createPlugin(React: any) {
               inject: () => ({ goHome: closeMainPanel, readSession: loadSession }),
             },
             rulesUi.RulesMainPanel,
+          ),
+        ),
+      );
+
+      // 2c) M9.6a 主区域 keyed `main` 面板：内容工坊（左栏内容包 + 右侧 8 页签；只读内容 + 图标/地图工作台）。
+      ctx.effect?.(() =>
+        ctx.slots.inject('main', () =>
+          ctx.slots.register(
+            {
+              name: 'main',
+              key: WORKSHOP_PANEL_ID,
+              inject: () => ({ goHome: closeMainPanel, readSession: loadSession }),
+            },
+            workshopUi.WorkshopMainPanel,
           ),
         ),
       );
