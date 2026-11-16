@@ -6,8 +6,6 @@
  * 因此可以用假 Agent 在单测里跑完整编排，而真实实现在 host/index.ts 里对接 DSH。
  */
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import type { LorebookDef, ModuleDef } from '@dsh-trpg/content';
 import type { GameEvent } from '@dsh-trpg/protocol';
 import type { PlayerActionInfo, RoomService } from '@dsh-trpg/rooms';
@@ -126,24 +124,20 @@ export class GmRuntime {
   /** 创建 GM 会话并注册该 Agent 专属的工具与系统提示。 */
   async start(): Promise<void> {
     const { module, lorebook, createAgent, roomService, roomId, log } = this.options;
-    const debugDir = process.env.DSH_TRPG_DEBUG_DIR ?? 'D:\\gitlab\\dsh-trpg\\.tmp';
-    const bare = existsSync(join(debugDir, 'gm-bare.flag'));
     const systemPrompt = buildGmSystemPrompt(module, lorebook);
     this.handle = await createAgent({
       sessionId: this.sessionId,
       setup: (agentCtx) => {
-        if (!bare) {
-          for (const tool of createGmTools({ roomService, roomId, lorebook, combat: this.combat })) {
-            agentCtx.tools.register(tool);
-          }
-          agentCtx.systemPrompt.section({
-            name: 'trpg-gm',
-            order: 900,
-            complete: true,
-            interpolate: false,
-            text: () => systemPrompt,
-          });
+        for (const tool of createGmTools({ roomService, roomId, lorebook, combat: this.combat })) {
+          agentCtx.tools.register(tool);
         }
+        agentCtx.systemPrompt.section({
+          name: 'trpg-gm',
+          order: 900,
+          complete: true,
+          interpolate: false,
+          text: () => systemPrompt,
+        });
         try {
           agentCtx.systemPrompt.suppressRuntimeContext?.();
         } catch {
@@ -151,13 +145,6 @@ export class GmRuntime {
         }
       },
     });
-    if (bare) {
-      try {
-        roomService.gmAlert(roomId, '调试模式：裸 GM Agent（无工具/无系统提示）', 'warning');
-      } catch {
-        /* ignore */
-      }
-    }
     if (this.handle.sessionId) this._sessionId = this.handle.sessionId;
     log?.(`GM agent started for room ${roomId} (session ${this.sessionId})${this.handle.route ? ` model=${this.handle.route}` : ''}`);
     try {

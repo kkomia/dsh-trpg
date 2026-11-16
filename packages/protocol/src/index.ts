@@ -143,14 +143,7 @@ export type RpcMethod =
   | 'gm.award'
   | 'room.close'
   | 'room.closeAll'
-  | 'room.bind'
-  // TEMP-PROBE：会话原生 GM 尖刀测试（验证后删除）
-  | 'debug.sessions'
-  | 'debug.create'
-  | 'debug.gateway'
-  | 'debug.fetch'
-  | 'debug.tail'
-  | 'debug.prompt';
+  | 'room.bind';
 
 export interface CreateRoomParams {
   title: string;
@@ -313,13 +306,6 @@ const METHODS: readonly RpcMethod[] = [
   'room.close',
   'room.closeAll',
   'room.bind',
-  // TEMP-PROBE（与 RpcMethod 同步，验证后删除）
-  'debug.sessions',
-  'debug.create',
-  'debug.gateway',
-  'debug.fetch',
-  'debug.tail',
-  'debug.prompt',
 ];
 
 export function isRpcMethod(value: unknown): value is RpcMethod {

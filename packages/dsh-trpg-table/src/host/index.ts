@@ -6,14 +6,12 @@
  * - AI GM：建房后创建 DSH Agent 会话，玩家行动串行喂给 GM，GM 的叙事广播回房间；
  *   GM 的工具在这里执行引擎结算（掷骰/检定/私密消息/世界书）。
  */
-import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { GUIMUYA_LOREBOOK, GUIMUYA_MODULE } from '@dsh-trpg/content';
 import { RoomError, RoomService } from '@dsh-trpg/rooms';
 import { createRoomHttpServer, type RoomHttpServer } from './room-http.ts';
 import { RoomPersistence } from './persistence.ts';
-import { GmManager, extractAssistantText, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike } from './gm/runtime.ts';
+import { GmManager, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike } from './gm/runtime.ts';
 import { SubagentGmManager, type SubagentsLike } from './gm/subagent-gm.ts';
 import { TableSessionBridge } from './table-session.ts';
 
@@ -46,15 +44,6 @@ export interface HostCtxLike {
 
 export interface ToolsScope {
   tools: { register(definition: unknown): unknown };
-}
-
-export interface GatewayScope {
-  typertGateway: {
-    invoke(request: { namespace: string; method: string; args: unknown; signal?: AbortSignal; peer?: unknown }): Promise<unknown>;
-  };
-  connection?: {
-    createPeer(options: { principal: { kind: string }; interactions?: 'answer' | 'none' }): unknown;
-  };
 }
 
 export interface SubagentsScope {
@@ -214,7 +203,6 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   }
 
   let http: RoomHttpServer;
-  let debugHandlerRef: ((method: string, params: unknown) => Promise<unknown>) | null = null;
   try {
     http = createRoomHttpServer({
       port,
@@ -236,10 +224,6 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
         }
         return { room };
       },
-      debug: (method, params) => {
-        if (!debugHandlerRef) throw new Error('诊断入口未就绪');
-        return debugHandlerRef(method, params);
-      },
     });
   } catch (error) {
     log(`room server init failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -252,20 +236,6 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   let sessionController: SessionControllerScope['sessionController'] | null = null;
   let toolsService: ToolsScope['tools'] | null = null;
   let subagentsService: SubagentsLike | null = null;
-  let gatewayService: GatewayScope['typertGateway'] | null = null;
-  let connectionService: GatewayScope['connection'] | null = null;
-  ctx.inject?.(['typertGateway'], (scoped) => {
-    gatewayService = (scoped as GatewayScope).typertGateway ?? null;
-    return () => {
-      gatewayService = null;
-    };
-  });
-  ctx.inject?.(['connection'], (scoped) => {
-    connectionService = (scoped as GatewayScope).connection ?? null;
-    return () => {
-      connectionService = null;
-    };
-  });
   ctx.inject?.(['tools'], (scoped) => {
     toolsService = (scoped as ToolsScope).tools ?? null;
     queueMicrotask(() => setupSubagentGm());
@@ -306,273 +276,14 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     };
   });
 
-  // TEMP-PROBE：debug.* 诊断入口（本机 loopback），验证完成后删除。
-  debugHandlerRef = async (method, params): Promise<unknown> => {
-    try {
-      return await runDebug(method, params);
-    } catch (error) {
-      return {
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? (error.stack ?? '').split('\n').slice(0, 6).join('\n') : '',
-      };
-    }
-  };
-  const runDebug = async (method: string, params: unknown): Promise<unknown> => {
-    const controller = sessionController as unknown as {
-      list?: (request: unknown, signal: AbortSignal) => Promise<unknown>;
-      create?: (request: unknown) => Promise<{ sessionId: string }>;
-      resolveAgent?: (sessionId: string) => Promise<{ agent?: { id: string; ctx: GmAgentCtxLike; followup?: (input: unknown) => void | Promise<void>; whenIdle?: () => Promise<void> } } | { error?: unknown }>;
-    } | null;
-    if (!controller) throw new Error('sessionController 未就绪');
-    if (method === 'debug.sessions') {
-      return controller.list ? await controller.list({}, new AbortController().signal) : [];
-    }
-    if (method === 'debug.create') {
-      const p = (params ?? {}) as { text?: string };
-      if (!controller.create) throw new Error('sessionController.create 不可用');
-      const created = await controller.create({});
-      const selection = defaultModel?.currentSelection?.();
-      if (selection && sessionController?.selectModel) {
-        await sessionController.selectModel({
-          sessionId: created.sessionId,
-          provider: selection.provider,
-          model: selection.model,
-          ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
-        });
-      }
-      return await runPrompt(created.sessionId, p.text ?? '只回四个字：会话已连通', params);
-    }
-    if (method === 'debug.tail') {
-      const p = (params ?? {}) as { sessionId?: string; limit?: number };
-      if (typeof p.sessionId !== 'string' || !p.sessionId) throw new Error('缺少 sessionId');
-      const controller2 = sessionController as unknown as {
-        events?: (request: unknown, signal: AbortSignal) => Promise<{ messages?: unknown[]; items?: unknown[]; cursor?: number }>;
-        state?: (request: unknown, signal: AbortSignal) => Promise<unknown>;
-      } | null;
-      if (!controller2?.events) throw new Error('sessionController.events 不可用');
-      const page = await controller2.events(
-        { address: { kind: 'session', sessionId: p.sessionId }, maxMessages: p.limit ?? 3 },
-        new AbortController().signal,
-      );
-      const items = (page.items ?? page.messages ?? []) as Array<{ type?: string; data?: unknown; seq?: number }>;
-      return {
-        cursor: page.cursor,
-        items: items.slice(-24).map((item) => `${item.seq ?? '?'} ${item.type ?? '?'} ${JSON.stringify(item.data ?? {}).slice(0, 160)}`),
-      };
-    }    if (method === 'debug.fetch') {
-      const out: Record<string, unknown> = {};
-      try {
-        const dns = await import('node:dns/promises');
-        out.dns = await dns.lookup('api.deepseek.com');
-      } catch (error) {
-        out.dnsError = error instanceof Error ? error.message : String(error);
-      }
-      try {
-        const response = await fetch('https://api.deepseek.com/v1/models');
-        out.models = { status: response.status, ok: response.ok, text: (await response.text()).slice(0, 200) };
-      } catch (error) {
-        out.modelsError = `${error instanceof Error ? error.name : typeof error}: ${error instanceof Error ? error.message : String(error)}`;
-      }
-      let token: string | undefined;
-      try {
-        const account = (ctx as unknown as { get?: (id: string) => unknown }).get?.('deepseekAccount') as { resolveToken?: (url: string) => Promise<string | undefined> } | undefined;
-        token = await account?.resolveToken?.('https://api.deepseek.com');
-        out.token = token ? `${token.slice(0, 6)}…(${token.length})` : null;
-      } catch (error) {
-        out.tokenError = error instanceof Error ? error.message : String(error);
-      }
-      if (token) {
-        try {
-          const response = await fetch('https://api.deepseek.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json',
-              accept: 'text/event-stream',
-              authorization: `Bearer ${token}`,
-              'anthropic-version': '2023-06-01',
-            },
-            body: JSON.stringify({
-              model: 'deepseek-flash',
-              max_tokens: 32,
-              messages: [{ role: 'user', content: '只回四个字：会话已连通' }],
-              stream: false,
-            }),
-          });
-          out.messages = { status: response.status, ok: response.ok, text: (await response.text()).slice(0, 400) };
-        } catch (error) {
-          const e = error as { name?: string; message?: string; cause?: { code?: string; message?: string } };
-          out.messagesError = `${e?.name}: ${e?.message} cause=${e?.cause?.code ?? ''}/${e?.cause?.message ?? ''}`;
-        }
-      }
-      return out;
-    }    if (method === 'debug.gateway') {
-      const p = (params ?? {}) as { sessionId?: string; text?: string };
-      if (typeof p.sessionId !== 'string' || !p.sessionId) throw new Error('缺少 sessionId');
-      if (!gatewayService) throw new Error('typertGateway 不可用');
-      const browserPeer = (connectionService as unknown as { browserPeer?: unknown } | null)?.browserPeer;
-      const peer = browserPeer ?? connectionService?.createPeer?.({ principal: { kind: 'owner' }, interactions: 'none' });
-      const capture = { texts: [] as string[], events: [] as string[], errors: [] as string[], done: false, resolve: undefined as (() => void) | undefined };
-      probeCapture.set(p.sessionId, capture);
-      const finished = new Promise<void>((resolve) => {
-        capture.resolve = resolve;
-        setTimeout(resolve, 120_000);
-      });
-      await gatewayService.invoke({
-        namespace: 'session',
-        method: 'prompt',
-        args: {
-          request: {
-            requestId: `probe-${Date.now()}`,
-            sessionId: p.sessionId,
-            mode: 'queue',
-            content: [{ type: 'text', text: p.text ?? '只回四个字：会话已连通' }],
-          },
-        },
-        ...(peer === undefined ? {} : { peer }),
-      });
-      await finished;
-      probeCapture.delete(p.sessionId);
-      return {
-        sessionId: p.sessionId,
-        via: 'gateway',
-        usedBrowserPeer: Boolean(browserPeer),
-        hasPeer: peer !== undefined,
-        assistantText: capture.texts.join('\n---\n'),
-        eventTypes: capture.events,
-        diagnostics: capture.errors,
-        agentErrors: probeAgentErrors.slice(-6),
-      };
-    }
-    if (method === 'debug.prompt') {
-      const p = (params ?? {}) as { sessionId?: string; text?: string };
-      if (typeof p.sessionId !== 'string' || !p.sessionId) throw new Error('缺少 sessionId');
-      // 先按默认模型重新 selectModel（验证：恢复会话后模型路由是否恢复）。
-      const selection = defaultModel?.currentSelection?.();
-      if (selection && sessionController?.selectModel) {
-        try {
-          await sessionController.selectModel({
-            sessionId: p.sessionId,
-            provider: selection.provider,
-            model: selection.model,
-            ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
-          });
-        } catch (error) {
-          return { selectModelError: error instanceof Error ? error.message : String(error) };
-        }
-      }
-      return await runPrompt(p.sessionId, p.text ?? '只回四个字：会话已连通', params);
-    }
-    throw new Error(`未知诊断方法：${method}`);
-  };
-
-  const runPrompt = async (sessionId: string, text: string, params?: unknown): Promise<unknown> => {
-    const controller = sessionController as unknown as {
-      resolveAgent?: (sessionId: string) => Promise<{ agent?: { id: string; ctx: GmAgentCtxLike; followup?: (input: unknown) => void | Promise<void>; whenIdle?: () => Promise<void> } } | { error?: unknown }>;
-    } | null;
-    if (!controller?.resolveAgent) throw new Error('sessionController 未就绪');
-    {
-      const p = { sessionId, text };
-      const resolved = await controller.resolveAgent(p.sessionId);
-      const agent = (resolved as { agent?: { id: string; ctx: GmAgentCtxLike; followup?: (input: unknown) => void | Promise<void>; whenIdle?: () => Promise<void> } }).agent;
-      if (!agent) {
-        return {
-          sessionId: p.sessionId,
-          resolvedError: (resolved as { error?: unknown } | undefined)?.error,
-          resolvedKeys: resolved && typeof resolved === 'object' ? Object.keys(resolved) : null,
-        };
-      }
-      // 给这个会话注册一个临时系统提示段 + 临时工具，验证 agent ctx 可写。
-      const stamp = Date.now();
-      agent.ctx.systemPrompt.section({
-        name: `trpg-probe-${stamp}`,
-        order: 900,
-        complete: false,
-        interpolate: false,
-        text: () => '【TRPG 探针】你现在是一张 D&D 跑团桌的 GM。回答要简短，最多两句话。',
-      });
-      let toolRegistered = false;
-      try {
-        agent.ctx.tools.register({
-          name: `probe_ping_${stamp}`,
-          description: '探针工具：返回 pong。',
-          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-          execute: async () => ({ ok: true, result: { pong: true } }),
-        });
-        toolRegistered = true;
-      } catch (error) {
-        log(`probe tool register failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      const capture = { texts: [] as string[], events: [] as string[], errors: [] as string[], done: false, resolve: undefined as (() => void) | undefined };
-      probeCapture.set(p.sessionId, capture);
-      const finished = new Promise<void>((resolve) => {
-        capture.resolve = resolve;
-        setTimeout(resolve, 120_000);
-      });
-      const forceFollowup = (params as { via?: string } | undefined)?.via === 'followup';
-      const promptOwner = forceFollowup ? null : (sessionController as unknown as { prompt?: (request: unknown, signal?: AbortSignal) => Promise<unknown> } | null);
-      const viaPrompt = promptOwner?.prompt ? promptOwner.prompt.bind(promptOwner) : undefined;
-      if (viaPrompt) {
-        await viaPrompt(
-          {
-            requestId: `probe-${Date.now()}`,
-            sessionId: p.sessionId,
-            mode: 'queue',
-            content: [{ type: 'text', text: p.text ?? '只回四个字：会话已连通' }],
-          },
-          new AbortController().signal,
-        );
-      } else {
-        await agent.followup?.({
-          content: [{ type: 'text', text: p.text ?? '只回四个字：会话已连通' }],
-          source: { kind: 'user' },
-        });
-      }
-      await finished;
-      probeCapture.delete(p.sessionId);
-      return {
-        sessionId: p.sessionId,
-        agentId: agent.id,
-        toolRegistered,
-        assistantText: capture.texts.join('\n---\n'),
-        eventTypes: capture.events,
-        diagnostics: capture.errors,
-        agentErrors: probeAgentErrors.slice(-6),
-      };
-    }
-  };
-
   const gmSessionIds = new Set<string>();
   const turnWaiters = new Map<string, Array<() => void>>();
-
-  // TEMP-PROBE：验证「把 GM 绑定到已有会话」是否可行（会话原生 GM 改造的尖刀测试）。
-  const probeCapture = new Map<string, { texts: string[]; events: string[]; errors: string[]; done: boolean; resolve?: () => void }>();
-  const captureProbeEvent = (sessionId: string, type: string | undefined, data: unknown): void => {
-    const capture = probeCapture.get(sessionId);
-    if (!capture) return;
-    capture.events.push(type ?? '?');
-    if (type === 'assistant/attempt' || type === 'llm/retry' || type === 'session/title' || type === 'turn/end') {
-      try {
-        capture.errors.push(`${type}: ${JSON.stringify(data).slice(0, 600)}`);
-      } catch {
-        capture.errors.push(`${type}: <unserializable>`);
-      }
-    }
-    if (type === 'assistant/message') {
-      const text = extractAssistantText((data as { message?: unknown } | undefined)?.message);
-      if (text) capture.texts.push(text);
-    }
-    if (type === 'turn/end' && !capture.done) {
-      capture.done = true;
-      capture.resolve?.();
-    }
-  };
 
   /** 统一的会话事件处理：drerelease waiters、上报错误、转发给对应 GM 房间。 */
   const forwardSessionEvent = (args: unknown[]): void => {
     const session = args[0] as { id?: string } | undefined;
     const event = args[1] as { type?: string; data?: unknown; seq?: number } | undefined;
     if (!session?.id || !event?.type) return;
-    captureProbeEvent(session.id, event.type, event.data);
     tableBridge?.onSessionEvent(session.id, event.type, event.data);
     if (event.type === 'turn/end') {
       const waiters = turnWaiters.get(session.id);
@@ -609,22 +320,10 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     }
   };
   const createAgent: GmCreateAgent = async ({ sessionId, setup }) => {
-    const debugDir = process.env.DSH_TRPG_DEBUG_DIR ?? 'D:\\gitlab\\dsh-trpg\\.tmp';
-    const forceOff = existsSync(join(debugDir, 'gm-effort-off.flag'));
-    const providerOverrideFile = join(debugDir, 'gm-provider.flag');
-    const providerOverride = existsSync(providerOverrideFile)
-      ? (await import('node:fs')).readFileSync(providerOverrideFile, 'utf8').trim()
-      : '';
     const selection = defaultModel?.currentSelection?.();
-    const effective = selection
-      ? { provider: providerOverride || selection.provider, model: selection.model }
-      : providerOverride
-        ? { provider: providerOverride, model: 'deepseek-flash' }
-        : undefined;
-    const effort = forceOff ? 'off' : selection?.reasoningEffort;
-    const routeBase = effective
-      ? `${effective.provider}/${effective.model}${effort ? `@${effort}` : ''}${forceOff ? ' [debug-off]' : ''}`
-      : 'default';
+    const effective = selection ? { provider: selection.provider, model: selection.model } : undefined;
+    const effort = selection?.reasoningEffort;
+    const routeBase = effective ? `${effective.provider}/${effective.model}${effort ? `@${effort}` : ''}` : 'default';
 
     // 首选：走 Web UI 同款的普通会话通道（sessionController），模型请求上下文完整。
     if (sessionController) {
@@ -735,7 +434,10 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     subagentManager.registerTools();
     subagentRef.current = subagentManager;
     log('subagent GM channel ready');
-    for (const roomId of restoredRooms) subagentManager.ensureRoom(roomId, { opening: false });
+    for (const roomId of restoredRooms) {
+      if (service.sessionOf(roomId)) continue;
+      subagentManager.ensureRoom(roomId, { opening: false });
+    }
   }
 
   const manager = new GmManager({
@@ -748,8 +450,9 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   managerRef.current = manager;
   setupSubagentGm();
 
-  // 恢复的 AI 房间：subagent 通道优先，否则拉起 GM 会话。
+  // 恢复的 AI 房间：会话原生牌桌优先（绑定已由 agents 注入时完成重挂），其余走 subagent/旧 GM 通道。
   for (const roomId of restoredRooms) {
+    if (service.sessionOf(roomId)) continue;
     void manager.ensureRoom(roomId);
   }
 
@@ -757,22 +460,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     forwardSessionEvent(args);
   });
 
-  const probeAgentErrors: string[] = [];
   const offAgentError = ctx.on?.('agent/error', (...args: unknown[]) => {
     const payload = args[0] as { agent?: { id?: string }; turn?: number; step?: number; error?: unknown } | undefined;
-    try {
-      const describe = (value: unknown, depth = 0): string => {
-        if (depth > 4 || value === undefined) return '';
-        if (value instanceof Error) {
-          return `${value.name}: ${value.message}${value.cause === undefined ? '' : ` <- ${describe(value.cause, depth + 1)}`}`;
-        }
-        return String(value);
-      };
-      probeAgentErrors.push(`[${payload?.agent?.id ?? '?'}] ${describe(payload?.error)}`);
-      if (probeAgentErrors.length > 12) probeAgentErrors.shift();
-    } catch {
-      /* ignore */
-    }
     const sessionId = payload?.agent?.id;
     if (!sessionId) return;
     const error = payload?.error as { message?: string; code?: string; status?: number; requestId?: string } | undefined;

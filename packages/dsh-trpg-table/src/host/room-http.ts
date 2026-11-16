@@ -30,8 +30,6 @@ export interface RoomHttpOptions {
   bindHost: string;
   log?: (message: string) => void;
   service?: RoomService;
-  /** 临时诊断入口（仅 loopback；TEMP-PROBE，会话改造验证完即移除）。 */
-  debug?: (method: string, params: unknown) => unknown | Promise<unknown>;
   /** 把房间绑定到 DSH 会话（房主本机；host/index 注入实现）。 */
   bindSession?: (roomId: string, sessionId: string | null) => unknown | Promise<unknown>;
 }
@@ -83,10 +81,6 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
   const startedAt = Date.now();
 
   const dispatch = async (request: IncomingMessage, rpc: RpcRequest): Promise<unknown> => {
-    if (rpc.method.startsWith('debug.') && options.debug) {
-      if (!isLoopback(request)) throw new RoomError('forbidden', '诊断入口只允许本机');
-      return options.debug(rpc.method, rpc.params);
-    }
     if (rpc.method === 'room.create') {
       if (!isLoopback(request)) throw new RoomError('forbidden', '只有房主本机可以创建房间');
       return service.createRoom(rpc.params);

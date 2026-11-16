@@ -301,10 +301,12 @@ test('combat: engine enforces turn order and broadcasts combat state', async () 
   const combatEvent = roomService.gmRecentEvents(action.roomId, 10).find((event) => event.kind === 'combat');
   assert.ok(combatEvent);
 
-  // 不是行动者的攻击必须被引擎拒绝
-  const wrong = view.order.find((entry) => entry.id !== view.activeId && !entry.dead);
+  // 不是行动者的攻击必须被引擎拒绝。用攻击后的实时视图挑人：先手可能已把某个参战者打倒，
+  // 旧快照里的倒地者会先命中「已经无法行动」而不是「轮到」；目标取当前行动者（必定存活）。
+  const live = combat.view();
+  const wrong = live.order.find((entry) => entry.id !== live.activeId && entry.hp > 0);
   assert.ok(wrong);
-  const wrongTarget = wrong.kind === 'monster' ? allies[0] : enemies[0];
+  const wrongTarget = live.order.find((entry) => entry.id === live.activeId);
   assert.ok(wrongTarget);
   await assert.rejects(
     async () => attackTool?.execute({ attacker: wrong.name, target: wrongTarget.name }),
