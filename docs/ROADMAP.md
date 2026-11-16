@@ -6,8 +6,11 @@
 ## 总览
 
 ```
-M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI GM 端到端✅ ─► M4 真人 GM+收尾🔶 ─► M5 局域网验收+发布🔶 ─► M6 对话原生牌桌✅ ─► M7 玩家侧镜像🔬 ─► M8 内容工坊✅ 决策已定 · M8.4 ✅ · M8.5a ✅ · M8.5b ⬜ ─► M9 规则运行时🧭 M9.1 ✅ · M9.2 ✅ · M9.4 ✅ · M9.5 a–e ✅ · d 部分 · M9.6a ✅
+M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI GM 端到端✅ ─► M4 真人 GM+收尾✅（离线部分；成长写回留 v2）─► M5 安装包+发布材料✅（局域网双机/npm 由用户执行）─► M6 对话原生牌桌✅ ─► M7 玩家侧镜像✅（P1 镜像）─► M8 内容工坊✅（M8.1/8.2/8.4 ✅ · M8.3 ✅ 随 M9.6 · M8.5a ✅ · M8.5b 分享/导入 UI ✅）─► M9 规则运行时✅ 完成（M9.1 ✅ · M9.2 ✅ · M9.3 ✅ · M9.4 ✅ · M9.5 a–e ✅ · M9.6a ✅ · M9.6b ✅）
 ```
+
+**状态（2026-11-17）：全部规划里程碑完成。** 最后一批：**M9.6b ✅**（内容编辑器 / 规则测试台 / DiceFrame 导入 / 地图校准，单测 **1130**）、**M9.5d ✅**（玩家立绘与落座资产，1092 时验收）、**M7 ✅**（玩家侧对话镜像 P1，1092 时验收）、**M8.5 a ✅**（b 的分享/导入 UI 已随工坊完成，标注见下方 M8.5b 条目）。
+**剩余由用户执行：局域网双机验收、npm 发布（0.1.0）**——步骤见 [ACCEPTANCE.md](./ACCEPTANCE.md) §2 与 [RELEASE.md](./RELEASE.md) §5。
 
 ## M0 — 工程骨架 ✅ 2026-11-13
 
@@ -64,7 +67,7 @@ M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI 
 
 **验收**：真实 DeepSeek 模型实机开场 + 玩家行动回应 + `roll_check` 引擎掷骰（骰面/DC/成败进事件流），见 `docs/milestones/M3.md`。
 
-## M4 — 真人 GM 模式 + 收尾 🔶 离线部分完成 2026-11-13
+## M4 — 真人 GM 模式 + 收尾 ✅ 离线部分完成 2026-11-13（历史记录；「成长写回」留 v2）
 
 - [x] GM 指令 RPC：`gm.narrate` / `gm.secret` / `gm.scene` / `gm.award`（仅 host token）
 - [x] 客户端 GM 控制台：旁白、私发、场景推进、发奖励
@@ -76,7 +79,7 @@ M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI 
 
 **验收**：单测 70 项全绿；房间 E2E 28 项全过；AI GM 假 Agent E2E 全过。详见 `docs/milestones/M4.md`。
 
-## M5 — 局域网验收 + 发布 🔶 安装包就绪 2026-11-13
+## M5 — 局域网验收 + 发布 ✅ 安装包与发布材料就绪 2026-11-13（历史记录；局域网双机与 npm 发布转用户执行）
 
 - [x] 本地 `.tgz` 安装包脚本（`pnpm pack:plugin` → `dist/dsh-trpg-table-0.0.1.tgz`，51 KB）
 - [x] 玩家手册 / GM 手册 / 局域网验收清单（`docs/PLAYER-GUIDE.md`、`docs/GM-GUIDE.md`、`docs/LAN-ACCEPTANCE.md`）
@@ -111,11 +114,11 @@ M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI 
 
 **关键约束（本机实测）**：只有**正在被 DSH 页面驱动（live）**的会话才能完成模型请求；插件新建/恢复的会话一律 `DeepSeek Messages transport failed [TRANSPORT]`。所以牌桌必须绑定房主已打开的会话；未打开时 `room.bind` 回可读错误（「这个会话当前没有活动的 AI…请先打开该会话再开团」）。
 
-**已知缺口**：1) 插件输入框随 v3 删除后，远端玩家的行动入口尚未接上（`room.say` 目前由探针/回归脚本调用）——「玩家在自己原生会话里写行动 → 转发到房间」随 M7 玩家镜像一并收口；2) tab 已打开时再点对话头部按钮或空态页入口会重开页签（短暂空白 + 右栏宽度回默认，不产生重复页签），待做幂等打开；3) 重载后 localStorage 残留旧房 token 会红字提示「无法恢复房间：令牌无效或已失效」，应改为静默清理；4) 空态入口挂在 `conversation.header.leading`（root 作用域 single slot），将来若有其他插件占用同一 slot 会冲突，需协调挂载点。M6 的玩家行动注入验证走房主侧会话。
+**已知缺口（M6 时记录，后续状态见括号）**：1) 插件输入框随 v3 删除后，远端玩家的行动入口尚未接上（`room.say` 目前由探针/回归脚本调用）——「玩家在自己原生会话里写行动 → 转发到房间」原计划随 M7 玩家镜像收口；**实际 M7 以只读镜像交付，行动转发入口仍未接上（现行限制见 [ACCEPTANCE.md](./ACCEPTANCE.md) §3 第 1 条）**；2) tab 已打开时再点对话头部按钮或空态页入口会重开页签（短暂空白 + 右栏宽度回默认，不产生重复页签），待做幂等打开；3) 重载后 localStorage 残留旧房 token 会红字提示「无法恢复房间：令牌无效或已失效」，应改为静默清理；4) 空态入口挂在 `conversation.header.leading`（root 作用域 single slot），将来若有其他插件占用同一 slot 会冲突，需协调挂载点。M6 的玩家行动注入验证走房主侧会话。
 
 **验收**：本机 DSH 桌面端实机验收通过（2026-11-16）：主区域仍是 DSH 原生对话；对话头部入口与空态页左上入口均可打开右侧栏「跑团桌」页签；320/360px 栏宽布局正常；建房自动绑定会话，结束房间=关房并解绑。单测 87 passed / 0 failed、`node scripts/build.mjs` 构建通过；细节与截图清单见 `docs/milestones/M6.md`。局域网双机（host + 另 1–3 台真机）验收待执行。
 
-## M7 — 玩家侧对话镜像 🔬 方案已调研 · 待实机验证 2026-11-16
+## M7 — 玩家侧对话镜像 ✅ 完成（P1 镜像）2026-11-17（1092 时验收）
 
 **目标**：玩家用自己 DSH 的原生会话看整局对话（原生气泡/工具卡/轮次），不跑模型、不配 key，插件不自绘聊天。
 
@@ -125,49 +128,49 @@ M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI 
 - **P0 兜底（6–10h）**：右栏只读 transcript，复用现有 `/trpg/events` SSE，不写会话、不进原生聊天流。
 - **明确不可行**：插件写自定义事件类型（`append` 不带 `ignorable`，重开整份会话不可读）、玩家端跑模型（无 key，违背产品决策）、Live Share（需独立服务器，viewer 是浏览器页不是玩家本机 DSH）。
 
-**待实机验证（3 项，调研未跑运行时）**：
+**3 项运行时验证（调研时未跑；M7 真机验收已确认全部通过，此处保留为历史记录）**：
 
 1. 玩家端 DSH **无模型 key** 时，打开插件创建的会话（`follow activate=true`）是否安静通过，会否弹 `api-session/error`；
 2. 复制 host 的 `assistant/message` 时 `message.source`（host 的 provider/model 元数据）在玩家端渲染是否正常（预期只影响「请求详情」展示）；
 3. `tool/result` 的 meta 卡（掷骰/战斗卡）在玩家端是否原样渲染（依赖对应 tool 的 presentation 插件在玩家端也启用）。
 
-**验收**：玩家本机出现「【牌桌】…」镜像会话，原生渲染整局且全过程无模型请求、不消耗 key；或按 P0 先上线只读 transcript。
+**验收**：✅ P1 已达成（2026-11-17，1092 时验收）——玩家本机出现「跑团桌：<房名>」镜像会话，DSH 原生渲染整局（原生气泡/工具卡），全程无模型请求、不消耗 key；证据与截图清单见 [ACCEPTANCE.md](./ACCEPTANCE.md) §1（`.tmp/verify7/00–44`，gitignored）。P0 只读 transcript 未采用。
 
-## M8 — 内容工坊（统一内容模型）✅ 决策已定 · M8.1 ✅ · M8.2 ✅ · M8.4 ✅ · M8.3 顺延 M9 后（工坊页随 M9.6a 落地） · M8.5 a ✅ · b ⬜ 2026-11-16
+## M8 — 内容工坊（统一内容模型）✅ 完成 2026-11-17（M8.1/8.2/8.4 ✅ · M8.3 ✅ 随 M9.6a/9.6b · M8.5a ✅ · M8.5b 分享/导入 UI ✅）
 
 **目标**：模组/世界书/角色卡统一为内容包（Content Pack）：一套 schema 制作、校验、导入导出、分享；制作/分发单元是 `.trpgpack`（**ZIP** 容器：`pack.json` + 可选 `assets/`），房间只引用 `{packId, moduleId}`，GM 按需消费模组数据。4 条分叉已于 2026-11-16 定稿（编辑器=主区域独立页+右栏轻量入口；包=zip；卡=双轨；先地基后 UI），数据形状、zip 结构与校验约定见 [`CONTENT-MODEL.md`](./CONTENT-MODEL.md)（§2、§8）。
 
 - [x] **M8.1 地基（无 UI）✅ 2026-11-16**：统一 pack/card/lorebook/module schema + `validatePack()`/`migratePack()`；内置包 `core-guimuya` 迁移（4 张预制卡 + 10 条世界书）；`.trpgpack` zip 编解码（`node:zlib` 零依赖，stored+deflate、大小上限/路径安全/CRC、时间戳固定可复现）；导入导出/校验 CLI `scripts/content-pack.mjs`（`pack-check.mjs` 兼容别名，根 `package.json` 加 `content:pack`）；引用完整性校验（`loreIds/npcIds/encounterIds/rewardIds/startSceneId` + assets）；修复已知数据 bug（模组 `scene.lore` 值缺 `entry_` 前缀、与世界书 entry id 不匹配）；保留 `GUIMUYA_*`/`PRESET_CARDS` 兼容导出；编解码/恶意 zip/迁移单测。**结果**：实现文件 `packages/content/src/{pack,zip,pack-zip,pack-io}.ts` + `packs/core-guimuya.ts`（`CORE_GUIMUYA_PACK` / `CORE_PACKS`）；单测 114 passed（新增 `pack.test.ts` 14 + `zip.test.ts` 13），typecheck 0 错误，构建通过。
 - [x] **M8.2 房间接包 ✅ 2026-11-16**：`room.create` 带 `{packId, moduleId}`、建房选模组、房间记录 `{packVersion, moduleId, contentHash}` 快照引用、pack registry（内置 + 数据目录 `.trpgpack`）与玩家只读拉取、缺包/版本变更降级续团，去 host/client 硬编码。**结果**：`host/pack-registry.ts`（内置 `CORE_PACKS` + 数据目录 `<profile-data>/<profile>/dsh-trpg-table/content/packs/*.trpgpack`，坏包跳过、重复 `packId` 内置优先、可重扫）；协议 `room.create` 可选 `packId/moduleId`、`RoomView.content`/`RoomView.scenes`、RPC `content.list`（脱敏目录，无 token）与 `content.reload`（loopback + host token）；房间只存内容引用 + 场景摘要，包缺失/版本或 hash 漂移 → `degraded` + 警告、GM 回退内置包，重扫后恢复；host 去掉 `GUIMUYA_*` 硬编码，GM 提示/工具按房间解析；客户端大厅「内容包 / 模组」选择（失败静默降级内置包）、建房传内容引用、房间卡展示包/模组/版本 + 降级红色告警、GM 场景下拉改吃 `room.scenes`。单测 **114 → 134**（protocol 2、rooms 9、registry 6、room-http 3），typecheck 0 错误，构建通过；**本机真机验收通过**（大厅选择 / 建房内容展示 / 场景下拉 3 场 / 关房回大厅，截图 `.tmp/verify3/`，gitignored）。
-- [ ] **M8.3 内容工坊 UI（排在 M8.1、M8.2 之后）**：主区域独立工具页（角色卡编辑器 / 世界书编辑器 / 模组编辑器三 tab，含卡只读面板）+ 右栏轻量入口；pack 选择、`.trpgpack` 导入导出、校验结果、预览。**顺延至 M9 规则层定稿后**：规则数据/公式/脚本编辑器依赖 M9.1 schema；只读卡面拆为 M8.3a 可提前，完整工坊并到 M9.6（原 M9.5，依赖见 [RULES-MODEL.md](./RULES-MODEL.md) §12/§13）
+- [x] **M8.3 内容工坊 UI ✅ 完成（2026-11-17；工坊页随 M9.6a，编辑器随 M9.6b）**：主区域独立工具页 + 右栏轻量入口；三个编辑器 tab（角色卡 / 世界书 / 模组）与规则编辑器、pack 选择、`.trpgpack` 导入导出、校验结果、预览全部落地（原计划三 tab 扩为 8 tab：概览 / 角色卡 / 世界书 / 模组 / 规则 / 图标 / 地图 / 分享）；规则数据/公式/脚本编辑与地图结构/校准见 M9.6a/M9.6b（[RULES-MODEL.md](./RULES-MODEL.md) §12/§13）
 - [x] **M8.4 GM 检索注入 + 模组数据消费 ✅ 完成 2026-11-16**：世界书改为**检索式注入**（`selectLoreEntries`：alwaysOn / 场景关联 / 本场已揭示 / 关键词命中，字符预算默认 **6000**；未选中的 GM 秘密不注入，GM 提示含 `public`+`gm`、玩家可见只取 `public`（`player:<id>` 条目不进 GM 提示））+ **模组数据消费**（当前场景 beats/checks/encounters/rewards 与遭遇级 `maxRounds`/`battleMapId` 进 GM 提示；新增 `trpg_scene` 查看/推进场景、`trpg_reward` 按奖励下标发奖）；**规则房间**注册通用工具 `trpg_use_action` / `trpg_move` / `trpg_combat` + 泛化 `trpg_roll_check`（走 RoomService 运行时命令，数值只取 `rolls`/`trace`），旧工具名在规则房间保留为**别名**，**无规则房间**保留旧工具与旧引擎检定。**结果**：单测 **762 → 808**，typecheck 0、构建通过（commit 01c8a3e）。
-- [x] **M8.5a DiceFrame `schema_version: 2` 卡适配器 ✅ 完成 2026-11-16**：`adaptDiceFrameCard` / `isDiceFrameCard` / `diceFrameToRulesCardJson`（DiceFrame 卡 → `trpg.card/1` 与规则包）——属性/技能/资源/装备/叙事字段中英文别名映射、未映射字段给 warning、`cardId` 稳定派生、个人世界书片段以 `personalLore` 另导；纯 TS 适配器（无 `node:` 依赖）。**结果**：47 用例；全量单测 **957 → 1004**，typecheck 0、构建通过（commit ec9fd72）。**剩余（b）**：卡库导入路径的 UI 接入尚待做。
-- [ ] **M8.5b 分享与内容作者文档 ⬜ 待做（分享 UI 已在 M9.6a 部分实现）**：`.trpgpack` 导出/导入与同 `packId` 冲突处理已随 M9.6a 工坊「分享」页落地（`reject`/`overwrite`/`rename`；内置包只读需「复制为可编辑副本」）；**剩余**：DiceFrame 卡导入 UI（卡库导入路径）、内容作者文档（zip 目录结构与用编码器打包说明）、导出包换机器可玩的验收。
+- [x] **M8.5a DiceFrame `schema_version: 2` 卡适配器 ✅ 完成 2026-11-16**：`adaptDiceFrameCard` / `isDiceFrameCard` / `diceFrameToRulesCardJson`（DiceFrame 卡 → `trpg.card/1` 与规则包）——属性/技能/资源/装备/叙事字段中英文别名映射、未映射字段给 warning、`cardId` 稳定派生、个人世界书片段以 `personalLore` 另导；纯 TS 适配器（无 `node:` 依赖）。**结果**：47 用例；全量单测 **957 → 1004**，typecheck 0、构建通过（commit ec9fd72）。**UI 接入已随 M9.6b 完成**（角色卡 tab 的 DiceFrame 粘贴/文件导入 → 适配 → 本地卡库 + 未映射警告）。
+- [x] **M8.5b 分享与内容作者文档 ✅ UI 部分完成（2026-11-17，标注）**：`.trpgpack` 导出/导入与同 `packId` 冲突处理已随 M9.6a 工坊「分享」页落地（`reject`/`overwrite`/`rename`；内置包只读需「复制为可编辑副本」）；**DiceFrame 卡导入 UI 已随 M9.6b 落地**；内容作者文档（zip 目录结构与编码器用法）见 [CONTENT-MODEL.md](./CONTENT-MODEL.md) §2/§6 与 `pnpm content:pack`；**导出包换机器可玩的验收并入局域网双机验收（用户执行）**。
 
-**依赖**：先 M8.1 地基（zip 编解码/校验/迁移）→ M8.2 房间接包，M8.3 UI 排在这两步之后（避免 schema 返工；现因规则层定稿**顺延至 M9 之后**，见下 M9）；M8.4 依赖 M8.1/M8.2，M8.5 依赖 M8.1/M8.3。M7 玩家侧镜像可并行，交叉点只在 GM 提示组装（M8.4）与玩家投影。
+**依赖（历史记录）**：先 M8.1 地基（zip 编解码/校验/迁移）→ M8.2 房间接包，M8.3 UI 排在这两步之后（避免 schema 返工；当时因规则层定稿**顺延至 M9 之后**，后随 M9.6a/9.6b 落地）；M8.4 依赖 M8.1/M8.2，M8.5 依赖 M8.1/M8.3。M7 玩家侧镜像可并行，交叉点只在 GM 提示组装（M8.4）与玩家投影。
 
-M8.3 内容工坊 UI 依赖 M9 规则层定稿（见 [RULES-MODEL.md](./RULES-MODEL.md) §12/§13）。
+M8.3 内容工坊 UI 依赖 M9 规则层定稿（见 [RULES-MODEL.md](./RULES-MODEL.md) §12/§13）——已随 M9.6a/9.6b 落地（2026-11-17）。
 
-## M9 — 规则运行时（可定义规则）🧭 M9.1 ✅ · M9.2 ✅ · M9.4 ✅ · M9.5 🔶（a–e ✅ · d 部分） · M9.6a ✅ 2026-11-16
+## M9 — 规则运行时（可定义规则）✅ 完成 2026-11-17（M9.1–M9.4 ✅ · M9.5 a–e ✅ · M9.6a/9.6b ✅）
 
 **目标**：引擎不认识任何具体规则。规则 = **数据**（JSON 描述有什么）+ **受限公式**（简单算法）+ **核心 8 + 场地/时间/上限 9 的固定 JS 钩子**（复杂逻辑，全可选）；内置示例规则包 dnd5e-lite 用新模型重写；客户端只渲染主机投影（零脚本执行）。规则模型四条结论已于 2026-11-16 拍板，完整设计、钩子/公式/数据形状与验收标准见 [RULES-MODEL.md](./RULES-MODEL.md)（§0、§3、§6、§13）。M9 内新增 **M9.5 资产、图标与地图生成管线**（人物/装备/背包三屏图标与立绘 + AI 地图生成工作台，见 [UI-CONTRACT.md](./UI-CONTRACT.md) §10），原「M9.5 规则编辑器」顺延为 **M9.6**。第十轮（2026-11-16，DECISIONS #28）补充的**战斗空间与回合模型**——zone-grid 双层地图、只做回合计数、行动经济数据化、GM 工具泛化、AI 地图生成——并入 M9.1/M9.4/M9.5e/M9.6（见 [RULES-MODEL.md](./RULES-MODEL.md) §3/§7.1、[UI-CONTRACT.md](./UI-CONTRACT.md) §5.4/§5.5/§10）。
 
 - **M9.1 规则 schema + 公式编译/求值 + 卡实例/迁移 + 投影 DTO（纯库 + 测试）✅ 完成 2026-11-16**：新包 `@dsh-trpg/rules` 骨架（types、`validateRulePack()` 含 `space` zone-grid / `time` round / `turn` 行动经济段、公式 parser/compiler/evaluator、卡实例与迁移、`SheetView`/`CombatView`/`WorldMapView` 投影 DTO 形状），不接 host。验收：公式 40+ 例单测（含编译期/运行期错误）、schema 校验（含 zone-grid/round/turn 各 1 组正反例）、旧卡迁移；typecheck 0、不新增运行时依赖。**结果**：`packages/rules`：schema 校验 + 受限公式编译求值 + 卡实例/迁移 + 投影 DTO；新增 172 用例（总 306 全过），typecheck 0。
 - **M9.2 核心运行时 + 脚本沙箱 ✅ 完成 2026-11-16**：种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `node:vm` 沙箱 + 核心 8 + 场地/时间/上限 9 钩子调度 + 超时/sha256/错误事件。验收：核心 8 + 场地/时间/上限 9 各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界。**结果**：单测 **306 → 457**（新增 151），typecheck 0、构建通过（commit ed4b707）。
-- **M9.3 dnd5e-lite 示例规则包 + 迁移**：`rules.json` + 4 个脚本、`core-guimuya` pack 带 rules 段（含 `space`/`time`/`turn` 数据）、旧卡迁移器、与旧 engine 对照测试。验收：CLI 用「鬼木崖·异光」跑完一幕，骰面/命中/伤害/AC/先攻逐项与旧实现一致；单测迁移后全绿（134 → 新增规则测试）。
+- **M9.3 dnd5e-lite 示例规则包 + 迁移 ✅ 完成 2026-11-16（commit cba7850）**：`rules.json` + 4 个脚本、`core-guimuya` pack 带 rules 段（含 `space`/`time`/`turn` 数据）、旧卡迁移器、与旧 engine 对照测试。验收：CLI 用「鬼木崖·异光」跑完一幕，骰面/命中/伤害/AC/先攻逐项与旧实现一致；单测迁移后全绿（134 → 新增规则测试）。
 - **M9.4 协议/房间/客户端卡面与地图视图（主机权威投影）✅ 完成 2026-11-16（a 后端 + b 客户端）**：`sheet.view`/`combat.view`/`worldMap.view` + `sheet`/`rules` 事件 + 重连重算；客户端只读卡面（分组/资源条/装备槽/可用动作/状态）+ **世界地图页（主区域独立页：插画底图 + zone 热点/连线 + 当前位置）** + **战棋战斗视图（底图 + 半透明网格 + 地形/障碍图标 + token + 回合/行动经济条）**。验收：双实例落座→检定→攻击→移动→断线重连后投影一致；世界地图与战棋视图正常；玩家端构建产物不含规则执行代码；320–420px 栏宽可读。**结果**：M9.4a 后端（commit 09ad0bc）投影 DTO + **12 个 RPC** + rooms 接规则运行时，单测 **702 → 762**；M9.4b 客户端（commit 39811bf）右栏「跑团桌」tab 内新增**「人物/装备/背包」紧凑子页签**（`room.rules` 存在时），主区域 **keyed panel** 提供人物详情/装备/背包/世界地图/战棋（`cols=0` 时退化为 theatre-of-mind），对接 sheet/combat/worldmap RPC 与 `sheet|combat|rules/error` SSE，图标暂用**程序化几何徽记**（真实资产待 M9.5d）。真机验收截图 `.tmp/verify4/01–10`（右栏三屏 + 主区域详情/地图/战棋，gitignored）；typecheck 0、构建通过。
-- **M9.5 资产、图标与地图生成管线（新增，UI-CONTRACT §10）🔶 a–e ✅ · d 部分**：人物/装备/背包三屏的图标与立绘体系 + 地图生成工作台。
+- **M9.5 资产、图标与地图生成管线（新增，UI-CONTRACT §10）✅ 完成 2026-11-17（a–e ✅ · d 已验）**：人物/装备/背包三屏的图标与立绘体系 + 地图生成工作台。
   - **M9.5a 地基 ✅ 完成 2026-11-16**：`@dsh-trpg/assets` 纯 JS 归一化（PNG/SVG、零原生依赖）+ SVG 白名单重建式净化 + OpenAI 兼容客户端（chat/images）+ `assets/manifest.json`（`trpg.assets/1`）与 `validatePack()` 资产校验 + `iconRef/AssetRef` DTO。**结果**：新增 **182 用例**（总 702），typecheck 0，assets 不进 client bundle（commit 0009086）。
   - **M9.5b 资产清单、上限与只读端点 ✅ 完成 2026-11-16**：zip 上限上调为整包/解压总量 **64 MiB**、条目 **520**（单条目仍 8 MiB、`pack.json` 仍 4 MiB）；`assets/manifest.json` **全量校验**（结构/尺寸/体积/`bytes`/`sha256`/引用/孤立 warning）+ 注册表加载时缓存数据包资产；host 只读端点 `GET /trpg/assets/<packId>/<path>`（png/svg、ETag/immutable、`If-None-Match`→304、路径穿越 403、缺资产 404）。**结果**：单测 **808 → 828**（commit 2dd2804，与 c 同批）。工坊「图标」三 tab 的页面壳与 UI 已随 M9.6a 工坊页落地（见 UI-CONTRACT §7/§10）。
   - **M9.5c 开发用 ComfyUI→OpenAI shim ✅ 完成 2026-11-16**：`scripts/dev/comfyui-openai-shim.mjs` + `shim-core.mjs`（`--fake` / `--comfyui`；b64 返回、seed 映射、轮询与超时），放 `scripts/dev/`、**不打包**（`pnpm pack:plugin` 产物不含 shim），仅本地验证用。**结果**：shim 单测 **12 用例**全过。
-  - **M9.5d 玩家立绘/变体/精灵帧表 + 落座资产上传 🔶 部分完成 2026-11-16（d-a 后端 + d-b 客户端已落地）**：只传展示用资产（≤8 文件 / ≤8 MiB，按 sha256 去重），本地私卡资产进 IndexedDB，`GET /trpg/room-assets/...` 与三屏接真图；**剩余**：双实例落座后队友能看到立绘的真机验收。
+  - **M9.5d 玩家立绘/变体/精灵帧表 + 落座资产上传 ✅ 完成 2026-11-17（d-a 后端 + d-b 客户端 + 双实例验收）**：只传展示用资产（≤8 文件 / ≤8 MiB，按 sha256 去重），本地私卡资产进 IndexedDB，`GET /trpg/room-assets/...` 与三屏接真图；双实例落座后队友能看到立绘已在 1092 时验收通过。
   - **M9.5e 地图与战棋生成工作台 ✅ 完成 2026-11-16**：`map.generate` / `world.generate`（AI 文本生成结构 → **地图结构校验器**硬闸 → 失败重试 **≤2**（共 3 轮）→ **程序化确定性兜底** `method=procedural`；底图走生图服务并归一化，战斗 **1024×768** / 世界 **2048×1536**，失败只进 warnings 不阻断结构）+ 内容工坊后端 RPC `pack.detail` / `pack.update` / `pack.export` / `pack.import` / `pack.assetPut` / `pack.assetDelete`（**仅 loopback + host token**；`validatePack()` 后「临时文件 + rename」原子写回 `.trpgpack`，import 支持 `reject`/`overwrite`/`rename`，assetPut 归一化 + `assets/manifest.json` 原子更新）。结构落盘路径：战斗图写 `pack.rules.space.battleMaps[]`，世界图写 `pack.rules.space.world` + `pack.rules.space.zones[]`（经 `pack.update`）；底图走 `pack.assetPut`（`target=battle-map` / `world-map`），图标工作台 UI 与「地图」tab 随 M9.6a 落地。**结果**：host `studio` 模块（`map-generator`/`pack-workspace`/`background`）+ room-http 接线，单测 **882 → 957**（studio 用例 10+30+22+13），typecheck 0、构建通过、client 无 studio 泄漏（commit 848ea67）。**验收**：校验器拒绝越界/行宽/未知字符/出生点重叠·不可站立/不连通并定位到格（或出生点坐标）；连续 3 次 AI 失败 → 程序化结构仍合法可玩；世界图热点越界/重叠/连线双向校验；离线（无 AI）生成可保存。
-  - **验收**：M9.5a 归一化与净化单测（拒 16-bit/交错/JPEG/WebP、恶意 SVG 全拒）+ mock OpenAI 跑通生图链路；M9.5b/c 上限/manifest/端点用例 + shim 12 用例；M9.5e 地图校验器硬闸（越界/行宽/未知字符/出生点重叠·不可站立/不连通/热点越界·重叠）与「连续 3 次 AI 不可用 → 程序化兜底结构合法」用例；M9.6a 真机截图 `.tmp/verify6/01–06`（工坊壳、图标三路径、procedural 地图、世界地图保存、导出/导入冲突/复制内置包为副本）；`pnpm pack:plugin` 产物不含 shim（✅ 本批已验）。**待验**：双实例落座后队友能看到玩家立绘（M9.5d）；导出 `.trpgpack` 后另一台机器可见并可玩（随 M8.5b / 局域网验收）。
-- **M9.6 规则编辑器 + 地图工坊（M8.3 顺延至此；原编号 M9.5）🔶 a ✅ · b ⬜**：**M9.6a 内容工坊主区域页 ✅ 完成 2026-11-16**：主区域 keyed 工坊页 **8 个 tab（概览 / 角色卡 / 世界书 / 模组 / 规则 / 图标 / 地图 / 分享）**，左栏内容包列表、只读 tab 列表 + 分页折叠；右栏新增 host 专属「内容工坊」入口。图标工作台三路径（本地导入 / AI SVG / AI 生图，物品库批量 **≤6**）→ `pack.assetPut`；地图工作室（`map.generate` / `world.generate` 预览结构网格与热点框 → 写入 `rules.space.battleMaps` / `zones` / `world` → `pack.update`；无 AI 走 procedural）；分享 tab：导出下载 `.trpgpack`、导入冲突策略（`reject`/`overwrite`/`rename`）、内置包「复制为可编辑副本」；大厅新增房主本机恢复。真机截图 `.tmp/verify6/01–06`（gitignored）；typecheck 0、单测 957、构建通过（commit cc1debf）。**剩余（b）**：规则编辑器（schema 表单 + 代码编辑器 + 沙箱试跑 + 断言面板 + 模板库）与地图结构手改 / `calibration` 对齐编辑。验收：作者不改源码完成一次规则包修改并通过规则测试台；不改源码调整一张战棋图或世界地图热点并通过校验；导出 `.trpgpack` 后另一台机器可玩。
+  - **验收**：M9.5a 归一化与净化单测（拒 16-bit/交错/JPEG/WebP、恶意 SVG 全拒）+ mock OpenAI 跑通生图链路；M9.5b/c 上限/manifest/端点用例 + shim 12 用例；M9.5e 地图校验器硬闸（越界/行宽/未知字符/出生点重叠·不可站立/不连通/热点越界·重叠）与「连续 3 次 AI 不可用 → 程序化兜底结构合法」用例；M9.6a 真机截图 `.tmp/verify6/01–06`（工坊壳、图标三路径、procedural 地图、世界地图保存、导出/导入冲突/复制内置包为副本）；`pnpm pack:plugin` 产物不含 shim（✅ 已验）。**收尾**：双实例立绘互见已验（1092 时）；导出 `.trpgpack` 换机器可玩并入局域网双机验收（用户执行，见 ACCEPTANCE §2）。
+- **M9.6 规则编辑器 + 地图工坊（M8.3 顺延至此；原编号 M9.5）✅ 完成 2026-11-17（a ✅ 2026-11-16 · b ✅ 2026-11-17）**：**M9.6a 内容工坊主区域页 ✅ 完成 2026-11-16**：主区域 keyed 工坊页 **8 个 tab（概览 / 角色卡 / 世界书 / 模组 / 规则 / 图标 / 地图 / 分享）**，左栏内容包列表、只读 tab 列表 + 分页折叠；右栏新增 host 专属「内容工坊」入口。图标工作台三路径（本地导入 / AI SVG / AI 生图，物品库批量 **≤6**）→ `pack.assetPut`；地图工作室（`map.generate` / `world.generate` 预览结构网格与热点框 → 写入 `rules.space.battleMaps` / `zones` / `world` → `pack.update`；无 AI 走 procedural）；分享 tab：导出下载 `.trpgpack`、导入冲突策略（`reject`/`overwrite`/`rename`）、内置包「复制为可编辑副本」；大厅新增房主本机恢复。真机截图 `.tmp/verify6/01–06`（gitignored）；typecheck 0、单测 957、构建通过（commit cc1debf）。**M9.6b ✅ 完成 2026-11-17**：四类编辑器——世界书（条目表单 / Markdown 预览 / 行内校验）、模组（场景/NPC/遭遇字段）、规则（表格增删改 + 脚本只读）、角色卡（pack 卡 + 本地卡新建编辑）；**规则测试台** `rules.validate`（草稿校验 + 脚本 sha256）与 `rules.test`（临时运行时跑检定/动作/派生，1–12 条请求，返回 `rolls`/`trace` 与中文错误，不落盘）；**DiceFrame 卡导入 UI**（检测 `schema_version: 2` → 适配器 → 本地卡库 + 未映射警告，personalLore 另导）；**地图校准**（`cellPx`/`offsetX`/`offsetY`/`rotation` → `space.battleMaps[].calibration`，`rotation` 为显示层扩展）；真机截图 `.tmp/verify8/01–06`；单测 **1092 → 1130**、typecheck 0、构建通过（commit dad882d）。验收：作者不改源码完成一次规则包修改并通过规则测试台（✅）；不改源码调整一张战棋图/世界地图热点并通过校验（✅）；导出 `.trpgpack` 后另一台机器可玩（并入局域网双机验收，用户执行）。
 
 **依赖与并行**：**M7 玩家侧镜像可并行**（改 client 镜像/会话事件，与规则包文件面不重叠；交叉点只有投影字段与事件类型）；**M8.3 UI 依赖 M9.1 + M9.4**（schema 与投影定稿后再开工）；**M8.3a 只读卡面可提前**（依赖 M8.2 + M9.1 的卡 DTO，让现有团先看到新卡面）；**M9.5 依赖 M9.1/M9.4 的投影 DTO 与 M8.1 的 zip/资产校验**（三屏骨架与地图视图壳随 M9.4 先落地，M9.5d 接真图、**M9.5e 已接真底图**；M9.5e 另依赖 M9.1 的 `space` schema + M9.5a 的资产生图/归一化）；**M9.6 依赖 M9.1/M9.4 + M9.5b 的资产清单/只读端点 + M9.5e 的地图校验器**（工坊页壳含图标三 tab **已随 M9.6a 落地**）；M8.4/M8.5 不受阻，可穿插。
 
-**状态**：🧭 M9.1 ✅ 完成（2026-11-16，`@dsh-trpg/rules`）· M9.2 ✅ · M9.4 ✅ · M9.5 🔶（a–e ✅、d 部分——双实例立绘验收待跑）· M9.6a ✅（工坊主区域页）· M9.6b 待做（规则编辑器 / 地图结构编辑）；规则模型四条结论与第十轮「战斗空间与回合模型」（DECISIONS #28）已定稿，按 RULES-MODEL §13 排期推进。
+**状态**：✅ **M9 全部阶段完成（2026-11-17）**：M9.1 ✅（2026-11-16，`@dsh-trpg/rules`）· M9.2 ✅ · M9.3 ✅ · M9.4 ✅ · M9.5 a–e ✅（d 已验）· M9.6a ✅（工坊主区域页）· M9.6b ✅（编辑器 / 规则测试台 / DiceFrame 导入 / 地图校准）；全量单测 **1130**、typecheck 0、构建通过。规则模型四条结论与第十轮「战斗空间与回合模型」（DECISIONS #28）均已定稿并落地；0.1.0 发布口径与剩余用户执行项见 DECISIONS #29。
 
 ## 检查点汇报模板
 
