@@ -129,6 +129,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   const service = new RoomService({
     maxRooms: config.maxRooms ?? 8,
     content: registry,
+    // M9.4：内容包带 rules 段时房间自动建规则运行时（包内脚本源码由注册表解析）。
+    rules: registry,
     onRoomCreated: (roomId, sessionId) => {
       // 会话原生牌桌：绑定会话后不再起 subagent GM（AI 就是会话 Agent）。
       if (sessionId && tableBridge) {

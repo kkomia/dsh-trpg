@@ -7,6 +7,10 @@
  * - 事件在「广播前」按 principal 投影，私密信息不会发到别人手上；
  * - GM（房主）看到全部事件，包括私骰与悄悄话；
  * - 只有房主能 kick/lock；邀请码只回给房主。
+ *
+ * M9.4：房间可挂一个规则运行时（`RoomRulesRoom`，内容包带 `rules` 段时启用）。
+ * 协议层（room-http）只拿到投影 DTO 与中文错误，拿不到 RT 对象；host 侧 GM 编排
+ * 走 `runtimeOf(roomId)`。无 rules 的房间保持 M2–M8 的旧行为。
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
@@ -24,11 +28,32 @@ import {
   DEFAULT_CONTENT_MODULE_ID,
   DEFAULT_CONTENT_PACK_ID,
   PROTOCOL_VERSION,
+  validateCombatEnd,
+  validateCombatEndTurn,
+  validateCombatMove,
+  validateCombatRollCheck,
+  validateCombatStart,
+  validateCombatUseAction,
+  validateCombatView,
   validateCreateRoom,
   validateJoin,
   validateRoll,
   validateSay,
+  validateSheetEquip,
+  validateSheetGet,
+  validateSheetUnequip,
+  validateSheetUseItem,
+  validateWorldMapGet,
+  type ActionOutcomeView,
   type AlertPayload,
+  type CombatEndResult,
+  type CombatEndTurnResult,
+  type CombatMoveResult,
+  type CombatRollCheckResult,
+  type CombatStartResult,
+  type CombatUpdatePayload,
+  type CombatUseActionResult,
+  type CombatViewResult,
   type CreateRoomParams,
   type CreateRoomResult,
   type DicePayload,
@@ -43,29 +68,91 @@ import {
   type PlayerId,
   type RoomListResult,
   type RoomPhase,
+  type RoomRulesView,
   type RoomSceneSummary,
   type RoomStateResult,
   type RoomView,
   type RollParams,
   type RollResult,
-  type RpcError,
+  type RulesErrorPayload,
   type SayParams,
   type SayResult,
   type ScenePayload,
   type AwardPayload,
   type Seq,
+  type SheetCommandResult,
+  type SheetGetResult,
+  type SheetUpdatePayload,
+  type WorldMapGetResult,
 } from '@dsh-trpg/protocol';
+import type { ActorView, EquipmentInstanceDef, RuleRuntime, RuntimeEvent } from '@dsh-trpg/rules';
+import { RoomError, roomErrorFromRule } from './errors.ts';
+import {
+  RoomRulesRoom,
+  deriveRulesSeed,
+  type RoomRulesInput,
+  type RoomRulesResolver,
+} from './rules-host.ts';
+import {
+  actionOutcomeOf,
+  buildCombatMoveResult,
+  buildCombatStartResult,
+  buildCombatView,
+  buildInventoryView,
+  buildSheetResult,
+  buildSheetView,
+  buildWorldMapView,
+  checkViewOf,
+  findItemDef,
+  planEquip,
+  planUnequip,
+  synthesizeEnemyCard,
+  type RuleViewOptions,
+} from './rules-view.ts';
+
+export { RoomError, roomErrorFromRule } from './errors.ts';
+export type {
+  RoomRulePosition,
+  RoomRuleScript,
+  RoomRulesInput,
+  RoomRulesResolver,
+  RoomRuleSeatInput,
+  RoomRuleSeatResult,
+} from './rules-host.ts';
+export { deriveRulesSeed, hashRules, RoomRulesRoom, toCardInstance } from './rules-host.ts';
+
 
 const INVITE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const MAX_PLAYERS = 8;
 
-export class RoomError extends Error {
-  readonly code: RpcError['code'];
-  constructor(code: RpcError['code'], message: string) {
-    super(message);
-    this.name = 'RoomError';
-    this.code = code;
-  }
+/** 规则运行时事件 → SSE 的映射（turn/damage 等战斗相关事件统一推 `combat/update`）。 */
+const COMBAT_BROADCAST_EVENTS: ReadonlySet<string> = new Set([
+  'turn/start',
+  'turn/end',
+  'round/start',
+  'round/end',
+  'round/limit',
+  'combat/start',
+  'combat/end',
+  'action/before',
+  'action/after',
+  'damage/after',
+  'move',
+  'death',
+  'status/tick',
+  'time/advance',
+  'zone/enter',
+  'zone/leave',
+  'loot',
+  'table/roll',
+  'level/up',
+]);
+
+/** 规则包不可用/启动失败时记的降级信息（写进 RoomView.rules 与快照）。 */
+interface RoomRulesDown {
+  view: RoomRulesView;
+  rulesHash?: string;
+  warnings: string[];
 }
 
 /** 房间引用的内容解析结果（由 host 的 pack registry 实现；rooms 包因此不依赖 @dsh-trpg/content）。 */
@@ -141,12 +228,26 @@ export interface RoomSnapshot {
     scene?: { sceneId: string; title?: string };
     /** 内容引用 + 派生场景快照（M8.2 起；旧快照缺省视为内置包默认模组）。 */
     content?: RoomSnapshotContent;
+    /**
+     * 规则引用 + 运行态快照（M9.4）：房间启用规则运行时才有。
+     * - `rulesId/rulesVersion/rulesHash/rulesSeed` 记复现环境（种子写死，续团不重新派发）；
+     * - `ruleState` = `RuleRuntime.exportState()`（纯 JSON），恢复时 `importState`；
+     * - `ruleBags` = host 侧背包（卸下的物品实例，key = actorId）。
+     */
+    rulesId?: string;
+    rulesVersion?: string;
+    rulesHash?: string;
+    rulesSeed?: number;
+    ruleState?: unknown;
+    ruleBags?: Record<string, EquipmentInstanceDef[]>;
     players: Array<{
       id: string;
       name: string;
       token: string;
       seat: 'gm' | 'player';
       character?: CharacterCard;
+      /** 座位上的规则卡原始数据（M9.4；旧卡或新卡实例）。 */
+      ruleCard?: unknown;
       joinedAt: number;
     }>;
     events: GameEvent[];
@@ -163,6 +264,11 @@ interface PlayerRecord {
   token: string;
   seat: 'gm' | 'player';
   character?: CharacterCard;
+  /**
+   * 座位上的规则卡原始数据（M9.4）：旧 engine 卡或新卡实例（`trpg.card/1`）。
+   * 房间层只用 `character` 做旧视图/GM 提示；规则运行时按 `ruleCard` 实例化。
+   */
+  ruleCard?: unknown;
   joinedAt: number;
   connections: number;
 }
@@ -219,6 +325,16 @@ export interface RoomServiceOptions {
   onChanged?: () => void;
   /** 内容解析器（host 注入 pack registry）；缺省时按内置包缺省引用记账、不校验存在性。 */
   content?: RoomContentResolver;
+  /**
+   * 规则解析器（host 注入 pack registry）：内容包带 `rules` 段时房间创建规则运行时。
+   * 缺省 = 不启用规则（旧行为：卡面/战斗命令返回中文错误，其余功能照常）。
+   */
+  rules?: RoomRulesResolver;
+  /**
+   * 规则种子派生盐（同一次 host 启动内固定；缺省每次构造随机）。
+   * 房间种子 = `deriveRulesSeed(roomId, seedSalt)`，派生结果写进快照，续团按快照恢复。
+   */
+  seedSalt?: string;
 }
 
 function randomToken(): string {
@@ -250,6 +366,12 @@ export class RoomService {
   private readonly onRoomClosed?: (roomId: string) => void;
   private readonly onChanged?: () => void;
   private readonly content?: RoomContentResolver;
+  private readonly rulesResolver?: RoomRulesResolver;
+  private readonly seedSalt: string;
+  /** 房间 → 规则运行时容器（内容包带 rules 时才建）。 */
+  private readonly ruleRooms = new Map<string, RoomRulesRoom>();
+  /** 房间 → 规则不可用/降级信息（规则包缺失、脚本加载失败、快照不兼容）。 */
+  private readonly ruleDown = new Map<string, RoomRulesDown>();
 
   constructor(options: RoomServiceOptions = {}) {
     this.maxRooms = options.maxRooms ?? 8;
@@ -260,6 +382,8 @@ export class RoomService {
     this.onRoomClosed = options.onRoomClosed;
     this.onChanged = options.onChanged;
     this.content = options.content;
+    this.rulesResolver = options.rules;
+    this.seedSalt = options.seedSalt ?? randomBytes(8).toString('hex');
   }
 
   // -------------------------------------------------------------------------
@@ -294,6 +418,8 @@ export class RoomService {
     };
     this.rooms.set(room.id, room);
     this.tokens.set(room.hostToken, { kind: 'host', roomId: room.id });
+    // 内容包带 rules 段 → 建规则运行时（失败只降级，不卡建房）；先于首帧 room 事件，视图里就带 rules。
+    this.createRulesForRoom(room);
     const event = this.emit(room, 'room', 'all', this.publicView(room));
     void event;
     if (content.degraded) {
@@ -350,13 +476,14 @@ export class RoomService {
       joinedAt: this.now(),
       connections: 0,
     };
-    let character: CharacterCard | undefined;
     if (params.characterCard !== undefined) {
-      character = this.parseCard(params.characterCard);
-      player.character = character;
+      const seated = this.parseSeatCard(params.characterCard);
+      if (seated.character !== undefined) player.character = seated.character;
+      player.ruleCard = seated.ruleCard;
     }
     room.players.set(player.id, player);
     this.tokens.set(player.token, { kind: 'player', roomId: room.id, playerId: player.id });
+    if (player.ruleCard !== undefined) this.attachPlayerToRules(room, player);
     this.emit(room, 'alert', 'all', { level: 'info', text: `${player.name} 加入了房间` } satisfies AlertPayload);
     this.emit(room, 'room', 'all', this.publicView(room));
     return {
@@ -388,6 +515,7 @@ export class RoomService {
     if (!player) return { ok: true };
     room.players.delete(player.id);
     this.tokens.delete(player.token);
+    this.detachPlayerFromRules(room, player);
     this.emit(room, 'alert', 'all', { level: 'info', text: `${player.name} 离开了房间` } satisfies AlertPayload);
     this.emit(room, 'room', 'all', this.publicView(room));
     return { ok: true };
@@ -402,6 +530,7 @@ export class RoomService {
     if (!player) throw new RoomError('not-found', '找不到该玩家');
     room.players.delete(player.id);
     this.tokens.delete(player.token);
+    this.detachPlayerFromRules(room, player);
     this.emit(room, 'alert', 'gm', { level: 'info', text: `房主移除了 ${player.name}` } satisfies AlertPayload);
     this.emit(room, 'room', 'all', this.publicView(room));
     // 被踢玩家的连接收到最后一帧后关闭。
@@ -448,15 +577,20 @@ export class RoomService {
     const room = this.requireRoom(principal.roomId);
     const params = rawParams as { characterCard?: unknown };
     if (!params || params.characterCard === undefined) throw new RoomError('bad-request', '缺少角色卡');
-    const card = this.parseCard(params.characterCard);
+    const seated = this.parseSeatCard(params.characterCard);
+    const cardName = seated.character?.identity.name
+      ?? readRuleCardName(seated.ruleCard)
+      ?? '未命名角色';
     if (principal.kind === 'player') {
       const player = room.players.get(principal.playerId);
       if (!player) throw new RoomError('unauthorized', '你不在这个房间');
-      player.character = card;
+      if (seated.character !== undefined) player.character = seated.character;
+      player.ruleCard = seated.ruleCard;
       player.seat = 'player';
+      this.attachPlayerToRules(room, player);
       this.emit(room, 'alert', 'all', {
         level: 'info',
-        text: `${player.name} 落座：${card.identity.name}`,
+        text: `${player.name} 落座：${cardName}`,
       } satisfies AlertPayload);
     } else {
       // 房主落座 = 以 GM 身份占一个席位（AI GM 模式下房主也可以当玩家，M3 再细化）
@@ -465,14 +599,16 @@ export class RoomService {
         name: '房主',
         token: room.hostToken,
         seat: 'gm',
-        character: card,
+        ...(seated.character !== undefined ? { character: seated.character } : {}),
+        ruleCard: seated.ruleCard,
         joinedAt: this.now(),
         connections: 1,
       };
       room.players.set('host', hostPlayer);
+      this.attachPlayerToRules(room, hostPlayer);
       this.emit(room, 'alert', 'all', {
         level: 'info',
-        text: `房主落座：${card.identity.name}`,
+        text: `房主落座：${cardName}`,
       } satisfies AlertPayload);
     }
     this.emit(room, 'room', 'all', this.publicView(room));
@@ -528,7 +664,7 @@ export class RoomService {
           roomId: room.id,
           playerId: player.id,
           playerName: player.name,
-          characterName: player.character?.identity.name,
+          characterName: player.character?.identity.name ?? readRuleCardName(player.ruleCard),
           text: payload.text,
           private: params.private === true,
         });
@@ -582,6 +718,24 @@ export class RoomService {
       if (!resolved) continue;
       room.content = contentStateFromModule(resolved);
       recovered += 1;
+      // 之前因规则包/脚本不可用而降级的房间：内容恢复后尝试重新拉起规则运行时（失败仍降级）。
+      if (!this.ruleRooms.has(room.id) && this.ruleDown.has(room.id)) {
+        this.ruleDown.delete(room.id);
+        this.createRulesForRoom(room);
+        const rr = this.ruleRooms.get(room.id);
+        if (rr !== undefined) {
+          const players = [...room.players.values()].map((player) => ({
+            playerId: player.id,
+            name: player.name,
+            ...(player.ruleCard !== undefined
+              ? { card: player.ruleCard }
+              : player.character !== undefined
+                ? { card: player.character }
+                : {}),
+          }));
+          rr.noteWarnings(rr.syncPlayers(players));
+        }
+      }
       this.emit(room, 'alert', 'all', {
         level: 'info',
         text: `内容包「${resolved.packName ?? resolved.packId}」已就绪，房间内容引用重新生效。`,
@@ -762,6 +916,689 @@ export class RoomService {
   }
 
   // -------------------------------------------------------------------------
+  // 规则投影与命令（M9.4；host 结算，客户端只发意图）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 房间的规则运行时（host 侧 GM 编排/工具用；协议层拿不到它）。
+   * 房间不存在或没有规则运行时返回 undefined。
+   */
+  runtimeOf(roomId: string): RuleRuntime | undefined {
+    if (!this.rooms.has(roomId)) return undefined;
+    return this.ruleRooms.get(roomId)?.runtime;
+  }
+
+  /** `sheet.get`：读角色卡投影（玩家只能读自己的；房主可指定 playerId/actorId）。 */
+  sheet(principal: Principal, rawParams: unknown): SheetGetResult {
+    const params = this.parse(validateSheetGet(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const target = this.resolveTargetActor(principal, rr, params);
+    return buildSheetResult(this.viewOptionsFor(rr), target.actorId);
+  }
+
+  /** `sheet.equip`：装备物品到指定槽位（校验 accepts/件数；换装后重算投影）。 */
+  equip(principal: Principal, rawParams: unknown): SheetCommandResult {
+    const params = this.parse(validateSheetEquip(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const target = this.resolveTargetActor(principal, rr, params);
+    const actor = this.requireActorView(rr, target.actorId);
+    const plan = planEquip(rr.rules, actor.card, rr.bagOf(target.actorId), params.slotId, params.instanceId);
+    if (!plan.ok) throw new RoomError('bad-request', plan.error);
+    const changed = rr.runtime.changeEquipment({ actorId: target.actorId, equipmentInstances: plan.instances });
+    if (!changed.ok) throw roomErrorFromRule(changed.error);
+    if (plan.fromBag) rr.removeFromBag(target.actorId, params.instanceId);
+    const options = this.viewOptionsFor(rr);
+    return {
+      sheet: buildSheetView(options, target.actorId),
+      inventory: buildInventoryView(options, target.actorId),
+      events: ['equip/change'],
+    };
+  }
+
+  /** `sheet.unequip`：卸下装备（物品进 host 侧背包，随快照保存）。 */
+  unequip(principal: Principal, rawParams: unknown): SheetCommandResult {
+    const params = this.parse(validateSheetUnequip(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const target = this.resolveTargetActor(principal, rr, params);
+    const actor = this.requireActorView(rr, target.actorId);
+    const plan = planUnequip(rr.rules, actor.card, params.slotId, params.instanceId);
+    if (!plan.ok) throw new RoomError('bad-request', plan.error);
+    const changed = rr.runtime.changeEquipment({ actorId: target.actorId, equipmentInstances: plan.instances });
+    if (!changed.ok) throw roomErrorFromRule(changed.error);
+    rr.addToBag(target.actorId, plan.removed);
+    const options = this.viewOptionsFor(rr);
+    return {
+      sheet: buildSheetView(options, target.actorId),
+      inventory: buildInventoryView(options, target.actorId),
+      events: ['equip/change'],
+    };
+  }
+
+  /** `sheet.useItem`：使用物品（效果走规则包 `items[].useAction`；成功后消耗一件）。 */
+  useItem(principal: Principal, rawParams: unknown): SheetCommandResult {
+    const params = this.parse(validateSheetUseItem(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const target = this.resolveTargetActor(principal, rr, params);
+    const actor = this.requireActorView(rr, target.actorId);
+    const equipped = (actor.card.equipmentInstances ?? []).find((instance) => instance.instanceId === params.instanceId);
+    const bagItem = rr.bagOf(target.actorId).find((instance) => instance.instanceId === params.instanceId);
+    const instance = equipped ?? bagItem;
+    if (instance === undefined) {
+      throw new RoomError('not-found', `没有编号为「${params.instanceId}」的物品`);
+    }
+    const def = findItemDef(rr.rules, instance);
+    if (def === undefined) {
+      throw new RoomError('bad-request', `物品「${instance.name ?? params.instanceId}」不在规则包 items[] 里，无法使用`);
+    }
+    if (def.useAction === undefined) {
+      throw new RoomError('bad-request', `物品「${def.name}」没有可用效果（规则包未声明 useAction）`);
+    }
+    const used = rr.runtime.useAction({
+      actorId: target.actorId,
+      actionId: def.useAction,
+      ...(params.targetId !== undefined ? { targetId: params.targetId } : {}),
+    });
+    if (!used.ok) throw roomErrorFromRule(used.error);
+    // 用后消耗一件：装备里的从卡上移除，背包里的从背包移除（v1 不做堆叠合并）。
+    let consumed = false;
+    let removedFrom: 'slot' | 'bag' | undefined;
+    if (equipped !== undefined) {
+      const consumedChange = rr.runtime.changeEquipment({
+        actorId: target.actorId,
+        equipmentInstances: (actor.card.equipmentInstances ?? []).filter((candidate) => candidate.instanceId !== params.instanceId),
+      });
+      if (consumedChange.ok) {
+        consumed = true;
+        removedFrom = 'slot';
+      }
+    } else if (rr.removeFromBag(target.actorId, params.instanceId) !== undefined) {
+      consumed = true;
+      removedFrom = 'bag';
+    }
+    const options = this.viewOptionsFor(rr);
+    return {
+      sheet: buildSheetView(options, target.actorId),
+      inventory: buildInventoryView(options, target.actorId),
+      events: [...used.events],
+      item: {
+        instanceId: params.instanceId,
+        itemId: def.itemId,
+        name: def.name,
+        consumed,
+        ...(removedFrom !== undefined ? { removedFrom } : {}),
+        action: this.actionOutcomeView(used),
+      },
+    };
+  }
+
+  /** `combat.view`：战棋/回合/行动经济视图（全桌可读）。 */
+  combatView(principal: Principal): CombatViewResult {
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    return { combat: buildCombatView(this.viewOptionsFor(rr)) };
+  }
+
+  /** `combat.start`：开战（仅房主/GM）；可带 `enemies` 临时加入敌对行动者。 */
+  startCombat(principal: Principal, rawParams: unknown): CombatStartResult {
+    this.requireHost(principal);
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const params = this.parse(validateCombatStart(rawParams));
+    const enemies = params.enemies ?? [];
+    if (params.actorIds === undefined && rr.playerActors().length === 0 && enemies.length === 0) {
+      throw new RoomError('conflict', '没有可以参战的角色（先让玩家落座，或用 enemies 加入敌人）');
+    }
+    const addedActorIds: string[] = [];
+    try {
+      for (let index = 0; index < enemies.length; index += 1) {
+        addedActorIds.push(this.addEnemyActor(rr, enemies[index]!, params.mapId, index));
+      }
+      const started = rr.runtime.startCombat({
+        ...(params.actorIds !== undefined ? { actorIds: params.actorIds } : {}),
+        ...(params.maxRounds !== undefined ? { maxRounds: params.maxRounds } : {}),
+        ...(params.mapId !== undefined ? { mapId: params.mapId } : {}),
+        ...(params.reason !== undefined ? { reason: params.reason } : {}),
+      });
+      if (!started.ok) throw roomErrorFromRule(started.error);
+      return buildCombatStartResult(this.viewOptionsFor(rr), started.rolls);
+    } catch (error) {
+      // 开战失败：撤掉本次临时加入的敌人，保持运行时干净（避免半截战斗）
+      for (const actorId of addedActorIds) {
+        try {
+          rr.runtime.removeActor(actorId);
+        } catch {
+          /* 已在先攻表里就保留 */
+        }
+      }
+      throw error;
+    }
+  }
+
+  /** `combat.useAction`：使用规则包动作（行动者必须是自己 / 房主代管；回合由运行时校验）。 */
+  useAction(principal: Principal, rawParams: unknown): CombatUseActionResult {
+    const params = this.parse(validateCombatUseAction(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const target = this.resolveTargetActor(principal, rr, params);
+    const result = rr.runtime.useAction({
+      actorId: target.actorId,
+      actionId: params.actionId,
+      ...(params.targetId !== undefined ? { targetId: params.targetId } : {}),
+      ...(params.options !== undefined ? { options: { ...params.options } } : {}),
+    });
+    if (!result.ok) throw roomErrorFromRule(result.error);
+    const options = this.viewOptionsFor(rr);
+    return {
+      combat: buildCombatView(options),
+      action: this.actionOutcomeView(result),
+      sheet: buildSheetView(options, target.actorId),
+    };
+  }
+
+  /** `combat.move`：移动（距离/地形/连通性/移动力由运行时校验）。 */
+  move(principal: Principal, rawParams: unknown): CombatMoveResult {
+    const params = this.parse(validateCombatMove(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const target = this.resolveTargetActor(principal, rr, params);
+    const result = rr.runtime.move({
+      actorId: target.actorId,
+      to: {
+        ...(params.to.zoneId !== undefined ? { zoneId: params.to.zoneId } : {}),
+        ...(params.to.cell !== undefined ? { cell: { x: params.to.cell.x, y: params.to.cell.y } } : {}),
+      },
+      ...(params.via !== undefined ? { via: params.via } : {}),
+    });
+    if (!result.ok) throw roomErrorFromRule(result.error);
+    return buildCombatMoveResult(this.viewOptionsFor(rr), result);
+  }
+
+  /** `combat.endTurn`：结束当前（或自己）的回合；跨轮自动走回合边界/回合上限。 */
+  endTurn(principal: Principal, rawParams: unknown): CombatEndTurnResult {
+    const params = this.parse(validateCombatEndTurn(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    let actorId: string | undefined;
+    if (principal.kind === 'player') {
+      const own = rr.actorIdOfPlayer(principal.playerId);
+      if (params.playerId !== undefined && params.playerId !== principal.playerId) {
+        throw new RoomError('forbidden', '不能结束别人的回合');
+      }
+      if (params.actorId !== undefined && own !== undefined && params.actorId !== own) {
+        throw new RoomError('forbidden', '不能结束别人的回合');
+      }
+      if (own === undefined) throw new RoomError('conflict', '你还没有落座（先上传角色卡），没有可操作的回合');
+      actorId = own;
+    } else {
+      actorId = params.actorId ?? (params.playerId !== undefined ? rr.actorIdOfPlayer(params.playerId) : rr.actorIdOfPlayer('host'));
+    }
+    const ended = rr.runtime.endTurn(actorId !== undefined ? { actorId } : {});
+    if (!ended.ok) throw roomErrorFromRule(ended.error);
+    return { combat: buildCombatView(this.viewOptionsFor(rr)) };
+  }
+
+  /** `combat.rollCheck`：检定（属性/技能/豁免；骰面与 trace 由运行时给出）。 */
+  rollCheck(principal: Principal, rawParams: unknown): CombatRollCheckResult {
+    const params = this.parse(validateCombatRollCheck(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const target = this.resolveTargetActor(principal, rr, params);
+    const result = rr.runtime.rollCheck({
+      actorId: target.actorId,
+      ...(params.targetId !== undefined ? { targetId: params.targetId } : {}),
+      ...(params.skillId !== undefined ? { skillId: params.skillId } : {}),
+      ...(params.attributeId !== undefined ? { attributeId: params.attributeId } : {}),
+      ...(params.kind !== undefined ? { kind: params.kind } : {}),
+      ...(params.dc !== undefined ? { dc: params.dc } : {}),
+      ...(params.mods !== undefined ? { mods: params.mods } : {}),
+      ...(params.mode !== undefined ? { mode: params.mode } : {}),
+      ...(params.reason !== undefined ? { reason: params.reason } : {}),
+    });
+    if (!result.ok) throw roomErrorFromRule(result.error);
+    return { check: checkViewOf(result) };
+  }
+
+  /** `combat.end`：收场（仅房主/GM）。 */
+  endCombat(principal: Principal, rawParams: unknown): CombatEndResult {
+    this.requireHost(principal);
+    const params = this.parse(validateCombatEnd(rawParams));
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    const ended = rr.runtime.endCombat({ ...(params.reason !== undefined ? { reason: params.reason } : {}) });
+    if (!ended.ok) throw roomErrorFromRule(ended.error);
+    return { combat: buildCombatView(this.viewOptionsFor(rr)) };
+  }
+
+  /** `worldmap.get`：世界地图投影（底图/zone 热点/连线/队伍位置）。 */
+  worldMap(principal: Principal): WorldMapGetResult {
+    const room = this.requireRoom(principal.roomId);
+    const rr = this.requireRulesRoom(room);
+    return { worldMap: buildWorldMapView(this.viewOptionsFor(rr)) };
+  }
+
+  /** host 侧 GM 工具：临时加入一个敌对/中立行动者（不广播，开战后由战斗视图体现）。 */
+  gmSpawnEnemy(
+    roomId: string,
+    spec: { name: string; card?: unknown; team?: 'enemy' | 'neutral'; actorId?: string; cell?: { x: number; y: number }; zoneId?: string },
+  ): { actorId: string } {
+    const room = this.requireRoom(roomId);
+    const rr = this.requireRulesRoom(room);
+    return { actorId: this.addEnemyActor(rr, spec, undefined, rr.playerActors().length) };
+  }
+
+  private actionOutcomeView(result: Parameters<typeof actionOutcomeOf>[0]): ActionOutcomeView {
+    return actionOutcomeOf(result);
+  }
+
+  private viewOptionsFor(rr: RoomRulesRoom): RuleViewOptions {
+    return {
+      rules: rr.rules,
+      runtime: rr.runtime,
+      playerOf: (actorId) => rr.playerIdOfActor(actorId),
+      bagOf: (actorId) => rr.bagOf(actorId),
+    };
+  }
+
+  private requireRulesRoom(room: RoomRecord): RoomRulesRoom {
+    const rr = this.ruleRooms.get(room.id);
+    if (rr !== undefined) return rr;
+    const down = this.ruleDown.get(room.id);
+    if (down !== undefined) {
+      throw new RoomError(
+        'conflict',
+        `房间规则「${down.view.rulesId}」当前不可用（${down.warnings[0] ?? '规则包未加载'}）：角色卡/战斗命令暂时无法结算`,
+      );
+    }
+    throw new RoomError('conflict', '本房间没有规则运行时（内容包未带 rules 段）：角色卡/战斗命令不可用');
+  }
+
+  private requireActorView(rr: RoomRulesRoom, actorId: string): ActorView {
+    const result = rr.runtime.getActor(actorId);
+    if (!result.ok) throw roomErrorFromRule(result.error);
+    return result.actor;
+  }
+
+  /** 命令/读取的目标行动者：玩家只能指向自己的行动者；房主可代管任意行动者。 */
+  private resolveTargetActor(
+    principal: Principal,
+    rr: RoomRulesRoom,
+    params: { playerId?: PlayerId; actorId?: string },
+  ): { actorId: string; playerId?: PlayerId } {
+    if (principal.kind === 'player') {
+      if (params.playerId !== undefined && params.playerId !== principal.playerId) {
+        throw new RoomError('forbidden', '不能操作别人的角色卡');
+      }
+      const own = rr.actorIdOfPlayer(principal.playerId);
+      if (own === undefined) {
+        throw new RoomError('conflict', '你还没有落座（先上传角色卡），没有可操作的角色');
+      }
+      if (params.actorId !== undefined && params.actorId !== own) {
+        throw new RoomError('forbidden', '不能操作别人的角色');
+      }
+      return { actorId: own, playerId: principal.playerId };
+    }
+    const playerId = params.playerId ?? (params.actorId !== undefined ? rr.playerIdOfActor(params.actorId) : 'host');
+    const actorId = params.actorId ?? (playerId !== undefined ? rr.actorIdOfPlayer(playerId) : undefined);
+    if (actorId === undefined) {
+      throw new RoomError('conflict', '房主还没有可操作的角色（先落座，或用 playerId/actorId 指定）');
+    }
+    return { actorId, ...(playerId !== undefined ? { playerId } : {}) };
+  }
+
+  private addEnemyActor(
+    rr: RoomRulesRoom,
+    spec: { name: string; card?: unknown; team?: 'enemy' | 'neutral'; actorId?: string; cell?: { x: number; y: number }; zoneId?: string },
+    mapId: string | undefined,
+    index: number,
+  ): string {
+    const actorId = spec.actorId ?? rr.nextNpcActorId();
+    if (rr.hasActor(actorId)) throw new RoomError('conflict', `行动者「${actorId}」已在运行时里`);
+    const converted = spec.card === undefined
+      ? { card: synthesizeEnemyCard(rr.rules, spec.name, `npc_card_${actorId.replace(/[^A-Za-z0-9_-]/g, '_')}`), warnings: [] as string[], error: undefined as string | undefined }
+      : rr.prepareCard(spec.card);
+    if (converted.card === undefined) {
+      throw new RoomError('bad-request', `敌人「${spec.name}」的卡无法使用：${converted.error ?? converted.warnings.join('；')}`);
+    }
+    const position = spec.cell !== undefined
+      ? {
+          cell: { x: Math.trunc(spec.cell.x), y: Math.trunc(spec.cell.y) },
+          ...(spec.zoneId !== undefined ? { zoneId: spec.zoneId } : {}),
+        }
+      : (rr.enemySpawnCell(mapId, index) ?? (spec.zoneId !== undefined ? { zoneId: spec.zoneId } : undefined));
+    const added = rr.runtime.addActor({
+      card: converted.card,
+      actorId,
+      name: spec.name,
+      team: spec.team ?? 'enemy',
+      ...(position !== undefined ? { position } : {}),
+    });
+    if (!added.ok) throw roomErrorFromRule(added.error);
+    return actorId;
+  }
+
+  // --- 规则运行时生命周期 ---------------------------------------------------
+
+  /** 建房时按内容包解析规则并建运行时（失败降级：房间照常开局）。 */
+  private createRulesForRoom(room: RoomRecord): void {
+    const resolver = this.rulesResolver;
+    if (resolver === undefined) return;
+    let resolved: RoomRulesInput | undefined;
+    try {
+      resolved = resolver.resolveRules(room.content.packId, room.content.moduleId);
+    } catch {
+      resolved = undefined;
+    }
+    if (resolved === undefined) return;
+    const rulesSeed = deriveRulesSeed(room.id, this.seedSalt);
+    try {
+      const rr = new RoomRulesRoom({
+        roomId: room.id,
+        rules: resolved.rules,
+        ...(resolved.scripts !== undefined ? { scripts: resolved.scripts } : {}),
+        rulesSeed,
+        ...(resolved.rulesHash !== undefined ? { rulesHash: resolved.rulesHash } : {}),
+        onEvent: (event) => this.onRulesEvent(room, event),
+      });
+      this.ruleRooms.set(room.id, rr);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.ruleDown.set(room.id, {
+        view: {
+          rulesId: resolved.rules.rulesId,
+          rulesVersion: resolved.rules.rulesVersion,
+          name: resolved.rules.name,
+          degraded: true,
+        },
+        ...(resolved.rulesHash !== undefined ? { rulesHash: resolved.rulesHash } : {}),
+        warnings: [message],
+      });
+      this.emit(room, 'alert', 'all', {
+        level: 'warning',
+        text: `规则运行时启动失败（${message}）：房间按无规则模式开局；检查内容包脚本后重扫内容包。`,
+      } satisfies AlertPayload);
+    }
+  }
+
+  /** 续团：解析规则 → 建运行时 → importState（不兼容/漂移降级并返回 warning 文案）。 */
+  private restoreRulesForRoom(room: RoomRecord, source: RoomSnapshot['room']): string | undefined {
+    const resolver = this.rulesResolver;
+    const hadRules = source.rulesId !== undefined || source.ruleState !== undefined;
+    if (resolver === undefined) {
+      if (source.rulesId === undefined) return undefined;
+      this.ruleDown.set(room.id, {
+        view: { rulesId: source.rulesId, rulesVersion: source.rulesVersion ?? '0.0.0', degraded: true },
+        ...(source.rulesHash !== undefined ? { rulesHash: source.rulesHash } : {}),
+        warnings: ['host 没有注入规则解析器'],
+      });
+      return '房间记录了规则包，但 host 没有规则解析器：已按无规则模式续团（规则命令暂不可用）。';
+    }
+    let resolved: RoomRulesInput | undefined;
+    try {
+      resolved = resolver.resolveRules(room.content.packId, room.content.moduleId);
+    } catch {
+      resolved = undefined;
+    }
+    if (resolved === undefined) {
+      if (!hadRules) return undefined;
+      this.ruleDown.set(room.id, {
+        view: { rulesId: source.rulesId ?? room.content.packId, rulesVersion: source.rulesVersion ?? '0.0.0', degraded: true },
+        ...(source.rulesHash !== undefined ? { rulesHash: source.rulesHash } : {}),
+        warnings: ['规则包在本机不可用'],
+      });
+      return `房间引用的规则包「${source.rulesId ?? room.content.packId}」在本机不可用：已按无规则模式续团；恢复对应内容包后重扫即可。`;
+    }
+    const rulesSeed = typeof source.rulesSeed === 'number' && Number.isFinite(source.rulesSeed) && source.rulesSeed >= 0
+      ? Math.trunc(source.rulesSeed)
+      : deriveRulesSeed(room.id, this.seedSalt);
+    let rr: RoomRulesRoom;
+    try {
+      rr = new RoomRulesRoom({
+        roomId: room.id,
+        rules: resolved.rules,
+        ...(resolved.scripts !== undefined ? { scripts: resolved.scripts } : {}),
+        rulesSeed,
+        ...(resolved.rulesHash !== undefined ? { rulesHash: resolved.rulesHash } : {}),
+        onEvent: (event) => this.onRulesEvent(room, event),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.ruleDown.set(room.id, {
+        view: { rulesId: resolved.rules.rulesId, rulesVersion: resolved.rules.rulesVersion, name: resolved.rules.name, degraded: true },
+        warnings: [message],
+      });
+      return `规则运行时启动失败（${message}）：已按无规则模式续团。`;
+    }
+    this.ruleRooms.set(room.id, rr);
+    let alert: string | undefined;
+    if (source.ruleBags !== undefined) rr.importBags(source.ruleBags);
+    if (source.ruleState !== undefined) {
+      const imported = rr.importRuleState(source.ruleState);
+      if (!imported.ok) {
+        rr.degraded = true;
+        alert = `规则运行态快照无法导入（${imported.errors.join('；')}）：已按当前规则重建角色状态，续团结算从本机状态继续。`;
+      }
+    }
+    const players = [...room.players.values()].map((player) => ({
+      playerId: player.id,
+      name: player.name,
+      ...(player.ruleCard !== undefined
+        ? { card: player.ruleCard }
+        : player.character !== undefined
+          ? { card: player.character }
+          : {}),
+    }));
+    const syncWarnings = rr.syncPlayers(players);
+    if (syncWarnings.length > 0) {
+      rr.noteWarnings(syncWarnings);
+      alert = `${alert !== undefined ? `${alert} ` : ''}${syncWarnings.slice(0, 2).join('；')}`;
+    }
+    if (source.rulesVersion !== undefined && source.rulesVersion !== resolved.rules.rulesVersion) {
+      rr.degraded = true;
+      alert = `房间规则包版本已变化（${source.rulesVersion} → ${resolved.rules.rulesVersion}）：已按本机版本继续，规则命令按新版本结算。`;
+    } else if (
+      source.rulesHash !== undefined &&
+      resolved.rulesHash !== undefined &&
+      source.rulesHash !== resolved.rulesHash
+    ) {
+      rr.degraded = true;
+      alert = '房间规则包内容已变化（rulesHash 不一致）：已按本机现有规则继续；如需原版本请恢复对应内容包。';
+    }
+    return alert;
+  }
+
+  private disposeRulesRoom(roomId: string): void {
+    const rr = this.ruleRooms.get(roomId);
+    if (rr !== undefined) {
+      rr.dispose();
+      this.ruleRooms.delete(roomId);
+    }
+    this.ruleDown.delete(roomId);
+  }
+
+  private rulesViewFor(roomId: string): RoomRulesView | undefined {
+    const rr = this.ruleRooms.get(roomId);
+    if (rr !== undefined) {
+      return {
+        rulesId: rr.rules.rulesId,
+        rulesVersion: rr.rules.rulesVersion,
+        name: rr.rules.name,
+        ...(rr.degraded ? { degraded: true } : {}),
+      };
+    }
+    return this.ruleDown.get(roomId)?.view;
+  }
+
+  private snapshotRulesOf(
+    room: RoomRecord,
+  ): Pick<RoomSnapshot['room'], 'rulesId' | 'rulesVersion' | 'rulesHash' | 'rulesSeed' | 'ruleState' | 'ruleBags'> {
+    const rr = this.ruleRooms.get(room.id);
+    if (rr !== undefined) {
+      return {
+        rulesId: rr.rules.rulesId,
+        rulesVersion: rr.rules.rulesVersion,
+        rulesHash: rr.rulesHash,
+        rulesSeed: rr.rulesSeed,
+        ruleState: rr.exportRuleState(),
+        ruleBags: rr.exportBags(),
+      };
+    }
+    const down = this.ruleDown.get(room.id);
+    if (down !== undefined) {
+      return {
+        rulesId: down.view.rulesId,
+        rulesVersion: down.view.rulesVersion,
+        ...(down.rulesHash !== undefined ? { rulesHash: down.rulesHash } : {}),
+      };
+    }
+    return {};
+  }
+
+  private attachPlayerToRules(room: RoomRecord, player: PlayerRecord): void {
+    const rr = this.ruleRooms.get(room.id);
+    if (rr === undefined) return;
+    const card = player.ruleCard ?? player.character;
+    if (card === undefined) return;
+    const added = rr.addPlayer({ playerId: player.id, name: player.name, card });
+    if (added.error !== undefined) {
+      this.emit(room, 'alert', 'all', {
+        level: 'warning',
+        text: `${player.name} 的角色卡未进入规则运行时：${added.error}`,
+      } satisfies AlertPayload);
+      return;
+    }
+    this.emitSheetUpdate(room, rr, player.id, 'room/seat');
+  }
+
+  private detachPlayerFromRules(room: RoomRecord, player: PlayerRecord): void {
+    const rr = this.ruleRooms.get(room.id);
+    if (rr === undefined) return;
+    const removed = rr.removePlayer(player.id);
+    if (removed.removed) return;
+    if (removed.error !== undefined) {
+      // 战斗中行动者保留在先攻表里：只记录，不打断离场流程。
+      rr.noteWarnings([`${player.name}：${removed.error}`]);
+    }
+  }
+
+  // --- 运行时事件 → SSE -----------------------------------------------------
+
+  private onRulesEvent(room: RoomRecord, event: RuntimeEvent): void {
+    if (!this.rooms.has(room.id)) return;
+    const rr = this.ruleRooms.get(room.id);
+    if (rr === undefined) return;
+    const data: Record<string, unknown> = event.data ?? {};
+    if (event.kind === 'rules/error') {
+      const hook = typeof data.hook === 'string' ? data.hook : undefined;
+      const failureKind = typeof data.kind === 'string' ? data.kind : undefined;
+      const message = typeof data.message === 'string' ? data.message : '未知错误';
+      const degraded = data.degraded === true;
+      const payload: RulesErrorPayload = {
+        ...(hook !== undefined ? { hook } : {}),
+        ...(failureKind !== undefined ? { kind: failureKind } : {}),
+        message,
+        text: `规则钩子${hook !== undefined ? `「${hook}」` : ''}执行失败：${message}${degraded ? '（已降级为缺省结算）' : ''}`,
+        ...(degraded ? { degraded: true } : {}),
+      };
+      this.emit(room, 'rules/error', 'all', payload);
+      return;
+    }
+    if (event.kind === 'check') {
+      this.emitRulesCheckDice(room, rr, data);
+      return;
+    }
+    if (event.kind === 'equip/change') {
+      const actorId = typeof data.actorId === 'string' ? data.actorId : undefined;
+      const playerId = actorId !== undefined ? rr.playerIdOfActor(actorId) : undefined;
+      if (playerId !== undefined) this.emitSheetUpdate(room, rr, playerId, event.kind, event.seq);
+      return;
+    }
+    if (event.kind === 'damage/after' || event.kind === 'action/after' || event.kind === 'level/up') {
+      const affected = event.kind === 'damage/after'
+        ? (typeof data.targetId === 'string' ? data.targetId : undefined)
+        : (typeof data.actorId === 'string' ? data.actorId : undefined);
+      const playerId = affected !== undefined ? rr.playerIdOfActor(affected) : undefined;
+      if (playerId !== undefined) this.emitSheetUpdate(room, rr, playerId, event.kind, event.seq);
+    }
+    if (COMBAT_BROADCAST_EVENTS.has(event.kind)) {
+      this.emitCombatUpdate(room, rr, event.kind, event.seq);
+    }
+  }
+
+  private emitSheetUpdate(room: RoomRecord, rr: RoomRulesRoom, playerId: PlayerId, cause: string, runtimeSeq?: number): void {
+    const actorId = rr.actorIdOfPlayer(playerId);
+    if (actorId === undefined) return;
+    try {
+      const sheet = buildSheetView(this.viewOptionsFor(rr), actorId);
+      const payload: SheetUpdatePayload = {
+        playerId,
+        actorId,
+        sheet,
+        cause,
+        ...(runtimeSeq !== undefined ? { runtimeSeq } : {}),
+      };
+      this.emit(room, 'sheet/update', playerId, payload);
+    } catch {
+      /* 投影失败不影响广播/结算 */
+    }
+  }
+
+  private emitCombatUpdate(room: RoomRecord, rr: RoomRulesRoom, cause: string, runtimeSeq: number): void {
+    try {
+      const payload: CombatUpdatePayload = {
+        combat: buildCombatView(this.viewOptionsFor(rr)),
+        causes: [cause],
+        runtimeSeq,
+      };
+      this.emit(room, 'combat/update', 'all', payload);
+    } catch {
+      /* 投影失败不影响结算 */
+    }
+  }
+
+  private emitRulesCheckDice(room: RoomRecord, rr: RoomRulesRoom, data: Record<string, unknown>): void {
+    const actorId = typeof data.actorId === 'string' ? data.actorId : undefined;
+    let actorName = 'GM';
+    if (actorId !== undefined) {
+      const actor = rr.runtime.getActor(actorId);
+      if (actor.ok) actorName = actor.actor.name;
+    }
+    const rawRolls = Array.isArray(data.rolls) ? data.rolls : [];
+    const firstRoll = rawRolls.find((roll): roll is Record<string, unknown> => typeof roll === 'object' && roll !== null);
+    const dice = Array.isArray(firstRoll?.dice)
+      ? (firstRoll.dice as unknown[]).filter((die): die is number => typeof die === 'number')
+      : [];
+    const d20 = typeof data.d20 === 'number' ? data.d20 : (dice[0] ?? 0);
+    const total = typeof data.total === 'number' ? data.total : 0;
+    const dc = typeof data.dc === 'number' ? data.dc : 0;
+    const kindRaw = typeof data.kind === 'string' ? data.kind : 'check';
+    const kind: NonNullable<DicePayload['check']>['kind'] = kindRaw === 'skill'
+      ? 'skill'
+      : kindRaw === 'save'
+        ? 'save'
+        : kindRaw === 'attack'
+          ? 'attack'
+          : 'ability';
+    const playerId = actorId !== undefined ? (rr.playerIdOfActor(actorId) ?? 'host') : 'host';
+    this.emit(room, 'dice', 'all', {
+      expression: 'd20',
+      dice,
+      modifier: total - d20,
+      total,
+      label: `${kindRaw}检定`,
+      playerId,
+      rollerName: actorName,
+      private: false,
+      check: { kind, name: kindRaw, dc, success: data.success === true },
+    } satisfies DicePayload);
+  }
+
+
+
+  // -------------------------------------------------------------------------
   // 事件流
   // -------------------------------------------------------------------------
 
@@ -828,6 +1665,7 @@ export class RoomService {
       }
     }
     room.listeners.clear();
+    this.disposeRulesRoom(roomId);
     this.rooms.delete(roomId);
     try {
       this.onRoomClosed?.(roomId);
@@ -862,12 +1700,14 @@ export class RoomService {
         ...(room.sessionId ? { sessionId: room.sessionId } : {}),
         ...(room.scene ? { scene: room.scene } : {}),
         content: snapshotContentOf(room.content),
+        ...this.snapshotRulesOf(room),
         players: [...room.players.values()].map((player) => ({
           id: player.id,
           name: player.name,
           token: player.token,
           seat: player.seat,
           ...(player.character ? { character: player.character } : {}),
+          ...(player.ruleCard !== undefined ? { ruleCard: player.ruleCard } : {}),
           joinedAt: player.joinedAt,
         })),
         events: room.events.map((event) => ({ ...event })),
@@ -888,6 +1728,7 @@ export class RoomService {
         token: player.token,
         seat: player.seat,
         ...(player.character ? { character: player.character } : {}),
+        ...(player.ruleCard !== undefined ? { ruleCard: player.ruleCard } : {}),
         joinedAt: player.joinedAt,
         connections: 0,
       });
@@ -920,6 +1761,11 @@ export class RoomService {
     // 包缺失/版本漂移：房间照样恢复（不卡死），用一条 GM 警告说明降级与补救方式。
     if (restoredContent.alert) {
       this.emit(room, 'alert', 'all', { level: 'warning', text: restoredContent.alert } satisfies AlertPayload);
+    }
+    // 规则运行态：能解析规则就重建运行时并 importState（不兼容则降级 + warning）。
+    const rulesAlert = this.restoreRulesForRoom(room, source);
+    if (rulesAlert !== undefined) {
+      this.emit(room, 'alert', 'all', { level: 'warning', text: rulesAlert } satisfies AlertPayload);
     }
     return true;
   }
@@ -1051,12 +1897,22 @@ export class RoomService {
     return { content };
   }
 
-  private parseCard(input: unknown): CharacterCard {
+  /**
+   * 座位卡解析（M9.4）：旧 engine 卡（`schemaVersion: 1`）照旧过 `validateCharacterCard`；
+   * 新卡实例（`trpg.card/1`）房间层不校验规则字段（由规则运行时 `migrateLegacyCard`/`validateCard` 兜底），
+   * 只留原始引用。两者都会写进 `player.ruleCard` 供规则运行时实例化。
+   */
+  private parseSeatCard(input: unknown): { character?: CharacterCard; ruleCard: unknown } {
     const report = validateCharacterCard(input);
-    if (!report.ok || !report.value) {
-      throw new RoomError('invalid-card', `角色卡校验失败：${report.errors.join('；')}`);
+    if (report.ok && report.value !== undefined) {
+      return { character: report.value, ruleCard: input };
     }
-    return report.value;
+    if (typeof input === 'object' && input !== null && !Array.isArray(input)) {
+      if ((input as { schemaVersion?: unknown }).schemaVersion === 'trpg.card/1') {
+        return { ruleCard: input };
+      }
+    }
+    throw new RoomError('invalid-card', `角色卡校验失败：${report.errors.join('；')}`);
   }
 
   private requireRoom(roomId: string): RoomRecord {
@@ -1089,6 +1945,7 @@ export class RoomService {
 
   private publicView(room: RoomRecord): RoomView {
     const content = room.content;
+    const rules = this.rulesViewFor(room.id);
     return {
       roomId: room.id,
       title: room.title,
@@ -1097,6 +1954,7 @@ export class RoomService {
       gmMode: room.gmMode,
       locked: room.locked,
       ...(room.scene ? { scene: room.scene } : {}),
+      ...(rules !== undefined ? { rules: { ...rules } } : {}),
       ...(content
         ? {
             content: {
@@ -1174,6 +2032,16 @@ export class RoomService {
       room.listeners.delete(listener);
     }
   }
+}
+
+/** 从座位卡原始数据里读展示名（旧 engine 卡 `identity.name` / 新卡实例 `fields.name`）。 */
+function readRuleCardName(raw: unknown): string | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as { identity?: { name?: unknown }; fields?: { name?: unknown } };
+  const legacyName = record.identity?.name;
+  if (typeof legacyName === 'string' && legacyName.length > 0) return legacyName;
+  const fieldName = record.fields?.name;
+  return typeof fieldName === 'string' && fieldName.length > 0 ? fieldName : undefined;
 }
 
 /** 解析结果 → 房间记录里的内容引用（派生场景只留公开字段）。 */

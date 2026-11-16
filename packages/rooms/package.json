@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@dsh-trpg/engine": "workspace:*",
-    "@dsh-trpg/protocol": "workspace:*"
+    "@dsh-trpg/protocol": "workspace:*",
+    "@dsh-trpg/rules": "workspace:*"
   }
 }

@@ -179,6 +179,34 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
         if (principal.kind !== 'host') throw new RoomError('forbidden', '只有房主能发奖励');
         return { event: service.gmAward(principal.roomId, params.playerId, { xp: params.xp, items: params.items, note: params.note }) };
       }
+      // ---- M9.4 规则投影与命令（host 结算；读命令全桌可调，写命令由 rooms 校验行动者/权限） ----
+      // 运行时事件 → SSE 的映射不在这一层：RuleRuntime 由 rooms 持有，运行时事件（turn/damage/
+      // rules/error 等）在 rooms 的订阅里广播成 `combat/update` / `sheet/update` / `rules/error`，
+      // 这里只把命令结果（投影 DTO + 中文错误）回包，保持 HTTP 适配层是薄壳。
+      case 'sheet.get':
+        return service.sheet(principal, rpc.params);
+      case 'sheet.equip':
+        return service.equip(principal, rpc.params);
+      case 'sheet.unequip':
+        return service.unequip(principal, rpc.params);
+      case 'sheet.useItem':
+        return service.useItem(principal, rpc.params);
+      case 'combat.view':
+        return service.combatView(principal);
+      case 'combat.start':
+        return service.startCombat(principal, rpc.params);
+      case 'combat.useAction':
+        return service.useAction(principal, rpc.params);
+      case 'combat.move':
+        return service.move(principal, rpc.params);
+      case 'combat.endTurn':
+        return service.endTurn(principal, rpc.params);
+      case 'combat.rollCheck':
+        return service.rollCheck(principal, rpc.params);
+      case 'combat.end':
+        return service.endCombat(principal, rpc.params);
+      case 'worldmap.get':
+        return service.worldMap(principal);
       default:
         throw new RoomError('bad-request', `未知方法：${rpc.method}`);
     }

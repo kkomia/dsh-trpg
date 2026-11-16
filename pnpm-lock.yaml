@@ -30,7 +30,16 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
-  packages/content: {}
+  packages/assets: {}
+
+  packages/content:
+    dependencies:
+      '@dsh-trpg/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@dsh-trpg/rules':
+        specifier: workspace:*
+        version: link:../rules
 
   packages/dsh-trpg-table: {}
 
@@ -46,6 +55,11 @@ importers:
       '@dsh-trpg/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@dsh-trpg/rules':
+        specifier: workspace:*
+        version: link:../rules
+
+  packages/rules: {}
 
 packages:
 

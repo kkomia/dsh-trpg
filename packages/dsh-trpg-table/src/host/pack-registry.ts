@@ -14,8 +14,13 @@
  *
  * 房间侧只需要 `RoomContentResolver`（`resolveModule` / `hasPack` / `defaultPackId`）：
  * 房间只存 `{ packId, moduleId }` 引用，内容始终从本注册表解析，不复制进房间。
+ *
+ * M9.4：注册表同时实现 `RoomRulesResolver`（`resolveRules`）——把内容包的 `rules` 段与
+ * `rules/scripts/*.js` 脚本源码交给 rooms 建规则运行时。内置包的脚本源码随代码发布
+ * （`@dsh-trpg/content/rules-pack`），数据目录包的脚本来自 zip 条目。
  */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import {
   CORE_PACKS,
@@ -28,8 +33,16 @@ import {
   type PackModuleDef,
 } from '@dsh-trpg/content';
 import { contentHashOfPack, trpgpackToPack } from '@dsh-trpg/content/pack-zip';
+import { scriptSourcesForRules } from '@dsh-trpg/content/rules-pack';
 import type { CatalogPack } from '@dsh-trpg/protocol';
-import type { RoomContentModule, RoomContentResolver } from '@dsh-trpg/rooms';
+import type {
+  RoomContentModule,
+  RoomContentResolver,
+  RoomRuleScript,
+  RoomRulesInput,
+  RoomRulesResolver,
+} from '@dsh-trpg/rooms';
+import { hashRules } from '@dsh-trpg/rooms';
 import { defaultRoomsDir } from './persistence.ts';
 
 /** 缺省内容包：内置包 `core-guimuya`（旧客户端不传 packId 时的兜底）。 */
@@ -48,6 +61,45 @@ export interface PackEntry {
   source: PackSource;
   /** 数据目录包的绝对路径；内置包为 undefined。 */
   filePath?: string;
+  /** 包内内联规则包（M9.4；`pack.rules` 缺省 = 内容包不带规则）。 */
+  rules?: RoomRulesInput['rules'];
+  /** 规则脚本源码（`rules/scripts/*.js`；与 `rules.scripts` 清单 sha256 对应）。 */
+  scripts?: RoomRuleScript[];
+}
+
+/** 包内带 `rules` 段时解析出的规则运行时来源（供 rooms 建房）。 */
+export interface ResolvedPackRules extends RoomRulesInput {
+  packId: string;
+  packVersion: string;
+}
+
+/** 脚本源码 → 清单条目（sha256 用 node:crypto 现算，与内容包校验口径一致）。 */
+function scriptEntryOf(file: string, code: string, expectedSha256?: string): RoomRuleScript {
+  const sha256 = createHash('sha256').update(code, 'utf8').digest('hex');
+  return { file, code, sha256: expectedSha256 ?? sha256 };
+}
+
+/** 读取内置规则包随代码发布的脚本源码（`rules/scripts/*.js`）。 */
+function builtinScriptsFor(rules: RoomRulesInput['rules'] | undefined): RoomRuleScript[] {
+  if (rules === undefined) return [];
+  const sources = scriptSourcesForRules(rules);
+  if (sources === undefined) return [];
+  return sources.map((source) => scriptEntryOf(source.file, source.code, source.sha256));
+}
+
+/** 数据目录包的脚本条目（zip 解出的 UTF-8 字节）→ 源码条目。 */
+function decodedScriptsOf(scripts: Map<string, Uint8Array> | undefined): RoomRuleScript[] {
+  if (scripts === undefined || scripts.size === 0) return [];
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const output: RoomRuleScript[] = [];
+  for (const [file, bytes] of [...scripts.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    try {
+      output.push(scriptEntryOf(file, decoder.decode(bytes).replace(/^\uFEFF/u, '')));
+    } catch {
+      /* 非法 UTF-8：validatePack 已经报错，这里忽略（运行时按缺脚本降级） */
+    }
+  }
+  return output;
 }
 
 /** 解析出的模组（房间解析结果的超集，额外带 GM 侧需要的整包/模组数据）。 */
@@ -92,7 +144,7 @@ export function defaultPacksDir(env: NodeJS.ProcessEnv = process.env): string {
  * 内容包注册表。构造后调用 `reload()` 加载；`reload()` 可重复调用（M8.3 导入包后重扫）。
  * 同时实现 rooms 的 `RoomContentResolver`，直接注入 `new RoomService({ content: registry })`。
  */
-export class PackRegistry implements RoomContentResolver {
+export class PackRegistry implements RoomContentResolver, RoomRulesResolver {
   readonly dir: string;
   private readonly options: PackRegistryOptions;
   private readonly log: (message: string) => void;
@@ -135,7 +187,23 @@ export class PackRegistry implements RoomContentResolver {
         warnings.push(`内置内容包 packId 重复：${pack.packId}（保留先加载的）`);
         continue;
       }
-      entries.set(pack.packId, { pack, contentHash: contentHashOfPack(pack), source: 'builtin' });
+      const rules = (pack as ContentPack & { rules?: RoomRulesInput['rules'] }).rules;
+      const scripts = builtinScriptsFor(rules);
+      if (
+        rules !== undefined &&
+        rules.scripts !== undefined &&
+        Object.keys(rules.scripts).length > 0 &&
+        scripts.length === 0
+      ) {
+        warnings.push(`内置内容包「${pack.packId}」的规则包声明了脚本，但本机没有对应内置脚本源码：规则运行时将降级`);
+      }
+      entries.set(pack.packId, {
+        pack,
+        contentHash: contentHashOfPack(pack),
+        source: 'builtin',
+        ...(rules !== undefined ? { rules } : {}),
+        ...(scripts.length > 0 ? { scripts } : {}),
+      });
       for (const warning of report.warnings) warnings.push(`内置内容包「${pack.packId}」：${warning}`);
     }
 
@@ -188,6 +256,10 @@ export class PackRegistry implements RoomContentResolver {
         contentHash: decoded.contentHash,
         source: 'data',
         filePath,
+        ...((pack as ContentPack & { rules?: RoomRulesInput['rules'] }).rules !== undefined
+          ? { rules: (pack as ContentPack & { rules?: RoomRulesInput['rules'] }).rules }
+          : {}),
+        ...(decoded.scripts.size > 0 ? { scripts: decodedScriptsOf(decoded.scripts) } : {}),
       });
       for (const warning of decoded.warnings) warnings.push(`内容包 ${name}：${warning}`);
     }
@@ -262,6 +334,28 @@ export class PackRegistry implements RoomContentResolver {
       contentHash: resolved.contentHash,
       module: toLegacyModuleDef(resolved.module, resolved.pack.ruleSystem),
       lorebook: toLegacyLorebook(resolved.pack.lorebook),
+    };
+  }
+
+  /**
+   * 解析包内规则（`RoomRulesResolver` 实现）：包不存在或没带 `rules` 段返回 undefined。
+   *
+   * 规则包是**包级数据**（模组只引用规则，不覆盖规则），所以 `moduleId` 只为对齐接口签名。
+   * 返回的 `rulesHash` = sha256(规范化规则数据 + 脚本清单 sha256)，房间快照用它检测漂移。
+   */
+  resolveRules(packId: string, moduleId?: string): ResolvedPackRules | undefined {
+    void moduleId;
+    const entry = this.entries.get(packId);
+    if (!entry) return undefined;
+    const rules = entry.rules ?? (entry.pack as ContentPack & { rules?: RoomRulesInput['rules'] }).rules;
+    if (rules === undefined) return undefined;
+    const scripts = entry.scripts ?? builtinScriptsFor(rules);
+    return {
+      packId: entry.pack.packId,
+      packVersion: entry.pack.version,
+      rules,
+      ...(scripts.length > 0 ? { scripts } : {}),
+      rulesHash: hashRules(rules, scripts),
     };
   }
 
