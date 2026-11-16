@@ -36,6 +36,7 @@ import { createRulesStore, type MainViewKind } from './rules-store.ts';
 import { createRulesUi } from './rules-ui.ts';
 import { WORKSHOP_PANEL_ID } from './workshop.ts';
 import { createWorkshopUi } from './workshop-ui.ts';
+import { isDiceFrameJson } from './diceframe.ts';
 import { canonicalRefs } from './assets.ts';
 import { cardMetaFromCard, createAssetStore } from './assets-store.ts';
 import {
@@ -1040,6 +1041,22 @@ export function createPlugin(React: any) {
         const file = event?.target?.files?.[0];
         if (!file) return;
         const text = await file.text();
+        // M9.6b：DiceFrame（schema_version 2）需要内容包 rules 做字段映射，统一去工坊「角色卡」页导入。
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = null;
+        }
+        if (isDiceFrameJson(parsed)) {
+          setStatus({
+            kind: 'bad',
+            text: '这是 DiceFrame 角色卡（schema_version 2）：请到「内容工坊 → 角色卡」页导入——那里能用当前内容包的 rules 做字段映射，并把 personalLore 提示另导世界书。',
+          });
+          props?.onOpenWorkshop?.();
+          if (event.target) event.target.value = '';
+          return;
+        }
         const result = importCard(text);
         if (!result.ok || !result.record) {
           setStatus({ kind: 'bad', text: `导入失败：${result.errors.join('；')}` });
@@ -1052,7 +1069,7 @@ export function createPlugin(React: any) {
         setStatus({ kind: 'ok', text: `已导入角色卡：${result.record.card.identity.name}` });
         if (event.target) event.target.value = '';
       },
-      [localCards],
+      [localCards, props],
     );
 
     const exportSelectedCard = useCallback(() => {
@@ -1604,7 +1621,7 @@ export function createPlugin(React: any) {
             h('button', { key: 'seat-pregen', type: 'button', style: CSS.button, onClick: () => void seat(), disabled: busy }, '用预制卡落座'),
           ]),
           h('div', { key: 'cardbtns', style: CSS.row }, [
-            h('button', { key: 'import-card', type: 'button', style: CSS.button, onClick: () => fileInputRef.current?.click?.() }, '导入卡 JSON'),
+            h('button', { key: 'import-card', type: 'button', style: CSS.button, onClick: () => fileInputRef.current?.click?.() }, '导入卡 JSON（含 DiceFrame）'),
             h('button', { key: 'copy-pregen', type: 'button', style: CSS.button, onClick: () => savePregenCopy() }, '存预制为本地卡'),
             growth ? h('button', { key: 'merge-growth', type: 'button', style: CSS.button, onClick: () => mergeGrowthToCard() }, '合并成长到卡') : null,
             h('button', { key: 'export-card', type: 'button', style: CSS.button, onClick: () => exportSelectedCard() }, '导出卡'),

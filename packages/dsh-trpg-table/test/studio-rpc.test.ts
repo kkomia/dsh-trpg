@@ -177,7 +177,7 @@ function errorOf(response: RpcResponse<unknown>): { code: string; message: strin
 // 鉴权：loopback + host token
 // ---------------------------------------------------------------------------
 
-test('工坊 RPC 鉴权：无 token → unauthorized；玩家 token → forbidden（8 个方法全拒）', async () => {
+test('工坊 RPC 鉴权：无 token → unauthorized；玩家 token → forbidden（10 个方法全拒）', async () => {
   const h = await harness();
   try {
     const methods = [
@@ -189,6 +189,8 @@ test('工坊 RPC 鉴权：无 token → unauthorized；玩家 token → forbidde
       'pack.import',
       'pack.assetPut',
       'pack.assetDelete',
+      'rules.validate',
+      'rules.test',
     ] as const;
     for (const method of methods) {
       const noToken = errorOf(await h.rpc(method, { packId: BUILTIN_ID, prompt: 'x', style: 'topdown-2d' }));
@@ -204,7 +206,7 @@ test('工坊 RPC 鉴权：无 token → unauthorized；玩家 token → forbidde
   }
 });
 
-test('工坊 RPC 鉴权：非 loopback 请求即使 host token 也 forbidden（8 个方法全拒）', async () => {
+test('工坊 RPC 鉴权：非 loopback 请求即使 host token 也 forbidden（10 个方法全拒）', async () => {
   const h = await harness({ isLoopbackRequest: () => false });
   try {
     const cases: Array<[string, unknown]> = [
@@ -216,6 +218,8 @@ test('工坊 RPC 鉴权：非 loopback 请求即使 host token 也 forbidden（8
       ['pack.import', { b64: 'AAAA', strategy: 'reject' }],
       ['pack.assetPut', { packId: BUILTIN_ID, assetId: 'item.x.y', kind: 'item', b64: 'AAAA' }],
       ['pack.assetDelete', { packId: BUILTIN_ID, assetId: 'item.x.y' }],
+      ['rules.validate', { packId: BUILTIN_ID }],
+      ['rules.test', { packId: BUILTIN_ID, requests: [{ kind: 'derived' }] }],
     ];
     for (const [method, params] of cases) {
       const error = errorOf(await h.rpc(method, params, h.hostToken));
@@ -484,6 +488,73 @@ test('pack.assetPut：内置包 → conflict；坏 b64 → bad-request（RPC 层
     );
     assert.equal(bad.code, 'bad-request');
     assert.match(bad.message, /Base64/);
+  } finally {
+    await h.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M9.6b 规则校验 / 规则测试台（新增 2 个方法走同一条工坊鉴权通道）
+// ---------------------------------------------------------------------------
+
+test('rules.validate RPC：内置包通过；草稿 sha256 不符时 ok=false 但 RPC 成功（不落盘）', async () => {
+  const h = await harness();
+  try {
+    const builtin = resultOf<{ ok: boolean; rulesId: string; draft: boolean; scripts: unknown[] }>(
+      await h.rpc('rules.validate', { packId: BUILTIN_ID }, h.hostToken),
+    );
+    assert.equal(builtin.ok, true);
+    assert.equal(builtin.draft, false);
+    assert.equal(builtin.rulesId, CORE_GUIMUYA_PACK.rules?.rulesId);
+    assert.ok(builtin.scripts.length > 0);
+
+    const draft = structuredClone(CORE_GUIMUYA_PACK) as unknown as {
+      rules?: { scripts?: Record<string, { file: string; sha256: string }> };
+    };
+    const scripts = draft.rules?.scripts;
+    assert.ok(scripts !== undefined);
+    const firstHook = Object.keys(scripts)[0] as string;
+    scripts[firstHook] = { ...scripts[firstHook]!, sha256: '0'.repeat(64) };
+    const draftResult = resultOf<{ ok: boolean; draft: boolean; errors: string[] }>(
+      await h.rpc('rules.validate', { packId: BUILTIN_ID, pack: draft }, h.hostToken),
+    );
+    assert.equal(draftResult.ok, false);
+    assert.equal(draftResult.draft, true);
+    assert.match(draftResult.errors.join('；'), /sha256 与清单不符/);
+    // 未落盘：再次校验已安装包仍然通过
+    const again = resultOf<{ ok: boolean }>(await h.rpc('rules.validate', { packId: BUILTIN_ID }, h.hostToken));
+    assert.equal(again.ok, true);
+  } finally {
+    await h.close();
+  }
+});
+
+test('rules.test RPC：检定返回 rolls/trace/result；参数错误走 bad-request 中文', async () => {
+  const h = await harness();
+  try {
+    const result = resultOf<{
+      ok: boolean;
+      seed: number;
+      outcomes: Array<{ ok: boolean; rolls: unknown[]; trace: { lines: string[] }; result: Record<string, unknown> | null }>;
+    }>(
+      await h.rpc(
+        'rules.test',
+        { packId: BUILTIN_ID, requests: [{ kind: 'check', skillId: 'perception', dc: 10 }], seed: 123 },
+        h.hostToken,
+      ),
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.seed, 123);
+    assert.equal(result.outcomes.length, 1);
+    assert.ok(result.outcomes[0]!.rolls.length >= 1);
+    assert.ok(result.outcomes[0]!.trace.lines.length > 0);
+    assert.equal(typeof result.outcomes[0]!.result?.total, 'number');
+
+    const bad = errorOf(
+      await h.rpc('rules.test', { packId: BUILTIN_ID, requests: [{ kind: 'action' }] }, h.hostToken),
+    );
+    assert.equal(bad.code, 'bad-request');
+    assert.match(bad.message, /需要 actionId/);
   } finally {
     await h.close();
   }

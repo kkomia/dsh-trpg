@@ -13,11 +13,31 @@ import type {
   MapGenerateResult,
   PackAssetKind,
   PackImportStrategy,
+  RulesTestKind,
+  RulesTestRequest,
+  RulesTestResult,
+  RulesValidateResult,
   WorldGenerateResult,
 } from '@dsh-trpg/protocol';
-import type { ContentPack } from '@dsh-trpg/content';
+import type {
+  CharacterCardDef,
+  ContentPack,
+  PackEncounterDef,
+  PackLorebookDef,
+  PackModuleDef,
+  PackNpcDef,
+  PackSceneDef,
+} from '@dsh-trpg/content';
 import {
+  ACTION_KINDS,
+  FIELD_KINDS,
   PACK_ASSET_KIND_LABELS,
+  RANGE_BANDS,
+  SPACE_MODELS,
+  STACKING_MODES,
+  TARGETING_SIDES,
+  TARGETING_TYPES,
+  TIME_MODELS,
   WORKSHOP_TABS,
   assetFilePathFor,
   assetIdFromFileName,
@@ -42,11 +62,33 @@ import {
   WORKSHOP_DEFAULT_BASE_HINT,
   type IconReferenceInfo,
   type MissingIconTarget,
+  type RulePackDef,
   type WorkshopSessionLike,
   type WorkshopSnapshot,
   type WorkshopStore,
   type WorkshopTab,
 } from './workshop.ts';
+import {
+  createLocalCardFromForm,
+  emptyLocalCardForm,
+  loadLocalCards,
+  localCardFormOf,
+  removeLocalCard,
+  saveLocalCards,
+  updateLocalCardFromForm,
+  upsertLocalCard,
+  type LocalCardForm,
+  type LocalCardRecord,
+} from './cards.ts';
+import { importDiceFrameText, isDiceFrameJson } from './diceframe.ts';
+import {
+  ABILITIES,
+  SKILL_ABILITY,
+  SKILL_NAME,
+  validateCharacterCard,
+  type Ability,
+  type SkillId,
+} from '@dsh-trpg/engine';
 
 type H = (...args: any[]) => any;
 type VNode = unknown;
@@ -351,7 +393,211 @@ const ST: Record<string, Record<string, unknown>> = {
     color: '#0b0d10',
     border: '1px solid rgba(0,0,0,.5)',
   },
+  // ---- M9.6b 编辑器通用（表单/表格/事件） ----
+  field: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 },
+  fieldRow: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 },
+  fieldLabel: { fontSize: 10, color: 'var(--dsw-alias-label-secondary)', minWidth: 0 },
+  grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 8, minWidth: 0 },
+  grid3: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 6, minWidth: 0 },
+  scrollBox: {
+    maxHeight: 200,
+    overflowY: 'auto',
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: 8,
+    padding: 6,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 3,
+    minWidth: 0,
+  },
+  mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+  codeArea: {
+    boxSizing: 'border-box',
+    width: '100%',
+    minHeight: 120,
+    padding: '6px 8px',
+    borderRadius: 7,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    background: 'var(--dsw-alias-bg-base)',
+    color: 'var(--dsw-alias-label-secondary)',
+    fontSize: 10,
+    lineHeight: 1.5,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    resize: 'vertical',
+  },
+  md: {
+    border: '1px solid var(--dsw-alias-border-l1)',
+    borderRadius: 8,
+    padding: '6px 9px',
+    background: 'var(--dsw-alias-bg-base)',
+    fontSize: 11,
+    lineHeight: 1.55,
+    maxHeight: 220,
+    overflowY: 'auto',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+  },
+  listItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '4px 7px',
+    borderRadius: 7,
+    border: '1px solid var(--dsw-alias-border-l1)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    cursor: 'pointer',
+    color: 'var(--dsw-alias-label-primary)',
+    fontSize: 11,
+    fontFamily: 'inherit',
+    textAlign: 'left',
+  },
+  listItemOn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '4px 7px',
+    borderRadius: 7,
+    border: '1px solid var(--dsw-alias-brand-primary)',
+    background: 'color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent)',
+    cursor: 'pointer',
+    color: 'var(--dsw-alias-label-primary)',
+    fontSize: 11,
+    fontFamily: 'inherit',
+    textAlign: 'left',
+  },
+  pill: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    fontSize: 10,
+    padding: '1px 7px',
+    borderRadius: 999,
+    border: '1px solid var(--dsw-alias-border-l2)',
+    color: 'var(--dsw-alias-label-secondary)',
+    whiteSpace: 'nowrap',
+  },
+  bar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+    padding: '6px 8px',
+    borderRadius: 9,
+    border: '1px solid var(--dsw-alias-border-l1)',
+    background: 'var(--dsw-alias-bg-layer-1)',
+    minWidth: 0,
+  },
 };
+
+// ---------------------------------------------------------------------------
+// M9.6b 编辑器纯函数（世界书/模组草稿校验、Markdown 预览）
+// ---------------------------------------------------------------------------
+
+/** 逗号分隔的 keys → 数组（支持中英文逗号/顿号，去空去重）。 */
+export function splitCommaList(text: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const part of text.split(/[,，、;；\n]/)) {
+    const value = part.trim();
+    if (value.length === 0 || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
+/** 世界书草稿行内校验：错误阻断保存，警告提示但不阻断。 */
+export function validateLoreDraft(book: PackLorebookDef): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const ids = new Set<string>();
+  book.entries.forEach((entry, index) => {
+    const label = (entry.title ?? '').trim() || (entry.loreId ?? '').trim() || `第 ${index + 1} 条`;
+    const loreId = (entry.loreId ?? '').trim();
+    if (loreId.length === 0) errors.push(`${label}：loreId 不能为空`);
+    else if (ids.has(loreId)) errors.push(`loreId 重复：${loreId}`);
+    else ids.add(loreId);
+    if ((entry.title ?? '').trim().length === 0) errors.push(`${label}：标题（title）不能为空`);
+    const visibility = String(entry.visibility ?? '');
+    if (!/^(public|gm|player:.+)$/.test(visibility)) {
+      errors.push(`${label}：visibility 必须是 public / gm / player:<玩家 id>`);
+    }
+    if (!Array.isArray(entry.keys) || entry.keys.length === 0) {
+      warnings.push(`${label}：keys 为空——世界书检索不会命中该条（alwaysOn 时不受影响）`);
+    }
+    if (typeof entry.content !== 'string' || entry.content.trim().length === 0) {
+      warnings.push(`${label}：正文为空`);
+    }
+    if (typeof entry.priority !== 'number' || !Number.isFinite(entry.priority)) {
+      errors.push(`${label}：priority 必须是数值`);
+    }
+  });
+  return { errors, warnings };
+}
+
+/** 模组草稿行内校验：场景/NPC/遭遇 id 唯一、引用存在、startSceneId 命中。 */
+export function validateModuleDraft(module: PackModuleDef, loreIds: readonly string[]): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const npcIds = new Set<string>();
+  for (const npc of module.npcs ?? []) {
+    const id = (npc.npcId ?? '').trim();
+    if (id.length === 0) errors.push('NPC 的 npcId 不能为空');
+    else if (npcIds.has(id)) errors.push(`NPC id 重复：${id}`);
+    else npcIds.add(id);
+    if ((npc.name ?? '').trim().length === 0) errors.push(`NPC「${id || '未命名'}」的名字不能为空`);
+  }
+  const sceneIds = new Set<string>();
+  for (const scene of module.scenes ?? []) {
+    const id = (scene.sceneId ?? '').trim();
+    if (id.length === 0) errors.push('场景的 sceneId 不能为空');
+    else if (sceneIds.has(id)) errors.push(`场景 id 重复：${id}`);
+    else sceneIds.add(id);
+    if ((scene.title ?? '').trim().length === 0) errors.push(`场景「${id || '未命名'}」的标题不能为空`);
+    if ((scene.entry ?? '').trim().length === 0) warnings.push(`场景「${id || '未命名'}」的开场（entry）为空`);
+    for (const npcId of scene.npcIds ?? []) {
+      if (!npcIds.has(npcId)) errors.push(`场景「${id}」引用了不存在的 NPC：${npcId}`);
+    }
+    for (const loreId of scene.loreIds ?? []) {
+      if (!loreIds.includes(loreId)) errors.push(`场景「${id}」引用了不存在的世界书条目：${loreId}`);
+    }
+    for (const encounterId of scene.encounterIds ?? []) {
+      if (!(module.encounters ?? []).some((encounter) => encounter.encounterId === encounterId)) {
+        errors.push(`场景「${id}」引用了不存在的遭遇：${encounterId}`);
+      }
+    }
+    for (const rewardId of scene.rewardIds ?? []) {
+      if (!(module.rewards ?? []).some((reward) => reward.rewardId === rewardId)) {
+        errors.push(`场景「${id}」引用了不存在的奖励：${rewardId}`);
+      }
+    }
+  }
+  if (!sceneIds.has((module.startSceneId ?? '').trim())) {
+    errors.push(`起始场景 startSceneId 必须命中本模组场景之一（当前 ${JSON.stringify(module.startSceneId)}）`);
+  }
+  for (const encounter of module.encounters ?? []) {
+    const extended = encounter as PackEncounterDef & { maxRounds?: number; battleMapId?: string };
+    if ((encounter.encounterId ?? '').trim().length === 0) errors.push('遭遇的 encounterId 不能为空');
+    if (!Array.isArray(encounter.monsters) || encounter.monsters.length === 0) {
+      errors.push(`遭遇「${encounter.encounterId || '未命名'}」至少需要一个怪物组`);
+    }
+    if (extended.maxRounds !== undefined && (!Number.isInteger(extended.maxRounds) || extended.maxRounds < 1)) {
+      errors.push(`遭遇「${encounter.encounterId}」maxRounds 必须是正整数`);
+    }
+  }
+  if ((module.title ?? '').trim().length === 0) errors.push('模组标题不能为空');
+  return { errors, warnings };
+}
+
+/** 数组行替换/删除（编辑器表格用；越界安全）。 */
+export function patchRow<T>(rows: readonly T[], index: number, patch: Partial<T>): T[] {
+  return rows.map((row, itemIndex) => (itemIndex === index ? { ...row, ...patch } : row));
+}
+
+/** 删除数组一行。 */
+export function removeRow<T>(rows: readonly T[], index: number): T[] {
+  return rows.filter((_, itemIndex) => itemIndex !== index);
+}
 
 // ---------------------------------------------------------------------------
 // 小组件
@@ -501,6 +747,210 @@ export function createWorkshopUi(React: any): WorkshopUi {
       h('span', { key: 'd', style: ST.warn }, detail ?? '（没有更多信息）'),
       h('span', { key: 'h', style: ST.tiny }, '工坊 RPC 需要 host 已实现 M9.5e 工坊服务（loopback + 房主令牌）。若确认后端已更新，请重启 DSH 后 Ctrl+R 重载客户端。'),
     ]);
+  }
+
+  // -------------------------------------------------------------------------
+  // M9.6b 编辑器小组件（表单/草稿/保存栏）
+  // -------------------------------------------------------------------------
+
+  /** 控件容器：标签在上、控件在下（窄栏也能排）。 */
+  function Field(props: { label: string; children?: unknown; hint?: string }): VNode {
+    return h('div', { style: ST.field }, [
+      h('span', { key: 'l', style: ST.fieldLabel }, props.label),
+      props.children,
+      props.hint !== undefined ? h('span', { key: 'h', style: ST.tiny }, props.hint) : null,
+    ]);
+  }
+
+  function TextInput(props: { value: string; onChange: (value: string) => void; placeholder?: string; mono?: boolean }): VNode {
+    return h('input', {
+      style: { ...ST.input, ...(props.mono === true ? ST.mono : {}) },
+      value: props.value,
+      spellCheck: false,
+      placeholder: props.placeholder ?? '',
+      onChange: (event: { target: { value: string } }) => props.onChange(event.target.value),
+    });
+  }
+
+  function TextArea(props: { value: string; onChange: (value: string) => void; rows?: number; placeholder?: string; mono?: boolean; readOnly?: boolean }): VNode {
+    return h('textarea', {
+      style: {
+        ...(props.mono === true ? ST.codeArea : ST.textarea),
+        ...(props.rows !== undefined ? { minHeight: `${Math.max(2, props.rows) * 18 + 16}px` } : {}),
+        ...(props.readOnly === true ? { background: 'var(--dsw-alias-bg-base)', color: 'var(--dsw-alias-label-secondary)' } : {}),
+      },
+      value: props.value,
+      placeholder: props.placeholder ?? '',
+      spellCheck: false,
+      readOnly: props.readOnly === true,
+      onChange: (event: { target: { value: string } }) => props.onChange(event.target.value),
+    });
+  }
+
+  function NumberInput(props: { value: number; onChange: (value: number) => void; min?: number; max?: number; step?: number }): VNode {
+    return h('input', {
+      type: 'number',
+      style: { ...ST.input, flex: '0 0 84px', minWidth: 60 },
+      value: String(props.value),
+      min: props.min,
+      max: props.max,
+      step: props.step ?? 1,
+      onChange: (event: { target: { value: string } }) => {
+        const parsed = Number.parseInt(event.target.value, 10);
+        props.onChange(Number.isFinite(parsed) ? parsed : 0);
+      },
+    });
+  }
+
+  function SelectInput(props: {
+    value: string;
+    onChange: (value: string) => void;
+    options: ReadonlyArray<{ value: string; label: string }>;
+  }): VNode {
+    return h(
+      'select',
+      {
+        style: ST.select,
+        value: props.value,
+        onChange: (event: { target: { value: string } }) => props.onChange(event.target.value),
+      },
+      props.options.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
+    );
+  }
+
+  function CheckInput(props: { checked: boolean; onChange: (checked: boolean) => void; label: string }): VNode {
+    return h('label', { style: { ...ST.fieldRow, gap: 4, fontSize: 10, color: 'var(--dsw-alias-label-secondary)' } }, [
+      h('input', {
+        key: 'c',
+        type: 'checkbox',
+        checked: props.checked,
+        onChange: (event: { target: { checked: boolean } }) => props.onChange(event.target.checked),
+      }),
+      props.label,
+    ]);
+  }
+
+  /** 多选（checkbox 列表；用于场景的 NPC/世界书引用）。 */
+  function MultiPick(props: {
+    all: ReadonlyArray<{ id: string; label: string }>;
+    selected: readonly string[];
+    onChange: (next: string[]) => void;
+    emptyHint: string;
+  }): VNode {
+    if (props.all.length === 0) return h('span', { style: ST.tiny }, props.emptyHint);
+    return h('div', { style: ST.scrollBox }, props.all.map((item) => {
+      const checked = props.selected.includes(item.id);
+      return h(CheckInput, {
+        key: item.id,
+        checked,
+        label: `${item.label}（${item.id}）`,
+        onChange: (next: boolean) => {
+          const set = new Set(props.selected);
+          if (next) set.add(item.id);
+          else set.delete(item.id);
+          props.onChange([...set]);
+        },
+      });
+    }));
+  }
+
+  /** 编辑草稿：从 pack 派生，pack 对象变化（保存/切换包）时重置。 */
+  function useEditorDraft<T>(pack: ContentPack, pick: (pack: ContentPack) => T): [T, (next: T) => void] {
+    const [draft, setDraft] = useState(() => structuredClone(pick(pack)));
+    useEffect(() => {
+      setDraft(structuredClone(pick(pack)));
+    }, [pack]);
+    return [draft as T, (next: T) => setDraft(next)];
+  }
+
+  /** 编辑器顶部操作条：保存/校验 + 只读副本引导。 */
+  function EditorBar(props: {
+    title: string;
+    sub?: string;
+    builtin: boolean;
+    busy: boolean;
+    onSave: () => void;
+    saveLabel?: string;
+    onValidate?: () => void;
+    validateBusy?: boolean;
+    onDuplicate: () => void;
+    extra?: unknown;
+  }): VNode {
+    return h('div', { style: ST.bar }, [
+      h('strong', { key: 't', style: { fontSize: 12 } }, props.title),
+      props.sub !== undefined ? h('span', { key: 's', style: ST.tiny }, props.sub) : null,
+      h('span', { key: 'sp', style: { flex: '1 1 auto' } }),
+      props.extra,
+      props.onValidate !== undefined
+        ? h(
+            'button',
+            { key: 'validate', type: 'button', style: ST.button, disabled: props.validateBusy === true, onClick: () => props.onValidate?.() },
+            props.validateBusy === true ? '校验中…' : '校验（rules.validate）',
+          )
+        : null,
+      props.builtin
+        ? h('button', { key: 'dup', type: 'button', style: ST.button, onClick: () => props.onDuplicate() }, '复制为可编辑副本')
+        : h('button', { key: 'save', type: 'button', style: ST.buttonPrimary, disabled: props.busy, onClick: () => props.onSave() }, props.saveLabel ?? '保存'),
+    ]);
+  }
+
+  /** 极简 Markdown 预览（标题/列表/粗体/空行；不引第三方库）。 */
+  function MarkdownPreview(props: { text: string }): VNode {
+    const blocks = props.text.split('\n').map((line, index) => {
+      const key = `md-${index}`;
+      const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+      if (heading !== null) {
+        const level = heading[1]?.length ?? 1;
+        return h('div', { key, style: { fontWeight: 700, fontSize: level <= 2 ? 13 : 12, marginTop: 4 } }, inlineMd(heading[2] ?? ''));
+      }
+      const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+      if (bullet !== null) return h('div', { key, style: { paddingLeft: 12 } }, ['• ', inlineMd(bullet[1] ?? '')]);
+      if (line.trim().length === 0) return h('div', { key, style: { height: 5 } });
+      return h('div', { key }, inlineMd(line));
+    });
+    return h('div', { style: ST.md }, blocks);
+  }
+
+  function inlineMd(text: string): unknown[] {
+    const nodes: unknown[] = [];
+    const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+    parts.forEach((part, index) => {
+      if (part.startsWith('**') && part.endsWith('**')) nodes.push(h('strong', { key: index }, part.slice(2, -2)));
+      else if (part.startsWith('`') && part.endsWith('`')) nodes.push(h('code', { key: index, style: ST.mono }, part.slice(1, -1)));
+      else if (part.length > 0) nodes.push(part);
+    });
+    return nodes;
+  }
+
+  /** 保存当前编辑器草稿：内置包拦截并引导复制；调用方给的 mutate 改深拷贝后的 pack。 */
+  function usePackSaver(snapshot: WorkshopSnapshot): {
+    save: (label: string, mutate: (next: ContentPack) => void) => Promise<void>;
+    builtin: boolean;
+    busy: boolean;
+    duplicate: () => void;
+  } {
+    const pack = snapshot.detail;
+    const builtin = pack !== null && store.isBuiltinPack(pack.packId);
+    const save = async (label: string, mutate: (next: ContentPack) => void): Promise<void> => {
+      if (pack === null) return;
+      if (builtin) {
+        store.setNotice({
+          tone: 'bad',
+          text: '内置包只读：不能直接保存',
+          lines: ['请先点「复制为可编辑副本」（pack.import strategy=rename），在副本上编辑保存。'],
+        });
+        return;
+      }
+      const next = structuredClone(pack);
+      mutate(next);
+      await store.savePack(next, label);
+    };
+    return {
+      save,
+      builtin,
+      busy: snapshot.writeBusy !== null,
+      duplicate: () => void store.duplicateCurrent(),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -722,172 +1172,1058 @@ export function createWorkshopUi(React: any): WorkshopUi {
       .join(' / ');
   }
 
+  // -------------------------------------------------------------------------
+  // 角色卡编辑器（pack 卡 + 玩家本地卡 + DiceFrame 导入）
+  // -------------------------------------------------------------------------
+
+  const LOCAL_SKILL_OPTIONS = Object.keys(SKILL_ABILITY).map((id) => ({
+    id,
+    label: SKILL_NAME[id as SkillId] ?? id,
+  }));
+
   function CardsTab(props: { snapshot: WorkshopSnapshot }): VNode {
-    const pack = props.snapshot.detail as ContentPack;
+    const { snapshot } = props;
+    const pack = snapshot.detail as ContentPack;
     const cards = pack.cards ?? [];
-    const paged = usePaged(cards, 12);
-    return h('div', { style: { ...ST.col, gap: 8 } }, [
-      h('div', { key: 'head', style: ST.panel }, [
-        h(SectionTitle, { key: 't', text: `角色卡（${cards.length}）`, sub: '只读：名字 / 职业等级 / 属性摘要 / 原 JSON 折叠；编辑表单后续版本' }),
-        h('span', { key: 'hint', style: ST.tiny }, '卡实例与落座由 host/rooms 负责，工坊只展示 pack 内置卡库（cards[]）。'),
+    const builtin = store.isBuiltinPack(pack.packId);
+    const saver = usePackSaver(snapshot);
+    const [selectedId, setSelectedId] = useState(cards[0]?.cardId ?? (null as string | null));
+    const [cardDraft, setCardDraft] = useState(null as CharacterCardDef | null);
+    useEffect(() => {
+      const source = cards.find((card) => card.cardId === selectedId) ?? cards[0];
+      setCardDraft(source === undefined ? null : structuredClone(source));
+    }, [pack, selectedId]);
+    const updateCard = (patch: Partial<CharacterCardDef>): void => {
+      setCardDraft((current: CharacterCardDef | null) => (current === null ? current : { ...current, ...patch }));
+    };
+    const saveCard = async (): Promise<void> => {
+      if (cardDraft === null) return;
+      const report = validateCharacterCard(cardDraft);
+      if (!report.ok) {
+        store.setNotice({ tone: 'bad', text: '角色卡校验失败，未保存', lines: report.errors });
+        return;
+      }
+      await saver.save(`角色卡 ${cardDraft.cardId}`, (next) => {
+        const index = next.cards.findIndex((card) => card.cardId === cardDraft.cardId);
+        if (index < 0) next.cards.push(cardDraft);
+        else next.cards[index] = cardDraft;
+      });
+    };
+
+    // ---- 玩家本地卡（localStorage 卡库） ----
+    const [localCards, setLocalCards] = useState(() => loadLocalCards() as LocalCardRecord[]);
+    const [localEditingId, setLocalEditingId] = useState(null as string | null);
+    const [localForm, setLocalForm] = useState(() => emptyLocalCardForm() as LocalCardForm);
+    const localEditOpen = localEditingId !== null;
+    const refreshLocal = (): void => setLocalCards(loadLocalCards());
+    const saveLocal = (): void => {
+      const existing = localEditingId !== null ? localCards.find((record: LocalCardRecord) => record.card.id === localEditingId) : undefined;
+      const result = existing !== undefined ? updateLocalCardFromForm(existing, localForm) : createLocalCardFromForm(localForm);
+      if (!result.ok || result.record === undefined) {
+        store.setNotice({ tone: 'bad', text: '本地卡保存失败', lines: result.errors });
+        return;
+      }
+      const next = upsertLocalCard(localCards, result.record);
+      saveLocalCards(next);
+      setLocalCards(next);
+      setLocalEditingId(result.record.card.id);
+      store.setNotice({ tone: 'ok', text: `已保存本地卡：${result.record.card.identity.name}（仅存本机 localStorage）`, lines: [] });
+    };
+    const deleteLocal = (): void => {
+      if (localEditingId === null) return;
+      const next = removeLocalCard(localCards, localEditingId);
+      saveLocalCards(next);
+      setLocalCards(next);
+      setLocalEditingId(null);
+      setLocalForm(emptyLocalCardForm());
+      store.setNotice({ tone: 'ok', text: '已删除本地卡', lines: [] });
+    };
+
+    // ---- DiceFrame 导入 ----
+    const importRef = useRef(null as { click?: () => void; value?: string } | null);
+    const [importText, setImportText] = useState('');
+    const [importReport, setImportReport] = useState(null as null | { tone: 'ok' | 'bad'; title: string; lines: string[]; lore: number });
+    const runImport = (text: string): void => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        setImportReport({ tone: 'bad', title: '导入失败：不是合法 JSON', lines: ['请检查文件是否为 JSON 文本'], lore: 0 });
+        return;
+      }
+      const result = importDiceFrameText(text, pack.rules ?? null);
+      if (!result.ok) {
+        setImportReport({ tone: 'bad', title: 'DiceFrame 导入失败', lines: result.errors, lore: 0 });
+        return;
+      }
+      const record: LocalCardRecord = { card: result.card, origin: 'import', createdAt: Date.now(), updatedAt: Date.now() };
+      const next = upsertLocalCard(loadLocalCards(), record);
+      saveLocalCards(next);
+      setLocalCards(next);
+      setLocalEditingId(record.card.id);
+      setLocalForm(localCardFormOf(record.card));
+      const lines = [...result.warnings.slice(0, 8)];
+      if (result.personalLore.length > 0) {
+        lines.push(
+          `personalLore：卡内世界书片段 ${result.personalLore.length} 条（${result.personalLore
+            .map((entry: { title?: string; source: string }) => entry.title ?? entry.source)
+            .slice(0, 4)
+            .join('、')}）不会写进角色卡，请在世界书 tab 另导（有 GM 可见性规则，混进卡里会泄漏）。`,
+        );
+      }
+      setImportReport({ tone: 'ok', title: `已导入 DiceFrame 卡：${result.card.identity.name}（${result.card.id}）`, lines, lore: result.personalLore.length });
+      store.setNotice({ tone: 'ok', text: `DiceFrame 卡已存入本地卡库：${result.card.identity.name}`, lines });
+    };
+    const onImportFile = async (event: { target?: { files?: ArrayLike<File & { text(): Promise<string> }>; value?: string } }): Promise<void> => {
+      const file = event?.target?.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      setImportText(text.slice(0, 20000));
+      runImport(text);
+      if (event.target) event.target.value = '';
+    };
+    const importIsDiceFrame = ((): boolean => {
+      try {
+        return isDiceFrameJson(JSON.parse(importText));
+      } catch {
+        return false;
+      }
+    })();
+
+    const localEditor = h('div', { key: 'local-editor', style: ST.panel }, [
+      h(SectionTitle, { key: 't', text: '玩家本地卡（新建 / 编辑）', sub: '存浏览器 localStorage；落座时上传给房间做校验（与规则包无关的 engine 卡形状）' }),
+      h('div', { key: 'row', style: ST.row }, [
+        h(
+          'select',
+          {
+            key: 'pick',
+            style: { ...ST.select, flex: '1 1 180px' },
+            value: localEditingId ?? '',
+            onChange: (event: { target: { value: string } }) => {
+              const id = event.target.value;
+              setLocalEditingId(id.length > 0 ? id : null);
+              const record = localCards.find((entry: LocalCardRecord) => entry.card.id === id);
+              setLocalForm(record !== undefined ? localCardFormOf(record.card) : emptyLocalCardForm());
+            },
+          },
+          [
+            h('option', { key: '', value: '' }, '＋ 新建空白卡'),
+            ...localCards.map((record: LocalCardRecord) => h('option', { key: record.card.id, value: record.card.id }, `${record.card.identity.name}（Lv${record.card.identity.level}）`)),
+          ],
+        ),
+        h('button', { key: 'new', type: 'button', style: ST.button, onClick: () => { setLocalEditingId(null); setLocalForm(emptyLocalCardForm()); } }, '空白新建'),
+        h('button', { key: 'save', type: 'button', style: ST.buttonPrimary, onClick: () => saveLocal() }, localEditingId === null ? '保存为新卡' : '保存本地卡'),
+        localEditingId !== null ? h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => deleteLocal() }, '删除') : null,
       ]),
-      ...paged.visible.map((card, index) => {
-        const identity = card.identity as { name?: string; race?: string; class?: string; level?: number } | undefined;
-        return h('div', { key: card.cardId ?? index, style: ST.card }, [
-          h('div', { key: 'h', style: ST.row }, [
-            h('strong', { key: 'n', style: { fontSize: 12 } }, identity?.name ?? card.cardId ?? `卡 ${index + 1}`),
-            h(Tag, { key: 'race', text: identity?.race ?? '种族未填' }),
-            h(Tag, { key: 'class', text: `${identity?.class ?? '职业未填'} Lv${identity?.level ?? '?'}` }),
-            h(Tag, { key: 'id', text: card.cardId ?? '—' }),
-          ]),
-          h('span', { key: 'attr', style: ST.small }, attributeSummary(card)),
-          h('span', { key: 'sum', style: ST.muted }, truncate(typeof card.publicSummary === 'string' ? card.publicSummary : '', 140)),
-          h(JsonFold, { key: 'json', label: '原 JSON（cards[]）', value: card }),
-        ]);
+      h('div', { key: 'form', style: ST.grid2 }, [
+        h(Field, { key: 'name', label: '名字' }, h(TextInput, { value: localForm.name, onChange: (value: string) => setLocalForm({ ...localForm, name: value }) })),
+        h(Field, { key: 'race', label: '种族' }, h(TextInput, { value: localForm.race, onChange: (value: string) => setLocalForm({ ...localForm, race: value }) })),
+        h(Field, { key: 'class', label: '职业' }, h(TextInput, { value: localForm.class, onChange: (value: string) => setLocalForm({ ...localForm, class: value }) })),
+        h(Field, { key: 'level', label: '等级（1–20）' }, h(NumberInput, { value: localForm.level, min: 1, max: 20, onChange: (value: number) => setLocalForm({ ...localForm, level: value }) })),
+      ]),
+      h('div', { key: 'abilities', style: ST.grid3 }, ABILITIES.map((ability: Ability) =>
+        h(Field, { key: ability, label: ability.toUpperCase() }, h(NumberInput, {
+          value: localForm.abilities[ability],
+          min: 1,
+          max: 30,
+          onChange: (value: number) => setLocalForm({ ...localForm, abilities: { ...localForm.abilities, [ability]: value } }),
+        })),
+      )),
+      h(Field, { key: 'skills', label: `技能熟练（已选 ${localForm.skills.length}）` },
+        h('div', { style: ST.scrollBox }, LOCAL_SKILL_OPTIONS.map((skillOption) =>
+          h(CheckInput, {
+            key: skillOption.id,
+            checked: localForm.skills.includes(skillOption.id as SkillId),
+            label: `${skillOption.label}（${skillOption.id}）`,
+            onChange: (checked: boolean) => {
+              const set = new Set(localForm.skills);
+              if (checked) set.add(skillOption.id as SkillId);
+              else set.delete(skillOption.id as SkillId);
+              setLocalForm({ ...localForm, skills: [...set] });
+            },
+          }),
+        )),
+      ),
+      h('div', { key: 'narrative', style: ST.grid2 }, [
+        h(Field, { key: 'appearance', label: '外貌' }, h(TextArea, { value: localForm.appearance, rows: 2, onChange: (value: string) => setLocalForm({ ...localForm, appearance: value }) })),
+        h(Field, { key: 'personality', label: '性格' }, h(TextArea, { value: localForm.personality, rows: 2, onChange: (value: string) => setLocalForm({ ...localForm, personality: value }) })),
+      ]),
+      h(Field, { key: 'summary', label: '公开摘要' }, h(TextArea, { value: localForm.publicSummary, rows: 2, onChange: (value: string) => setLocalForm({ ...localForm, publicSummary: value }) })),
+    ]);
+
+    const diceFrameEditor = h('div', { key: 'diceframe', style: ST.panel }, [
+      h(SectionTitle, { key: 't', text: 'DiceFrame 角色卡导入', sub: 'schema_version: 2 → 按当前包的 rules 字段映射 → 存入本地卡库；personalLore 另导' }),
+      h('div', { key: 'row', style: ST.row }, [
+        h('button', { key: 'file', type: 'button', style: ST.buttonPrimary, onClick: () => importRef.current?.click?.() }, '选择 DiceFrame JSON 文件'),
+        h('span', { key: 'hint', style: ST.tiny }, importIsDiceFrame ? '检测：是 DiceFrame 卡（schema_version 2）' : '检测：待导入（也可粘贴 JSON）'),
+        h('input', {
+          key: 'input',
+          type: 'file',
+          accept: '.json,application/json',
+          style: { display: 'none' },
+          ref: importRef,
+          onChange: (event: any) => void onImportFile(event),
+        }),
+      ]),
+      h(TextArea, {
+        key: 'paste',
+        value: importText,
+        rows: 4,
+        mono: true,
+        placeholder: '把 DiceFrame 卡 JSON 粘贴到这里（或点上面选择文件）…',
+        onChange: (value: string) => setImportText(value),
       }),
-      paged.more > 0 ? h('button', { key: 'more', type: 'button', style: ST.button, onClick: paged.showMore }, `显示更多（还有 ${paged.more} 张）`) : null,
+      h('div', { key: 'run', style: ST.row }, [
+        h('button', { key: 'go', type: 'button', style: ST.button, disabled: importText.trim().length === 0, onClick: () => runImport(importText) }, '解析并导入'),
+        h('span', { key: 'rules', style: ST.tiny }, pack.rules === undefined ? '⚠ 当前包没有 rules 段：无法做字段映射' : `映射规则：${pack.rules.rulesId} v${pack.rules.rulesVersion}`),
+      ]),
+      importReport !== null
+        ? h('div', { key: 'report', style: ST.hint }, [
+            h('strong', { key: 't', style: { fontSize: 11, color: importReport.tone === 'ok' ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)' } }, importReport.title),
+            ...importReport.lines.map((line: string, index: number) => h('span', { key: index, style: importReport.tone === 'ok' ? ST.warn : ST.bad }, line)),
+          ])
+        : null,
+    ]);
+
+    return h('div', { style: { ...ST.col, gap: 10 } }, [
+      h(EditorBar, {
+        key: 'bar',
+        title: `角色卡（pack 卡库 ${cards.length} 张 + 本地卡 ${localCards.length} 张）`,
+        sub: 'pack 卡保存走 pack.update（内置包只读）',
+        builtin,
+        busy: saver.busy,
+        onSave: () => void saveCard(),
+        saveLabel: '保存 pack 卡',
+        onValidate: () => void store.validateRules(null),
+        validateBusy: snapshot.validationBusy,
+        onDuplicate: saver.duplicate,
+      }),
+      builtin ? h('span', { key: 'ro', style: ST.warn }, '内置包只读：pack 卡编辑保存会被 host 拒绝；先「复制为可编辑副本」。下面「玩家本地卡」不受影响（只存本机）。') : null,
+      localEditor,
+      diceFrameEditor,
+      cards.length === 0
+        ? h('div', { key: 'none', style: ST.hint }, [h('span', { style: ST.muted }, '这个包没有内置卡（cards[] 为空）：可以用上面的本地卡编辑器新建，或导入 DiceFrame 卡。')])
+        : h('div', { key: 'packcards', style: ST.panel }, [
+            h(SectionTitle, { key: 't', text: 'pack 内置卡编辑', sub: 'identity / 六属性 / 技能熟练 / AC·HP / 背包简编 / 叙事字段' }),
+            h('div', { key: 'list', style: ST.row }, cards.map((card: CharacterCardDef) =>
+              h('button', {
+                key: card.cardId,
+                type: 'button',
+                style: card.cardId === (cardDraft?.cardId ?? selectedId) ? ST.listItemOn : ST.listItem,
+                onClick: () => setSelectedId(card.cardId),
+              }, `${card.identity?.name ?? card.cardId}（Lv${card.identity?.level ?? '?'}）`),
+            )),
+            cardDraft === null
+              ? null
+              : h('div', { key: 'editor', style: ST.col, gap: 8 }, [
+                  h('div', { key: 'id', style: ST.grid3 }, [
+                    h(Field, { key: 'cardId', label: 'cardId（只读）' }, h('span', { style: { ...ST.small, ...ST.mono } }, cardDraft.cardId)),
+                    h(Field, { key: 'name', label: '名字' }, h(TextInput, { value: cardDraft.identity?.name ?? '', onChange: (value: string) => updateCard({ identity: { ...cardDraft.identity, name: value } }) })),
+                    h(Field, { key: 'race', label: '种族' }, h(TextInput, { value: cardDraft.identity?.race ?? '', onChange: (value: string) => updateCard({ identity: { ...cardDraft.identity, race: value } }) })),
+                    h(Field, { key: 'class', label: '职业' }, h(TextInput, { value: cardDraft.identity?.class ?? '', onChange: (value: string) => updateCard({ identity: { ...cardDraft.identity, class: value } }) })),
+                    h(Field, { key: 'level', label: '等级' }, h(NumberInput, { value: cardDraft.identity?.level ?? 1, min: 1, max: 20, onChange: (value: number) => updateCard({ identity: { ...cardDraft.identity, level: value } }) })),
+                  ]),
+                  h('div', { key: 'abilities', style: ST.grid3 }, ABILITIES.map((ability: Ability) =>
+                    h(Field, { key: ability, label: ability.toUpperCase() }, h(NumberInput, {
+                      value: cardDraft.abilities?.[ability] ?? 10,
+                      min: 1,
+                      max: 30,
+                      onChange: (value: number) => updateCard({ abilities: { ...(cardDraft.abilities as Record<Ability, number>), [ability]: value } }),
+                    })),
+                  )),
+                  h('div', { key: 'combat', style: ST.grid3 }, [
+                    h(Field, { key: 'ac', label: 'AC' }, h(NumberInput, { value: cardDraft.combat?.ac ?? 10, min: 1, max: 40, onChange: (value: number) => updateCard({ combat: { ...cardDraft.combat, ac: value } }) })),
+                    h(Field, { key: 'hp', label: 'HP 上限' }, h(NumberInput, { value: cardDraft.combat?.hpMax ?? 10, min: 1, max: 999, onChange: (value: number) => updateCard({ combat: { ...cardDraft.combat, hpMax: value } }) })),
+                    h(Field, { key: 'init', label: '先攻加值' }, h(NumberInput, { value: cardDraft.combat?.initiativeBonus ?? 0, min: -10, max: 20, onChange: (value: number) => updateCard({ combat: { ...cardDraft.combat, initiativeBonus: value } }) })),
+                    h(Field, { key: 'prof', label: '熟练加值' }, h(NumberInput, { value: cardDraft.proficiency?.bonus ?? 2, min: 0, max: 9, onChange: (value: number) => updateCard({ proficiency: { ...cardDraft.proficiency, bonus: value } }) })),
+                  ]),
+                  h(Field, { key: 'skills', label: `技能熟练（已选 ${(cardDraft.proficiency?.skills ?? []).length}）` },
+                    h('div', { style: ST.scrollBox }, LOCAL_SKILL_OPTIONS.map((skillOption) =>
+                      h(CheckInput, {
+                        key: skillOption.id,
+                        checked: (cardDraft.proficiency?.skills ?? []).includes(skillOption.id as SkillId),
+                        label: `${skillOption.label}（${skillOption.id}）`,
+                        onChange: (checked: boolean) => {
+                          const set = new Set(cardDraft.proficiency?.skills ?? []);
+                          if (checked) set.add(skillOption.id as SkillId);
+                          else set.delete(skillOption.id as SkillId);
+                          updateCard({ proficiency: { ...cardDraft.proficiency, skills: [...set] } });
+                        },
+                      }),
+                    )),
+                  ),
+                  h('div', { key: 'inv', style: ST.card }, [
+                    h('span', { key: 't', style: ST.tiny }, `背包（${(cardDraft.inventory ?? []).length} 条；名字/数量简编，装备词条重算由 host 负责）`),
+                    ...(cardDraft.inventory ?? []).map((item: { name: string; qty: number; effect?: string }, index: number) =>
+                      h('div', { key: `inv-${index}`, style: ST.row }, [
+                        h(TextInput, { value: item.name, onChange: (value: string) => {
+                          const inventory = [...(cardDraft.inventory ?? [])];
+                          inventory[index] = { ...item, name: value };
+                          updateCard({ inventory });
+                        } }),
+                        h(NumberInput, { value: item.qty, min: 0, max: 999, onChange: (value: number) => {
+                          const inventory = [...(cardDraft.inventory ?? [])];
+                          inventory[index] = { ...item, qty: value };
+                          updateCard({ inventory });
+                        } }),
+                        h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => {
+                          updateCard({ inventory: (cardDraft.inventory ?? []).filter((_: unknown, itemIndex: number) => itemIndex !== index) });
+                        } }, '删除'),
+                      ]),
+                    ),
+                    h('button', { key: 'add', type: 'button', style: ST.button, onClick: () => updateCard({ inventory: [...(cardDraft.inventory ?? []), { name: '新物品', qty: 1 }] }) }, '新增物品'),
+                  ]),
+                  h('div', { key: 'narrative', style: ST.grid2 }, [
+                    h(Field, { key: 'summary', label: '公开摘要' }, h(TextArea, { value: cardDraft.publicSummary ?? '', rows: 2, onChange: (value: string) => updateCard({ publicSummary: value }) })),
+                    h(Field, { key: 'appearance', label: '外貌' }, h(TextArea, { value: cardDraft.appearance ?? '', rows: 2, onChange: (value: string) => updateCard({ appearance: value }) })),
+                    h(Field, { key: 'personality', label: '性格' }, h(TextArea, { value: cardDraft.personality ?? '', rows: 2, onChange: (value: string) => updateCard({ personality: value }) })),
+                    h(Field, { key: 'background', label: '背景' }, h(TextArea, { value: cardDraft.identity?.background ?? '', rows: 2, onChange: (value: string) => updateCard({ identity: { ...cardDraft.identity, background: value } }) })),
+                  ]),
+                  h(JsonFold, { key: 'json', label: '原 JSON（cards[]）', value: cardDraft }),
+                ]),
+          ]),
     ]);
   }
 
   function LoreTab(props: { snapshot: WorkshopSnapshot }): VNode {
-    const pack = props.snapshot.detail as ContentPack;
-    const book = pack.lorebook;
-    const entries = book?.entries ?? [];
-    const paged = usePaged(entries, 20);
-    return h('div', { style: { ...ST.col, gap: 8 } }, [
-      h('div', { key: 'head', style: ST.panel }, [
-        h(SectionTitle, { key: 't', text: `世界书：${book?.title ?? '（未命名）'}（${entries.length} 条）`, sub: '只读：title / visibility / keys / priority / alwaysOn + 正文截断' }),
-      ]),
-      ...paged.visible.map((entry, index) =>
-        h('div', { key: entry.loreId ?? index, style: ST.card }, [
-          h('div', { key: 'h', style: ST.row }, [
-            h('strong', { key: 't', style: { fontSize: 12 } }, entry.title ?? entry.loreId ?? `条目 ${index + 1}`),
-            h(Tag, { key: 'v', text: entry.visibility ?? '—', on: entry.visibility !== 'public' }),
-            h(Tag, { key: 'p', text: `priority ${entry.priority ?? 0}` }),
-            entry.alwaysOn === true ? h(Tag, { key: 'a', text: 'alwaysOn', on: true }) : null,
-            h('span', { key: 'id', style: { ...ST.tiny, opacity: 0.7 } }, entry.loreId ?? ''),
-          ]),
-          h('div', { key: 'k', style: ST.row }, [
-            h('span', { key: 'l', style: ST.tiny }, 'keys：'),
-            ...(entry.keys ?? []).slice(0, 12).map((key: string) => h(Tag, { key: `k-${key}`, text: key })),
-            (entry.keys ?? []).length > 12 ? h('span', { key: 'more', style: ST.tiny }, `+${(entry.keys ?? []).length - 12}`) : null,
-          ]),
-          h('span', { key: 'c', style: ST.small }, truncate(entry.content ?? '', 160)),
-          h(JsonFold, { key: 'json', label: '原 JSON（lorebook.entries[]）', value: entry }),
+    const snapshot = props.snapshot;
+    const pack = snapshot.detail as ContentPack;
+    const saver = usePackSaver(snapshot);
+    const [book, setBook] = useEditorDraft<PackLorebookDef>(pack, (current) => current.lorebook);
+    const [editingIndex, setEditingIndex] = useState(0);
+    const entries = book.entries ?? [];
+    const safeIndex = entries.length === 0 ? -1 : Math.max(0, Math.min(editingIndex, entries.length - 1));
+    const entry = safeIndex >= 0 ? entries[safeIndex] : undefined;
+    const inline = validateLoreDraft(book);
+    const patchEntry = (index: number, patch: Partial<PackLorebookDef['entries'][number]>): void => {
+      setBook({ ...book, entries: entries.map((current, itemIndex) => (itemIndex === index ? { ...current, ...patch } : current)) });
+    };
+    const addEntry = (): void => {
+      const loreId = `entry_${Date.now().toString(36)}`;
+      setBook({
+        ...book,
+        entries: [
+          ...entries,
+          {
+            loreId,
+            title: '新世界书条目',
+            keys: [],
+            visibility: 'public',
+            priority: 50,
+            alwaysOn: false,
+            content: '在这里写条目正文（支持 Markdown 预览）…',
+          },
+        ],
+      });
+      setEditingIndex(entries.length);
+    };
+    const deleteEntry = (index: number): void => {
+      setBook({ ...book, entries: entries.filter((_, itemIndex) => itemIndex !== index) });
+      setEditingIndex(Math.max(0, Math.min(index, entries.length - 2)));
+    };
+    const moveEntry = (index: number, delta: number): void => {
+      const target = index + delta;
+      if (target < 0 || target >= entries.length) return;
+      const next = [...entries];
+      const [moved] = next.splice(index, 1);
+      if (moved === undefined) return;
+      next.splice(target, 0, moved);
+      setBook({ ...book, entries: next });
+      setEditingIndex(target);
+    };
+    const saveBook = async (): Promise<void> => {
+      if (inline.errors.length > 0) {
+        store.setNotice({ tone: 'bad', text: `世界书有 ${inline.errors.length} 个行内错误，未保存`, lines: inline.errors });
+        return;
+      }
+      await saver.save('世界书', (next) => {
+        next.lorebook = book;
+      });
+    };
+    const visibilityKind = entry === undefined ? 'public' : entry.visibility.startsWith('player:') ? 'player' : entry.visibility;
+    return h('div', { style: { ...ST.col, gap: 10 } }, [
+      h(EditorBar, {
+        key: 'bar',
+        title: `世界书编辑器（${entries.length} 条）`,
+        sub: `${book.title ?? '未命名'} · ${book.lorebookId ?? '—'}`,
+        builtin: saver.builtin,
+        busy: saver.busy,
+        onSave: () => void saveBook(),
+        saveLabel: '保存世界书',
+        onDuplicate: saver.duplicate,
+        extra: h('button', { key: 'add', type: 'button', style: ST.button, onClick: () => addEntry() }, '＋ 新增条目'),
+      }),
+      saver.builtin
+        ? h('span', { key: 'ro', style: ST.warn }, '内置包只读：世界书保存会被 host 拒绝。点「复制为可编辑副本」后在新副本上编辑（分享 tab 也可复制）。')
+        : null,
+      h('div', { key: 'meta', style: ST.panel }, [
+        h('div', { key: 'row', style: ST.grid2 }, [
+          h(Field, { key: 'title', label: '世界书标题' }, h(TextInput, { value: book.title ?? '', onChange: (value: string) => setBook({ ...book, title: value }) })),
+          h(Field, { key: 'id', label: 'lorebookId（只读）' }, h('span', { style: { ...ST.small, ...ST.mono } }, book.lorebookId ?? '—')),
         ]),
-      ),
-      paged.more > 0 ? h('button', { key: 'more', type: 'button', style: ST.button, onClick: paged.showMore }, `显示更多（还有 ${paged.more} 条）`) : null,
+        inline.errors.length > 0
+          ? h('div', { key: 'errs', style: ST.hint }, inline.errors.map((message: string, index: number) => h('span', { key: index, style: ST.bad }, `✖ ${message}`)))
+          : null,
+        inline.warnings.length > 0
+          ? h('div', { key: 'warns', style: ST.hint }, inline.warnings.map((message: string, index: number) => h('span', { key: index, style: ST.warn }, `⚠ ${message}`)))
+          : null,
+      ]),
+      h('div', { key: 'body', style: ST.twoCol }, [
+        h('div', { key: 'list', style: ST.panel }, [
+          h(SectionTitle, { key: 't', text: '条目列表', sub: '点选编辑；上移/下移调整 priority 相同条目之外的展示顺序（不改 priority）' }),
+          h('div', { key: 'scroll', style: { ...ST.scrollBox, maxHeight: 420 } }, entries.map((item, index) =>
+            h('button', {
+              key: item.loreId ?? index,
+              type: 'button',
+              style: index === safeIndex ? ST.listItemOn : ST.listItem,
+              onClick: () => setEditingIndex(index),
+            }, [
+              h('span', { key: 'i', style: ST.tiny }, `${index + 1}.`),
+              h('span', { key: 't', style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.title ?? item.loreId ?? '未命名'),
+              h(Tag, { key: 'v', text: String(item.visibility ?? 'public'), on: item.visibility !== 'public' }),
+              item.alwaysOn === true ? h(Tag, { key: 'a', text: 'alwaysOn', on: true }) : null,
+            ]),
+          )),
+          entries.length === 0 ? h('span', { key: 'none', style: ST.muted }, '还没有世界书条目：点上方「新增条目」。') : null,
+        ]),
+        h('div', { key: 'form', style: ST.panel }, entry === undefined
+          ? h('span', { key: 'none', style: ST.muted }, '左侧还没有条目。')
+          : [
+              h('div', { key: 'row', style: ST.row }, [
+                h('strong', { key: 't', style: { fontSize: 12 } }, `编辑：${entry.title ?? entry.loreId}`),
+                h('span', { key: 'sp', style: { flex: '1 1 auto' } }),
+                h('button', { key: 'up', type: 'button', style: ST.button, disabled: safeIndex === 0, onClick: () => moveEntry(safeIndex, -1) }, '↑ 上移'),
+                h('button', { key: 'down', type: 'button', style: ST.button, disabled: safeIndex >= entries.length - 1, onClick: () => moveEntry(safeIndex, 1) }, '↓ 下移'),
+                h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => deleteEntry(safeIndex) }, '删除条目'),
+              ]),
+              h('div', { key: 'top', style: ST.grid2 }, [
+                h(Field, { key: 'title', label: '标题 title' }, h(TextInput, { value: entry.title ?? '', onChange: (value: string) => patchEntry(safeIndex, { title: value }) })),
+                h(Field, { key: 'id', label: 'loreId' }, h(TextInput, { value: entry.loreId ?? '', mono: true, onChange: (value: string) => patchEntry(safeIndex, { loreId: value }) })),
+                h(Field, { key: 'keys', label: '关键词 keys（逗号分隔）' }, h(TextInput, { value: (entry.keys ?? []).join(', '), onChange: (value: string) => patchEntry(safeIndex, { keys: splitCommaList(value) }) })),
+                h(Field, { key: 'priority', label: 'priority' }, h(NumberInput, { value: Number(entry.priority ?? 0), onChange: (value: number) => patchEntry(safeIndex, { priority: value }) })),
+                h(Field, { key: 'visibility', label: 'visibility' }, h(SelectInput, {
+                  value: visibilityKind,
+                  options: [
+                    { value: 'public', label: 'public（玩家可见）' },
+                    { value: 'gm', label: 'gm（仅 GM）' },
+                    { value: 'player', label: 'player:<玩家id>（指定玩家）' },
+                  ],
+                  onChange: (value: string) =>
+                    patchEntry(safeIndex, {
+                      visibility: (value === 'player'
+                        ? `player:${entry.visibility.startsWith('player:') ? entry.visibility.slice(7) : ''}`
+                        : value) as PackLorebookDef['entries'][number]['visibility'],
+                    }),
+                })),
+                visibilityKind === 'player'
+                  ? h(Field, { key: 'player', label: 'player:<玩家 id>' }, h(TextInput, { value: entry.visibility.startsWith('player:') ? entry.visibility.slice(7) : '', onChange: (value: string) => patchEntry(safeIndex, { visibility: `player:${value}` }) }))
+                  : h(Field, { key: 'always', label: '常驻注入' }, h(CheckInput, { checked: entry.alwaysOn === true, label: 'alwaysOn（每次注入）', onChange: (checked: boolean) => patchEntry(safeIndex, { alwaysOn: checked }) })),
+              ]),
+              h('div', { key: 'content', style: ST.twoCol }, [
+                h(Field, { key: 'src', label: '正文（Markdown）' }, h(TextArea, { value: entry.content ?? '', rows: 8, onChange: (value: string) => patchEntry(safeIndex, { content: value }) })),
+                h(Field, { key: 'preview', label: '预览' }, h(MarkdownPreview, { text: entry.content ?? '' })),
+              ]),
+              h(JsonFold, { key: 'json', label: '原 JSON（lorebook.entries[]）', value: entry }),
+            ]),
+      ]),
     ]);
   }
 
+  type ExtendedEncounter = PackEncounterDef & { maxRounds?: number; battleMapId?: string };
+
   function ModulesTab(props: { snapshot: WorkshopSnapshot }): VNode {
-    const pack = props.snapshot.detail as ContentPack;
-    const modules = pack.modules ?? [];
+    const snapshot = props.snapshot;
+    const pack = snapshot.detail as ContentPack;
+    const saver = usePackSaver(snapshot);
+    const [modules, setModules] = useEditorDraft<PackModuleDef[]>(pack, (current) => current.modules ?? []);
+    const [moduleIndex, setModuleIndex] = useState(0);
+    const [sceneIndex, setSceneIndex] = useState(0);
+    const safeModuleIndex = modules.length === 0 ? -1 : Math.max(0, Math.min(moduleIndex, modules.length - 1));
+    const module = safeModuleIndex >= 0 ? modules[safeModuleIndex] : undefined;
+    const scenes = module?.scenes ?? [];
+    const safeSceneIndex = scenes.length === 0 ? -1 : Math.max(0, Math.min(sceneIndex, scenes.length - 1));
+    const scene = safeSceneIndex >= 0 ? scenes[safeSceneIndex] : undefined;
+    const loreEntries = pack.lorebook?.entries ?? [];
+    const inline = module === undefined ? { errors: [], warnings: [] } : validateModuleDraft(module, loreEntries.map((entry) => entry.loreId));
+    const patchModule = (patch: Partial<PackModuleDef>): void => {
+      if (module === undefined) return;
+      setModules(modules.map((current, index) => (index === safeModuleIndex ? { ...module, ...patch } : current)));
+    };
+    const patchScene = (patch: Partial<PackSceneDef>): void => {
+      if (scene === undefined) return;
+      patchModule({ scenes: scenes.map((current, index) => (index === safeSceneIndex ? { ...scene, ...patch } : current)) });
+    };
+    const addScene = (): void => {
+      if (module === undefined) return;
+      const sceneId = `scene_${Date.now().toString(36)}`;
+      patchModule({
+        scenes: [
+          ...scenes,
+          { sceneId, title: '新场景', entry: '在这里写开场描述…', npcIds: [], loreIds: [], beats: [], checks: [], encounterIds: [], rewardIds: [] },
+        ],
+      });
+      setSceneIndex(scenes.length);
+    };
+    const deleteScene = (index: number): void => {
+      if (module === undefined) return;
+      const next = scenes.filter((_, itemIndex) => itemIndex !== index);
+      const nextStart = module.startSceneId === scenes[index]?.sceneId ? (next[0]?.sceneId ?? '') : module.startSceneId;
+      setModules(modules.map((current, moduleIdx) => (moduleIdx === safeModuleIndex ? { ...module, scenes: next, startSceneId: nextStart } : current)));
+      setSceneIndex(Math.max(0, Math.min(index, next.length - 1)));
+    };
+    const patchNpc = (index: number, patch: Partial<PackNpcDef>): void => {
+      if (module === undefined) return;
+      patchModule({ npcs: (module.npcs ?? []).map((npc, itemIndex) => (itemIndex === index ? { ...npc, ...patch } : npc)) });
+    };
+    const addNpc = (): void => {
+      if (module === undefined) return;
+      patchModule({ npcs: [...(module.npcs ?? []), { npcId: `npc_${Date.now().toString(36)}`, name: '新 NPC', description: '' }] });
+    };
+    const deleteNpc = (index: number): void => {
+      if (module === undefined) return;
+      const removed = module.npcs?.[index]?.npcId;
+      patchModule({
+        npcs: (module.npcs ?? []).filter((_, itemIndex) => itemIndex !== index),
+        scenes: scenes.map((current) => ({
+          ...current,
+          npcIds: (current.npcIds ?? []).filter((npcId) => npcId !== removed),
+        })),
+      });
+    };
+    const patchEncounter = (index: number, patch: Partial<ExtendedEncounter>): void => {
+      if (module === undefined) return;
+      patchModule({ encounters: (module.encounters ?? []).map((encounter, itemIndex) => (itemIndex === index ? { ...encounter, ...patch } : encounter)) });
+    };
+    const clearEncounterField = (index: number, field: 'maxRounds' | 'battleMapId'): void => {
+      if (module === undefined) return;
+      patchModule({
+        encounters: (module.encounters ?? []).map((encounter, itemIndex) => {
+          if (itemIndex !== index) return encounter;
+          const next = { ...(encounter as ExtendedEncounter) };
+          delete next[field];
+          return next;
+        }),
+      });
+    };
+    const saveModule = async (): Promise<void> => {
+      if (inline.errors.length > 0) {
+        store.setNotice({ tone: 'bad', text: `模组有 ${inline.errors.length} 个行内错误，未保存`, lines: inline.errors });
+        return;
+      }
+      await saver.save('模组', (next) => {
+        next.modules = modules;
+      });
+    };
+    if (module === undefined) {
+      return h('div', { style: ST.hint }, [
+        h('strong', { key: 't', style: { fontSize: 12 } }, '这个内容包没有模组'),
+        h('span', { key: 'd', style: ST.muted }, 'modules[v1 长度恒 1] 为空：导出/导入流程或内置包迁移可能有问题，请先在概览确认包结构。'),
+      ]);
+    }
+    const battleMapIds = (pack.rules?.space?.battleMaps ?? []).map((map) => map.mapId);
+    const skillIds = (pack.rules?.sheet.skills ?? []).map((skill) => skill.id);
+    const moduleOptions = modules.map((current, index) => h('option', { key: current.moduleId, value: String(index) }, `${current.title}（${current.moduleId}）`));
     return h('div', { style: { ...ST.col, gap: 10 } }, [
-      h('div', { key: 'head', style: ST.panel }, [
-        h(SectionTitle, { key: 't', text: `模组（${modules.length}）`, sub: 'scenes 列表：标题 / 开场截断 / NPC / beats / checks / encounters 计数；只读' }),
-      ]),
-      ...modules.flatMap((module) => [
-        h('div', { key: `m-${module.moduleId}`, style: ST.panel }, [
-          h(SectionTitle, { key: 't', text: module.title, sub: module.moduleId }),
-          h('div', { key: 'meta', style: ST.row }, [
-            h(Tag, { key: 'start', text: `起始场景 ${module.startSceneId ?? '—'}` }),
-            h(Tag, { key: 'npcs', text: `${module.npcs?.length ?? 0} NPC` }),
-            h(Tag, { key: 'scenes', text: `${module.scenes?.length ?? 0} 场景` }),
-            h(Tag, { key: 'enc', text: `${module.encounters?.length ?? 0} 遭遇` }),
-            h(Tag, { key: 'rew', text: `${module.rewards?.length ?? 0} 奖励` }),
-            h(Tag, { key: 'sec', text: `${module.secrets?.length ?? 0} 秘密` }),
-          ]),
-          h(JsonFold, { key: 'gm', label: 'GM 备注 / 模组原 JSON（含 gmNotes、secrets）', value: module }),
+      h(EditorBar, {
+        key: 'bar',
+        title: `模组编辑器（${modules.length} 个 · ${scenes.length} 场景）`,
+        sub: module.moduleId,
+        builtin: saver.builtin,
+        busy: saver.busy,
+        onSave: () => void saveModule(),
+        saveLabel: '保存模组',
+        onDuplicate: saver.duplicate,
+        extra: h('button', { key: 'addscene', type: 'button', style: ST.button, onClick: () => addScene() }, '＋ 新增场景'),
+      }),
+      saver.builtin ? h('span', { key: 'ro', style: ST.warn }, '内置包只读：模组保存会被 host 拒绝；先「复制为可编辑副本」。') : null,
+      h('div', { key: 'meta', style: ST.panel }, [
+        h('div', { key: 'row', style: ST.row }, [
+          modules.length > 1
+            ? h(SelectInput, { value: String(safeModuleIndex), options: modules.map((current, index) => ({ value: String(index), label: current.title })), onChange: (value: string) => { setModuleIndex(Number.parseInt(value, 10)); setSceneIndex(0); } })
+            : h('span', { key: 'id', style: { ...ST.small, ...ST.mono } }, module.moduleId),
+          h(Tag, { key: 'scenes', text: `${scenes.length} 场景` }),
+          h(Tag, { key: 'npcs', text: `${module.npcs?.length ?? 0} NPC` }),
+          h(Tag, { key: 'enc', text: `${module.encounters?.length ?? 0} 遭遇` }),
+          h(Tag, { key: 'rew', text: `${module.rewards?.length ?? 0} 奖励` }),
         ]),
-        ...(module.scenes ?? []).map((scene) =>
-          h('div', { key: `s-${module.moduleId}-${scene.sceneId}`, style: { ...ST.card, marginLeft: 10 } }, [
-            h('div', { key: 'h', style: ST.row }, [
-              h('strong', { key: 'n', style: { fontSize: 11 } }, scene.title ?? scene.sceneId),
-              h(Tag, { key: 'id', text: scene.sceneId }),
-              h(Tag, { key: 'npc', text: `NPC ${scene.npcIds?.length ?? 0}` }),
-              h(Tag, { key: 'b', text: `beats ${scene.beats?.length ?? 0}` }),
-              h(Tag, { key: 'c', text: `checks ${scene.checks?.length ?? 0}` }),
-              h(Tag, { key: 'e', text: `encounters ${scene.encounterIds?.length ?? 0}` }),
-              h(Tag, { key: 'r', text: `rewards ${scene.rewardIds?.length ?? 0}` }),
+        h('div', { key: 'fields', style: ST.grid3 }, [
+          h(Field, { key: 'title', label: '模组标题' }, h(TextInput, { value: module.title, onChange: (value: string) => patchModule({ title: value }) })),
+          h(Field, { key: 'start', label: '起始场景' }, h(SelectInput, { value: module.startSceneId ?? '', options: scenes.map((current) => ({ value: current.sceneId, label: `${current.title}（${current.sceneId}）` })), onChange: (value: string) => patchModule({ startSceneId: value }) })),
+          h(Field, { key: 'level', label: '等级区间（低–高）' }, h('div', { style: ST.row }, [
+            h(NumberInput, { value: module.level?.[0] ?? 1, min: 1, max: 20, onChange: (value: number) => patchModule({ level: [value, module.level?.[1] ?? value] }) }),
+            h(NumberInput, { value: module.level?.[1] ?? 1, min: 1, max: 20, onChange: (value: number) => patchModule({ level: [module.level?.[0] ?? 1, value] }) }),
+          ])),
+          h(Field, { key: 'players', label: '玩家人数（低–高）' }, h('div', { style: ST.row }, [
+            h(NumberInput, { value: module.playerCount?.[0] ?? 1, min: 1, max: 12, onChange: (value: number) => patchModule({ playerCount: [value, module.playerCount?.[1] ?? value] }) }),
+            h(NumberInput, { value: module.playerCount?.[1] ?? 1, min: 1, max: 12, onChange: (value: number) => patchModule({ playerCount: [module.playerCount?.[0] ?? 1, value] }) }),
+          ])),
+          h(Field, { key: 'duration', label: '时长（分钟）' }, h(NumberInput, { value: module.durationMinutes ?? 45, min: 1, max: 600, onChange: (value: number) => patchModule({ durationMinutes: value }) })),
+        ]),
+        h(Field, { key: 'synopsis', label: '简介 synopsis' }, h(TextArea, { value: module.synopsis ?? '', rows: 2, onChange: (value: string) => patchModule({ synopsis: value }) })),
+        h(Field, { key: 'gmNotes', label: 'GM 备注 gmNotes' }, h(TextArea, { value: module.gmNotes ?? '', rows: 2, onChange: (value: string) => patchModule({ gmNotes: value }) })),
+        inline.errors.length > 0
+          ? h('div', { key: 'errs', style: ST.hint }, inline.errors.map((message: string, index: number) => h('span', { key: index, style: ST.bad }, `✖ ${message}`)))
+          : null,
+        inline.warnings.length > 0
+          ? h('div', { key: 'warns', style: ST.hint }, inline.warnings.slice(0, 6).map((message: string, index: number) => h('span', { key: index, style: ST.warn }, `⚠ ${message}`)))
+          : null,
+      ]),
+      h('div', { key: 'npcs', style: ST.panel }, [
+        h(SectionTitle, { key: 't', text: `NPC 列表（${module.npcs?.length ?? 0}）`, sub: '名字 / 描述；删除 NPC 会同步从场景 npcIds 里移除' }),
+        ...(module.npcs ?? []).map((npc, index) =>
+          h('div', { key: `${npc.npcId}-${index}`, style: ST.card }, [
+            h('div', { key: 'row', style: ST.row }, [
+              h(Field, { key: 'id', label: 'npcId' }, h(TextInput, { value: npc.npcId, mono: true, onChange: (value: string) => patchNpc(index, { npcId: value }) })),
+              h(Field, { key: 'name', label: '名字' }, h(TextInput, { value: npc.name, onChange: (value: string) => patchNpc(index, { name: value }) })),
+              h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => deleteNpc(index) }, '删除 NPC'),
             ]),
-            h('span', { key: 'entry', style: ST.muted }, truncate(typeof scene.entry === 'string' ? scene.entry : '', 180)),
-            h(JsonFold, { key: 'json', label: '场景原 JSON', value: scene }),
+            h(Field, { key: 'desc', label: '描述' }, h(TextArea, { value: npc.description ?? '', rows: 2, onChange: (value: string) => patchNpc(index, { description: value }) })),
           ]),
         ),
+        h('button', { key: 'addnpc', type: 'button', style: ST.button, onClick: () => addNpc() }, '＋ 新增 NPC'),
+      ]),
+      h('div', { key: 'scenes', style: ST.panel }, [
+        h(SectionTitle, { key: 't', text: `场景（${scenes.length}）`, sub: '左侧点选场景；标题/开场/NPC/世界书/节拍/判定/遭遇/奖励' }),
+        h('div', { key: 'body', style: ST.twoCol }, [
+          h('div', { key: 'list', style: { ...ST.scrollBox, maxHeight: 320 } }, scenes.map((current, index) =>
+            h('button', {
+              key: current.sceneId,
+              type: 'button',
+              style: index === safeSceneIndex ? ST.listItemOn : ST.listItem,
+              onClick: () => setSceneIndex(index),
+            }, [
+              h('span', { key: 'i', style: ST.tiny }, `${index + 1}.`),
+              h('span', { key: 't', style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, current.title ?? current.sceneId),
+              h(Tag, { key: 'b', text: `beats ${current.beats?.length ?? 0}` }),
+              h(Tag, { key: 'c', text: `checks ${current.checks?.length ?? 0}` }),
+            ]),
+          )),
+        ]),
+        scene === undefined
+          ? h('span', { key: 'none', style: ST.muted }, '还没有场景：点上方「新增场景」。')
+          : h('div', { key: 'editor', style: ST.panel }, [
+              h('div', { key: 'row', style: ST.row }, [
+                h('strong', { key: 't', style: { fontSize: 12 } }, `场景：${scene.title ?? scene.sceneId}`),
+                h('span', { key: 'sp', style: { flex: '1 1 auto' } }),
+                h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => deleteScene(safeSceneIndex) }, '删除场景'),
+              ]),
+              h('div', { key: 'fields', style: ST.grid2 }, [
+                h(Field, { key: 'id', label: 'sceneId' }, h(TextInput, { value: scene.sceneId, mono: true, onChange: (value: string) => patchScene({ sceneId: value }) })),
+                h(Field, { key: 'title', label: '标题' }, h(TextInput, { value: scene.title ?? '', onChange: (value: string) => patchScene({ title: value }) })),
+              ]),
+              h(Field, { key: 'entry', label: '开场 entry' }, h(TextArea, { value: scene.entry ?? '', rows: 3, onChange: (value: string) => patchScene({ entry: value }) })),
+              h('div', { key: 'refs', style: ST.twoCol }, [
+                h(Field, { key: 'npcs', label: `场景 NPC（已选 ${(scene.npcIds ?? []).length}）` },
+                  h(MultiPick, {
+                    all: (module.npcs ?? []).map((npc) => ({ id: npc.npcId, label: npc.name })),
+                    selected: scene.npcIds ?? [],
+                    onChange: (next: string[]) => patchScene({ npcIds: next }),
+                    emptyHint: '先在模组 NPC 列表里新增 NPC。',
+                  }),
+                ),
+                h(Field, { key: 'lore', label: `世界书引用（已选 ${(scene.loreIds ?? []).length}）` },
+                  h(MultiPick, {
+                    all: loreEntries.map((entry) => ({ id: entry.loreId, label: entry.title ?? entry.loreId })),
+                    selected: scene.loreIds ?? [],
+                    onChange: (next: string[]) => patchScene({ loreIds: next }),
+                    emptyHint: '世界书还没有条目（世界书 tab 可新增）。',
+                  }),
+                ),
+              ]),
+              h('div', { key: 'counts', style: ST.row }, [
+                h(Tag, { key: 'beats', text: `beats ${scene.beats?.length ?? 0}` }),
+                h(Tag, { key: 'checks', text: `checks ${scene.checks?.length ?? 0}` }),
+                h(Tag, { key: 'enc', text: `encounters ${scene.encounterIds?.length ?? 0}` }),
+                h(Tag, { key: 'rew', text: `rewards ${scene.rewardIds?.length ?? 0}` }),
+                h('span', { key: 'sp', style: { flex: '1 1 auto' } }),
+                h('button', { key: 'addbeat', type: 'button', style: ST.button, onClick: () => patchScene({ beats: [...(scene.beats ?? []), { beatId: `beat_${Date.now().toString(36)}`, trigger: '触发条件', effect: '进入下一场' }] }) }, '＋ 节拍'),
+                h('button', { key: 'addcheck', type: 'button', style: ST.button, onClick: () => patchScene({ checks: [...(scene.checks ?? []), { checkId: `check_${Date.now().toString(36)}`, when: '玩家尝试…', skill: (skillIds[0] ?? 'perception') as never, dc: 10, success: '成功描述', failure: '失败描述' }] }) }, '＋ 判定'),
+              ]),
+              (scene.beats ?? []).length > 0 || (scene.checks ?? []).length > 0
+                ? h('div', { key: 'lists', style: ST.grid2 }, [
+                    (scene.beats ?? []).length > 0
+                      ? h('div', { key: 'beats', style: ST.card }, [
+                          h('span', { key: 't', style: ST.tiny }, `节拍（${(scene.beats ?? []).length}）`),
+                          ...(scene.beats ?? []).map((beat, index) =>
+                            h('div', { key: `${beat.beatId}-${index}`, style: ST.row }, [
+                              h(TextInput, { value: beat.trigger, onChange: (value: string) => patchScene({ beats: (scene.beats ?? []).map((item, itemIndex) => (itemIndex === index ? { ...item, trigger: value } : item)) }) }),
+                              h(TextInput, { value: beat.effect, onChange: (value: string) => patchScene({ beats: (scene.beats ?? []).map((item, itemIndex) => (itemIndex === index ? { ...item, effect: value } : item)) }) }),
+                              h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => patchScene({ beats: (scene.beats ?? []).filter((_, itemIndex) => itemIndex !== index) }) }, '×'),
+                            ]),
+                          ),
+                        ])
+                      : null,
+                    (scene.checks ?? []).length > 0
+                      ? h('div', { key: 'checks', style: ST.card }, [
+                          h('span', { key: 't', style: ST.tiny }, `判定（${(scene.checks ?? []).length}）`),
+                          ...(scene.checks ?? []).map((check, index) =>
+                            h('div', { key: `${check.checkId}-${index}`, style: ST.row }, [
+                              h(TextInput, { value: check.when, onChange: (value: string) => patchScene({ checks: (scene.checks ?? []).map((item, itemIndex) => (itemIndex === index ? { ...item, when: value } : item)) }) }),
+                              h(SelectInput, {
+                                value: String(check.skill ?? ''),
+                                options: skillIds.map((id) => ({ value: id, label: id })),
+                                onChange: (value: string) => patchScene({ checks: (scene.checks ?? []).map((item, itemIndex) => (itemIndex === index ? { ...item, skill: value as never } : item)) }),
+                              }),
+                              h(NumberInput, { value: check.dc ?? 10, min: 0, max: 60, onChange: (value: number) => patchScene({ checks: (scene.checks ?? []).map((item, itemIndex) => (itemIndex === index ? { ...item, dc: value } : item)) }) }),
+                              h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => patchScene({ checks: (scene.checks ?? []).filter((_, itemIndex) => itemIndex !== index) }) }, '×'),
+                            ]),
+                          ),
+                        ])
+                      : null,
+                  ])
+                : null,
+              h('div', { key: 'encs', style: ST.card }, [
+                h('span', { key: 't', style: ST.tiny }, `本模组遭遇（${module.encounters?.length ?? 0}）：可设置/清除本场 maxRounds 与 battleMapId（出现在 GM 提示与开战时）`),
+                ...(module.encounters ?? []).map((encounter, index) => {
+                  const extended = encounter as ExtendedEncounter;
+                  return h('div', { key: `${encounter.encounterId}-${index}`, style: { ...ST.row, alignItems: 'flex-end' } }, [
+                    h('span', { key: 'id', style: { ...ST.tiny, ...ST.mono } }, encounter.encounterId),
+                    h('span', { key: 'mon', style: ST.tiny }, `${encounter.monsters.length} 组怪`),
+                    h(Field, { key: 'max', label: 'maxRounds' }, h(NumberInput, {
+                      value: extended.maxRounds ?? 0,
+                      min: 0,
+                      max: 999,
+                      onChange: (value: number) => {
+                        if (value > 0) patchEncounter(index, { maxRounds: value });
+                        else clearEncounterField(index, 'maxRounds');
+                      },
+                    })),
+                    h(Field, { key: 'map', label: 'battleMapId' }, h(SelectInput, {
+                      value: extended.battleMapId ?? '',
+                      options: [{ value: '', label: '（不指定）' }, ...battleMapIds.map((mapId) => ({ value: mapId, label: mapId }))],
+                      onChange: (value: string) => {
+                        if (value.length > 0) patchEncounter(index, { battleMapId: value });
+                        else clearEncounterField(index, 'battleMapId');
+                      },
+                    })),
+                    extended.maxRounds !== undefined
+                      ? h('button', { key: 'clr1', type: 'button', style: ST.button, onClick: () => clearEncounterField(index, 'maxRounds') }, '清除回合上限')
+                      : null,
+                    extended.battleMapId !== undefined
+                      ? h('button', { key: 'clr2', type: 'button', style: ST.button, onClick: () => clearEncounterField(index, 'battleMapId') }, '清除战斗地图')
+                      : null,
+                    scene.encounterIds?.includes(encounter.encounterId) === true
+                      ? h('button', { key: 'unlink', type: 'button', style: ST.button, onClick: () => patchScene({ encounterIds: (scene.encounterIds ?? []).filter((id) => id !== encounter.encounterId) }) }, '从本场景移除')
+                      : h('button', { key: 'link', type: 'button', style: ST.button, onClick: () => patchScene({ encounterIds: [...(scene.encounterIds ?? []), encounter.encounterId] }) }, '挂到本场景'),
+                  ]);
+                }),
+                (module.encounters ?? []).length === 0 ? h('span', { key: 'none', style: ST.muted }, '本模组没有遭遇（v1 编辑器不新增怪物组，可在规则/模组 JSON 层扩展）。') : null,
+              ]),
+              h(JsonFold, { key: 'json', label: '场景原 JSON', value: scene }),
+            ]),
       ]),
     ]);
   }
 
   function RulesTab(props: { snapshot: WorkshopSnapshot }): VNode {
-    const pack = props.snapshot.detail as ContentPack;
-    const rules = pack.rules;
-    const formulasAll = Object.entries(rules?.formulas ?? {}) as Array<[string, string]>;
-    const formulasPaged = usePaged(formulasAll, 16);
-    if (rules === undefined) {
+    const snapshot = props.snapshot;
+    const pack = snapshot.detail as ContentPack;
+    const saver = usePackSaver(snapshot);
+    const [draft, setDraft] = useEditorDraft<RulePackDef | null>(pack, (current) => current.rules ?? null);
+    // 测试台控件（不受 rules 段缺失影响：hooks 必须在条件返回之前调用）
+    const [testKind, setTestKind] = useState('check' as RulesTestKind);
+    const [testActor, setTestActor] = useState('');
+    const [testAction, setTestAction] = useState('');
+    const [testSkill, setTestSkill] = useState('');
+    const [testAttribute, setTestAttribute] = useState('');
+    const [testDc, setTestDc] = useState(12);
+    const [testMode, setTestMode] = useState('normal');
+    const [testSeed, setTestSeed] = useState('');
+    const [testWithDraft, setTestWithDraft] = useState(true);
+    if (draft === null) {
       return h('div', { style: ST.hint }, [
         h('strong', { key: 't', style: { fontSize: 12, color: 'var(--dsw-alias-label-primary)' } }, '这个内容包没有规则段'),
-        h('span', { key: 'd', style: ST.muted }, '纯叙事包（rules 缺省）：没有属性/资源/技能/动作/公式/场地数据；工坊规则页无内容可展示。'),
+        h('span', { key: 'd', style: ST.muted }, '纯叙事包（rules 缺省）：没有属性/资源/技能/动作/公式/场地数据；可在「复制为可编辑副本」后？rules 段仍需在 pack.json 层添加。'),
       ]);
     }
+    const rules: RulePackDef = draft;
     const sheet = rules.sheet;
-    const space = rules.space;
+    const update = (mutate: (next: RulePackDef) => void): void => {
+      const next = structuredClone(rules);
+      mutate(next);
+      setDraft(next);
+    };
+    const draftPack = (): ContentPack => {
+      const next = structuredClone(pack);
+      next.rules = rules;
+      return next;
+    };
+    const saveRules = async (): Promise<void> => {
+      await saver.save('规则', (next) => {
+        next.rules = rules;
+      });
+    };
     const scripts = Object.entries(rules.scripts ?? {}) as Array<[string, { file?: string; sha256?: string } | undefined]>;
-    const formulas = formulasAll;
-    const paged = formulasPaged;
+    const scriptText = scripts
+      .map(([hook, ref]) => `${hook}\n  file:   ${ref?.file ?? '—'}\n  sha256: ${ref?.sha256 ?? '—'}`)
+      .join('\n\n');
+    const validation = snapshot.validation;
+    const testResult = snapshot.testResult;
+    const cardOptions = [{ value: '', label: '（自动：第一张包卡 / 合成卡）' }, ...(pack.cards ?? []).map((card) => ({ value: card.cardId, label: `${card.identity?.name ?? card.cardId}（${card.cardId}）` }))];
+    const actionOptions = (rules.actions ?? []).map((action) => ({ value: action.actionId, label: `${action.name}（${action.actionId}）` }));
+    const skillOptions = (sheet.skills ?? []).map((skill) => ({ value: skill.id, label: `${skill.name}（${skill.id}）` }));
+    const attributeOptions = (sheet.attributes ?? []).map((attribute) => ({ value: attribute.id, label: `${attribute.name}（${attribute.id}）` }));
+    const formulaEntries = Object.entries(rules.formulas ?? {}) as Array<[string, string]>;
+    const runTest = async (): Promise<void> => {
+      const actionId = testAction.trim().length > 0 ? testAction : actionOptions[0]?.value;
+      if (testKind === 'action' && actionId === undefined) {
+        store.setNotice({ tone: 'bad', text: '没有可试跑的动作：规则包 actions[] 为空', lines: [] });
+        return;
+      }
+      const request: RulesTestRequest = {
+        kind: testKind,
+        ...(testActor.length > 0 ? { actorCardId: testActor } : {}),
+        ...(testKind === 'action' && actionId !== undefined ? { actionId } : {}),
+        ...(testKind === 'check'
+          ? {
+              ...(testSkill.length > 0 ? { skillId: testSkill } : testAttribute.length > 0 ? { attributeId: testAttribute } : {}),
+              dc: testDc,
+              ...(testMode !== 'normal' ? { mode: testMode as 'advantage' | 'disadvantage' } : {}),
+            }
+          : {}),
+      };
+      const seed = testSeed.trim().length > 0 ? Number.parseInt(testSeed, 10) : undefined;
+      await store.runRulesTest({
+        requests: [request],
+        ...(seed !== undefined && Number.isFinite(seed) ? { seed } : {}),
+        ...(testWithDraft ? { pack: draftPack() } : {}),
+      });
+    };
+    const sectionPanel = (key: string, title: string, sub: string | undefined, children: unknown[]): VNode =>
+      h('div', { key, style: ST.panel }, [h(SectionTitle, { key: 't', text: title, ...(sub !== undefined ? { sub } : {}) }), ...children]);
     return h('div', { style: { ...ST.col, gap: 10 } }, [
-      h('div', { key: 'head', style: ST.panel }, [
-        h(SectionTitle, { key: 't', text: `${rules.name ?? rules.rulesId} v${rules.rulesVersion}`, sub: '规则摘要（只读；规则编辑器在后续里程碑）' }),
+      h(EditorBar, {
+        key: 'bar',
+        title: `规则编辑器（${rules.name} v${rules.rulesVersion}）`,
+        sub: '数据表格 + 公式 + 测试台；改脚本需重新打包',
+        builtin: saver.builtin,
+        busy: saver.busy || snapshot.validationBusy,
+        onSave: () => void saveRules(),
+        saveLabel: '保存规则',
+        onValidate: () => void store.validateRules(draftPack()),
+        validateBusy: snapshot.validationBusy,
+        onDuplicate: saver.duplicate,
+      }),
+      saver.builtin ? h('span', { key: 'ro', style: ST.warn }, '内置包只读：规则保存会被 host 拒绝；先「复制为可编辑副本」。测试台/校验对内置包只读试跑，不会写盘。') : null,
+      sectionPanel('meta', '规则元信息', 'rulesId / rulesVersion / name（校验要求 semver）', [
+        h('div', { key: 'grid', style: ST.grid3 }, [
+          h(Field, { key: 'id', label: 'rulesId' }, h(TextInput, { value: rules.rulesId, mono: true, onChange: (value: string) => update((next) => { next.rulesId = value; }) })),
+          h(Field, { key: 'ver', label: 'rulesVersion（semver）' }, h(TextInput, { value: rules.rulesVersion, mono: true, onChange: (value: string) => update((next) => { next.rulesVersion = value; }) })),
+          h(Field, { key: 'name', label: 'name' }, h(TextInput, { value: rules.name, onChange: (value: string) => update((next) => { next.name = value; }) })),
+        ]),
+        h(Field, { key: 'desc', label: 'description' }, h(TextArea, { value: rules.description ?? '', rows: 2, onChange: (value: string) => update((next) => { next.description = value; }) })),
         h('div', { key: 'tags', style: ST.row }, [
-          h(Tag, { key: 'id', text: rules.rulesId }),
           h(Tag, { key: 'schema', text: rules.schemaVersion }),
-          h(Tag, { key: 'space', text: `space ${space?.model ?? '无'}` }),
+          h(Tag, { key: 'space', text: `space ${rules.space?.model ?? '无'}` }),
           h(Tag, { key: 'time', text: `time ${rules.time?.model ?? '无'}` }),
-        ]),
-        rules.description !== undefined ? h('span', { key: 'd', style: ST.muted }, rules.description) : null,
-      ]),
-      h('div', { key: 'grids', style: ST.threeCol }, [
-        h('div', { key: 'attrs', style: ST.card }, [
-          h(SectionTitle, { key: 't', text: `属性（${sheet?.attributes?.length ?? 0}）` }),
-          ...(sheet?.attributes ?? []).map((entry) => h('span', { key: entry.id, style: ST.tiny }, `${entry.name}（${entry.id}）${entry.min ?? '?'}–${entry.max ?? '?'}，默认 ${entry.default ?? '?'}`)),
-        ]),
-        h('div', { key: 'res', style: ST.card }, [
-          h(SectionTitle, { key: 't', text: `资源（${sheet?.resources?.length ?? 0}）` }),
-          ...(sheet?.resources ?? []).map((entry) => h('span', { key: entry.id, style: ST.tiny }, `${entry.name}（${entry.id}）公式 ${entry.formula ?? '—'}`)),
-        ]),
-        h('div', { key: 'skills', style: ST.card }, [
-          h(SectionTitle, { key: 't', text: `技能（${sheet?.skills?.length ?? 0}）` }),
-          ...(sheet?.skills ?? []).slice(0, 30).map((entry) => h('span', { key: entry.id, style: ST.tiny }, `${entry.name}（${entry.id}）→ ${entry.attribute}`)),
+          h(Tag, { key: 'scripts', text: `${scripts.length} 脚本钩子` }),
         ]),
       ]),
-      h('div', { key: 'actions', style: ST.panel }, [
-        h(SectionTitle, { key: 't', text: `动作（${rules.actions?.length ?? 0}）`, sub: 'kind / 目标 / 命中公式 / 花费' }),
-        h('div', { key: 'list', style: ST.threeCol },
-          (rules.actions ?? []).map((action) =>
-            h('div', { key: action.actionId, style: ST.card }, [
-              h('strong', { key: 'n', style: { fontSize: 11 } }, action.name ?? action.actionId),
-              h('span', { key: 'k', style: ST.tiny }, `${action.kind ?? '—'} · ${action.targeting?.type ?? '—'} / ${action.targeting?.range ?? '—'} / ${action.targeting?.sides ?? '—'}`),
-              h('span', { key: 'f', style: ST.tiny }, `命中公式：${action.toHit ?? '—'}${action.damage !== undefined ? `；伤害 ${JSON.stringify(action.damage).slice(0, 80)}` : ''}`),
-            ]),
-          ),
+      sectionPanel('attrs', `属性（${sheet.attributes?.length ?? 0}）`, '数值槽：id / 名字 / min / max / default', [
+        ...(sheet.attributes ?? []).map((attribute, index) =>
+          h('div', { key: `attr-${index}`, style: { ...ST.row, alignItems: 'flex-end' } }, [
+            h(Field, { key: 'id', label: 'id' }, h(TextInput, { value: attribute.id, mono: true, onChange: (value: string) => update((next) => { next.sheet.attributes = patchRow(next.sheet.attributes, index, { id: value }); }) })),
+            h(Field, { key: 'name', label: '名字' }, h(TextInput, { value: attribute.name, onChange: (value: string) => update((next) => { next.sheet.attributes = patchRow(next.sheet.attributes, index, { name: value }); }) })),
+            h(Field, { key: 'min', label: 'min' }, h(NumberInput, { value: attribute.min, min: 0, max: 99, onChange: (value: number) => update((next) => { next.sheet.attributes = patchRow(next.sheet.attributes, index, { min: value }); }) })),
+            h(Field, { key: 'max', label: 'max' }, h(NumberInput, { value: attribute.max, min: 1, max: 99, onChange: (value: number) => update((next) => { next.sheet.attributes = patchRow(next.sheet.attributes, index, { max: value }); }) })),
+            h(Field, { key: 'def', label: 'default' }, h(NumberInput, { value: attribute.default, min: 0, max: 99, onChange: (value: number) => update((next) => { next.sheet.attributes = patchRow(next.sheet.attributes, index, { default: value }); }) })),
+            h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => update((next) => { next.sheet.attributes = removeRow(next.sheet.attributes, index); }) }, '删除'),
+          ]),
         ),
+        h('button', { key: 'add', type: 'button', style: ST.button, onClick: () => update((next) => { next.sheet.attributes = [...next.sheet.attributes, { id: `attr_${next.sheet.attributes.length + 1}`, name: '新属性', min: 1, max: 20, default: 10 }]; }) }, '＋ 新增属性'),
       ]),
-      h('div', { key: 'formulas', style: ST.panel }, [
-        h(SectionTitle, { key: 't', text: `公式（${formulas.length}）` }),
-        ...paged.visible.map(([key, value]) => h('span', { key, style: { ...ST.tiny, fontFamily: 'ui-monospace, monospace' } }, `${key} = ${value}`)),
-        paged.more > 0 ? h('button', { key: 'more', type: 'button', style: ST.button, onClick: paged.showMore }, `显示更多（还有 ${paged.more} 条）`) : null,
+      sectionPanel('resources', `资源（${sheet.resources?.length ?? 0}）`, '上限由命名公式算（如 hpMax）', [
+        ...(sheet.resources ?? []).map((resource, index) =>
+          h('div', { key: `res-${index}`, style: { ...ST.row, alignItems: 'flex-end' } }, [
+            h(Field, { key: 'id', label: 'id' }, h(TextInput, { value: resource.id, mono: true, onChange: (value: string) => update((next) => { next.sheet.resources = patchRow(next.sheet.resources, index, { id: value }); }) })),
+            h(Field, { key: 'name', label: '名字' }, h(TextInput, { value: resource.name, onChange: (value: string) => update((next) => { next.sheet.resources = patchRow(next.sheet.resources, index, { name: value }); }) })),
+            h(Field, { key: 'formula', label: '上限公式' }, h(TextInput, { value: resource.formula, mono: true, onChange: (value: string) => update((next) => { next.sheet.resources = patchRow(next.sheet.resources, index, { formula: value }); }) })),
+            h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => update((next) => { next.sheet.resources = removeRow(next.sheet.resources, index); }) }, '删除'),
+          ]),
+        ),
+        h('button', { key: 'add', type: 'button', style: ST.button, onClick: () => update((next) => { next.sheet.resources = [...next.sheet.resources, { id: `resource_${next.sheet.resources.length + 1}`, name: '新资源', formula: 'level' }]; }) }, '＋ 新增资源'),
       ]),
-      h('div', { key: 'hooks', style: ST.panel }, [
-        h(SectionTitle, { key: 't', text: `钩子脚本（${scripts.length}）`, sub: 'rules.scripts：hook → {file, sha256}；脚本随 .trpgpack 分发、由 host 沙箱执行' }),
+      sectionPanel('skills', `技能（${sheet.skills?.length ?? 0}）`, '技能 → 属性映射；加值 = 条目公式 + 熟练', [
+        ...(sheet.skills ?? []).map((skill, index) =>
+          h('div', { key: `skill-${index}`, style: { ...ST.row, alignItems: 'flex-end' } }, [
+            h(Field, { key: 'id', label: 'id' }, h(TextInput, { value: skill.id, mono: true, onChange: (value: string) => update((next) => { next.sheet.skills = patchRow(next.sheet.skills, index, { id: value }); }) })),
+            h(Field, { key: 'name', label: '名字' }, h(TextInput, { value: skill.name, onChange: (value: string) => update((next) => { next.sheet.skills = patchRow(next.sheet.skills, index, { name: value }); }) })),
+            h(Field, { key: 'attr', label: '属性' }, h(SelectInput, { value: skill.attribute, options: (sheet.attributes ?? []).map((attribute) => ({ value: attribute.id, label: attribute.id })), onChange: (value: string) => update((next) => { next.sheet.skills = patchRow(next.sheet.skills, index, { attribute: value }); }) })),
+            h(Field, { key: 'formula', label: '加值公式（可选）' }, h(TextInput, { value: skill.formula ?? '', mono: true, onChange: (value: string) => update((next) => { next.sheet.skills = patchRow(next.sheet.skills, index, { formula: value }); }) })),
+            h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => update((next) => { next.sheet.skills = removeRow(next.sheet.skills, index); }) }, '删除'),
+          ]),
+        ),
+        h('button', { key: 'add', type: 'button', style: ST.button, onClick: () => update((next) => { next.sheet.skills = [...next.sheet.skills, { id: `skill_${next.sheet.skills.length + 1}`, name: '新技能', attribute: next.sheet.attributes[0]?.id ?? 'str' }]; }) }, '＋ 新增技能'),
+      ]),
+      sectionPanel('actions', `动作（${rules.actions?.length ?? 0}）`, 'kind / 目标 / 命中公式 / 伤害（骰子表达式）', [
+        ...(rules.actions ?? []).map((action, index) =>
+          h('div', { key: `action-${index}`, style: { ...ST.row, alignItems: 'flex-end' } }, [
+            h(Field, { key: 'id', label: 'actionId' }, h(TextInput, { value: action.actionId, mono: true, onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { actionId: value }); }) })),
+            h(Field, { key: 'name', label: '名字' }, h(TextInput, { value: action.name, onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { name: value }); }) })),
+            h(Field, { key: 'kind', label: 'kind' }, h(SelectInput, { value: action.kind, options: ACTION_KINDS.map((kind) => ({ value: kind, label: kind })), onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { kind: value as never }); }) })),
+            h(Field, { key: 'target', label: '目标类型' }, h(SelectInput, { value: action.targeting.type, options: TARGETING_TYPES.map((type) => ({ value: type, label: type })), onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { targeting: { ...action.targeting, type: value as never } }); }) })),
+            h(Field, { key: 'range', label: '射程' }, h(SelectInput, {
+              value: typeof action.targeting.range === 'string' ? action.targeting.range : 'engaged',
+              options: RANGE_BANDS.map((band) => ({ value: band, label: band })),
+              onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { targeting: { ...action.targeting, range: value as never } }); }),
+            })),
+            h(Field, { key: 'sides', label: '阵营' }, h(SelectInput, { value: action.targeting.sides, options: TARGETING_SIDES.map((side) => ({ value: side, label: side })), onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { targeting: { ...action.targeting, sides: value as never } }); }) })),
+            h(Field, { key: 'toHit', label: '命中公式' }, h(TextInput, { value: action.toHit ?? '', mono: true, onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { toHit: value }); }) })),
+            h(Field, { key: 'dice', label: '伤害骰' }, h(TextInput, { value: action.damage?.dice ?? '', mono: true, onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { damage: { ...(action.damage ?? {}), dice: value } }); }) })),
+            h(Field, { key: 'dmgFormula', label: '伤害公式' }, h(TextInput, { value: action.damage?.formula ?? '', mono: true, onChange: (value: string) => update((next) => { next.actions = patchRow(next.actions, index, { damage: { ...(action.damage ?? {}), formula: value } }); }) })),
+            h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => update((next) => { next.actions = removeRow(next.actions, index); }) }, '删除'),
+          ]),
+        ),
+        h('button', {
+          key: 'add',
+          type: 'button',
+          style: ST.button,
+          onClick: () => update((next) => {
+            next.actions = [...next.actions, { actionId: `action_${next.actions.length + 1}`, name: '新动作', kind: 'custom', targeting: { type: 'single', range: 'engaged', sides: 'enemy' }, description: '' }];
+          }),
+        }, '＋ 新增动作'),
+      ]),
+      sectionPanel('turn', '行动经济 / 成长（turn / progression）', '每回合资源池与升级表', [
+        ...((rules.turn?.resources ?? []).map((resource, index) =>
+          h('div', { key: `turn-${index}`, style: { ...ST.row, alignItems: 'flex-end' } }, [
+            h(Field, { key: 'id', label: '资源 id' }, h(TextInput, { value: resource.id, mono: true, onChange: (value: string) => update((next) => { const resources = [...(next.turn?.resources ?? [])]; resources[index] = { ...resource, id: value }; next.turn = { resources, ...(next.turn?.movement !== undefined ? { movement: next.turn.movement } : {}) }; }) })),
+            h(Field, { key: 'name', label: '名字' }, h(TextInput, { value: resource.name, onChange: (value: string) => update((next) => { const resources = [...(next.turn?.resources ?? [])]; resources[index] = { ...resource, name: value }; next.turn = { resources, ...(next.turn?.movement !== undefined ? { movement: next.turn.movement } : {}) }; }) })),
+            h(Field, { key: 'count', label: '每回合次数' }, h(NumberInput, { value: resource.count ?? resource.perTurn ?? 1, min: 0, max: 99, onChange: (value: number) => update((next) => { const resources = [...(next.turn?.resources ?? [])]; resources[index] = { ...resource, count: value }; next.turn = { resources, ...(next.turn?.movement !== undefined ? { movement: next.turn.movement } : {}) }; }) })),
+            h(Field, { key: 'unit', label: '单位' }, h(TextInput, { value: resource.unit ?? '', onChange: (value: string) => update((next) => { const resources = [...(next.turn?.resources ?? [])]; resources[index] = { ...resource, unit: value }; next.turn = { resources, ...(next.turn?.movement !== undefined ? { movement: next.turn.movement } : {}) }; }) })),
+            h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => update((next) => { const resources = (next.turn?.resources ?? []).filter((_, itemIndex) => itemIndex !== index); next.turn = { resources, ...(next.turn?.movement !== undefined ? { movement: next.turn.movement } : {}) }; }) }, '删除'),
+          ]),
+        )),
+        h('button', { key: 'addturn', type: 'button', style: ST.button, onClick: () => update((next) => { const resources = [...(next.turn?.resources ?? []), { id: `resource_${(next.turn?.resources.length ?? 0) + 1}`, name: '新回合资源', count: 1 }]; next.turn = { resources, ...(next.turn?.movement !== undefined ? { movement: next.turn.movement } : {}) }; }) }, '＋ 新增回合资源'),
+        h('div', { key: 'growth', style: ST.row }, [
+          h(Field, { key: 'maxLevel', label: '最高等级' }, h(NumberInput, { value: rules.progression?.maxLevel ?? 10, min: 1, max: 20, onChange: (value: number) => update((next) => { next.progression = { ...(next.progression ?? {}), maxLevel: value }; }) })),
+          h(Field, { key: 'xp', label: 'XP 表（逗号分隔）' }, h(TextInput, { value: (rules.progression?.xpTable ?? []).join(', '), onChange: (value: string) => update((next) => { const table = splitCommaList(value).map((part) => Number.parseInt(part, 10)).filter((item) => Number.isFinite(item)); next.progression = { ...(next.progression ?? {}), xpTable: table }; }) })),
+          h(Field, { key: 'grants', label: '成长授予（只读）' }, h('span', { style: ST.tiny }, `${rules.progression?.grants?.length ?? 0} 条 atLevel 记录`)),
+        ]),
+      ]),
+      sectionPanel('formulas', `公式（${formulaEntries.length}）`, '命名公式：值为表达式（不能含随机）', [
+        ...formulaEntries.map(([formulaKey, formulaValue], index) =>
+          h('div', { key: `formula-${index}`, style: { ...ST.row, alignItems: 'flex-end' } }, [
+            h(Field, { key: 'k', label: '名称' }, h(TextInput, {
+              value: formulaKey,
+              mono: true,
+              onChange: (value: string) => update((next) => {
+                if (value.length === 0 || value === formulaKey) return;
+                const entries = Object.entries(next.formulas ?? {});
+                const position = entries.findIndex(([name]) => name === formulaKey);
+                if (position < 0 || next.formulas?.[value] !== undefined) return;
+                entries[position] = [value, formulaValue];
+                next.formulas = Object.fromEntries(entries);
+              }),
+            })),
+            h(Field, { key: 'v', label: '表达式' }, h(TextInput, { value: formulaValue, mono: true, onChange: (value: string) => update((next) => { next.formulas = { ...(next.formulas ?? {}), [formulaKey]: value }; }) })),
+            h('button', { key: 'del', type: 'button', style: ST.buttonDanger, onClick: () => update((next) => { const formulas = { ...(next.formulas ?? {}) }; delete formulas[formulaKey]; next.formulas = formulas; }) }, '删除'),
+          ]),
+        ),
+        h('button', {
+          key: 'add',
+          type: 'button',
+          style: ST.button,
+          onClick: () => update((next) => { next.formulas = { ...(next.formulas ?? {}), [`formula_${Object.keys(next.formulas ?? {}).length + 1}`]: '0' }; }),
+        }, '＋ 新增公式'),
+      ]),
+      sectionPanel('scripts', `钩子脚本（${scripts.length}）`, '只读：脚本是 zip 内独立文件，pack.update 不写脚本字节', [
         scripts.length === 0
           ? h('span', { key: 'none', style: ST.muted }, '没有 JS 钩子脚本（纯数据规则包）。')
-          : scripts.map(([hook, ref]) => h('span', { key: hook, style: { ...ST.tiny, fontFamily: 'ui-monospace, monospace' } }, `${hook} → ${ref?.file ?? '—'} ${ref?.sha256 !== undefined ? `sha256 ${ref.sha256.slice(0, 10)}…` : ''}`)),
+          : h('textarea', { key: 'code', style: { ...ST.codeArea, minHeight: 150 }, readOnly: true, spellCheck: false, value: scriptText }),
+        h('span', { key: 'note', style: ST.warn }, '脚本正文不随 pack.detail 下发（RPC 只读写 pack.json），因此这里只读展示 file + sha256。安全改脚本的流程：导出 .trpgpack → 改 zip 内 rules/scripts/*.js 并重新计算 sha256 写回 rules.scripts → 导入。不要在不知道新 sha256 的情况下改清单（运行时会拒绝加载规则包）。'),
+        h('span', { key: 'validate-note', style: ST.tiny }, '「校验」按钮会逐条比对脚本实际内容 sha256 与清单；不符时给出可读错误（后端 rules.validate）。'),
       ]),
-      h('div', { key: 'space', style: ST.panel }, [
-        h(SectionTitle, { key: 't', text: 'space / time / turn', sub: '场地、时间与行动经济概要' }),
-        h('span', { key: 'space', style: ST.small }, `space：model=${space?.model ?? '—'}；距离=${space?.distanceMode ?? '—'}；单位=${typeof space?.units === 'string' ? space.units : space?.units !== undefined ? JSON.stringify(space.units) : '—'}；战斗地图 ${space?.battleMaps?.length ?? 0} 张；区域 ${space?.zones?.length ?? 0} 个；地形 ${space?.terrains?.length ?? 0} 种；掩体 ${space?.covers?.length ?? 0} 种`),
+      sectionPanel('validation', '校验结果（rules.validate）', '校验当前草稿（不落盘），与保存时的 host validatePack 同源', [
+        validation === null
+          ? h('span', { key: 'none', style: ST.muted }, '还没校验：点顶部「校验（rules.validate）」。')
+          : [
+              h('span', { key: 'sum', style: validation.ok ? ST.ok : ST.bad }, validation.ok
+                ? `✔ 规则段通过（${validation.scripts.length} 条脚本检查，${validation.warnings.length} 个警告${validation.draft ? '；草稿未落盘' : ''}）`
+                : `✖ 校验失败：${validation.errors.length} 个错误、${validation.warnings.length} 个警告`),
+              ...validation.errors.slice(0, 12).map((message: string, index: number) => h('span', { key: `e${index}`, style: ST.bad }, `错误：${message}`)),
+              ...validation.warnings.slice(0, 12).map((message: string, index: number) => h('span', { key: `w${index}`, style: ST.warn }, `警告：${message}`)),
+              ...validation.scripts.map((script, index) => h('span', { key: `s${index}`, style: script.sha256Ok ? ST.ok : ST.bad }, `${script.sha256Ok ? '✔' : '✖'} ${script.hook} → ${script.file}${script.message.length > 0 ? `：${script.message}` : ''}`)),
+            ],
+      ]),
+      sectionPanel('bench', '规则测试台（rules.test）', '临时运行时 + 样本卡试跑：骰面/trace/结果都来自 host 运行时（不建房间）', [
+        h('div', { key: 'controls', style: ST.grid3 }, [
+          h(Field, { key: 'kind', label: '请求类型' }, h(SelectInput, {
+            value: testKind,
+            options: [
+              { value: 'check', label: '检定（check）' },
+              { value: 'action', label: '动作（action）' },
+              { value: 'derived', label: '派生值（derived）' },
+            ],
+            onChange: (value: string) => setTestKind(value as RulesTestKind),
+          })),
+          h(Field, { key: 'actor', label: '样本卡' }, h(SelectInput, { value: testActor, options: cardOptions, onChange: (value: string) => setTestActor(value) })),
+          testKind === 'action'
+            ? h(Field, { key: 'action', label: '动作' }, h(SelectInput, { value: testAction.length > 0 ? testAction : actionOptions[0]?.value ?? '', options: actionOptions, onChange: (value: string) => setTestAction(value) }))
+            : null,
+          testKind === 'check'
+            ? h(Field, { key: 'skill', label: '技能（优先）' }, h(SelectInput, { value: testSkill, options: [{ value: '', label: '（不用技能）' }, ...skillOptions], onChange: (value: string) => setTestSkill(value) }))
+            : null,
+          testKind === 'check'
+            ? h(Field, { key: 'attr', label: '属性（无技能时）' }, h(SelectInput, { value: testAttribute, options: [{ value: '', label: '（不用属性）' }, ...attributeOptions], onChange: (value: string) => setTestAttribute(value) }))
+            : null,
+          testKind !== 'derived'
+            ? h(Field, { key: 'dc', label: 'DC（0–60）' }, h(NumberInput, { value: testDc, min: 0, max: 60, onChange: (value: number) => setTestDc(value) }))
+            : null,
+          testKind === 'check'
+            ? h(Field, { key: 'mode', label: '掷骰模式' }, h(SelectInput, {
+              value: testMode,
+              options: [
+                { value: 'normal', label: '普通' },
+                { value: 'advantage', label: '优势' },
+                { value: 'disadvantage', label: '劣势' },
+              ],
+              onChange: (value: string) => setTestMode(value),
+            }))
+            : null,
+          h(Field, { key: 'seed', label: 'seed（留空=稳定派生）' }, h(TextInput, { value: testSeed, placeholder: '如 42', onChange: (value: string) => setTestSeed(value) })),
+        ]),
+        h('div', { key: 'runrow', style: ST.row }, [
+          h(CheckInput, { key: 'draft', checked: testWithDraft, label: '用当前草稿试跑（未保存的修改也生效）', onChange: (checked: boolean) => setTestWithDraft(checked) }),
+          h('button', { key: 'run', type: 'button', style: ST.buttonPrimary, disabled: snapshot.testBusy, onClick: () => void runTest() }, snapshot.testBusy ? '运行中…' : '运行测试'),
+        ]),
+        testResult === null
+          ? h('span', { key: 'none', style: ST.muted }, '还没有测试结果：选好样本卡与请求类型后点「运行测试」。')
+          : h('div', { key: 'results', style: ST.col }, [
+              h('span', { key: 'meta', style: testResult.ok ? ST.ok : ST.bad }, `${testResult.ok ? '✔ 全部通过' : `✖ ${testResult.outcomes.filter((outcome) => !outcome.ok).length} 条失败`} · seed ${testResult.seed} · 规则 ${testResult.rulesId}${testResult.draft ? '（草稿）' : ''} · 样本卡 ${testResult.sampleSource === 'synthetic' ? '合成卡' : '包内卡'} ${testResult.sampleActorId ?? '—'}`),
+              ...testResult.errors.map((message: string, index: number) => h('span', { key: `e${index}`, style: ST.bad }, `错误：${message}`)),
+              ...testResult.warnings.slice(0, 8).map((message: string, index: number) => h('span', { key: `w${index}`, style: ST.warn }, `警告：${message}`)),
+              ...testResult.outcomes.map((outcome) =>
+                h('div', { key: `out-${outcome.index}`, style: ST.card }, [
+                  h('div', { key: 'h', style: ST.row }, [
+                    h('strong', { key: 'l', style: { fontSize: 11 } }, outcome.label),
+                    h(Tag, { key: 'ok', text: outcome.ok ? '成功' : '失败', on: outcome.ok }),
+                    h(Tag, { key: 't', text: outcome.kind }),
+                    h('span', { key: 'd', style: ST.tiny }, `${outcome.durationMs}ms`),
+                  ]),
+                  outcome.error !== undefined
+                    ? h('span', { key: 'err', style: ST.bad }, `${outcome.error.messageZh}${outcome.error.hint !== undefined ? `（${outcome.error.hint}）` : ''}`)
+                    : null,
+                  outcome.rolls.length > 0
+                    ? h('div', { key: 'rolls', style: ST.row }, outcome.rolls.map((roll, index) =>
+                        h('span', { key: `r${index}`, style: ST.pill }, `${roll.expr}：[${roll.dice.join(', ')}] ${roll.modifier >= 0 ? '+' : ''}${roll.modifier} = ${roll.total}`),
+                      ))
+                    : null,
+                  ...outcome.trace.lines.map((line: string, index: number) => h('span', { key: `t${index}`, style: ST.small }, line)),
+                  outcome.result !== null ? h(JsonFold, { key: 'json', label: '结构化结果 result', value: outcome.result }) : null,
+                ]),
+              ),
+              testResult.events.length > 0 ? h(JsonFold, { key: 'events', label: `运行时事件（${testResult.events.length}）`, value: testResult.events }) : null,
+            ]),
+      ]),
+      sectionPanel('space', 'space / time / turn（只读概要，地图工坊编辑空间结构）', '场地、时间与行动经济的当前数据', [
+        h('span', { key: 'space', style: ST.small }, `space：model=${rules.space?.model ?? '—'}；距离=${rules.space?.distanceMode ?? '—'}；战斗地图 ${rules.space?.battleMaps?.length ?? 0} 张；区域 ${rules.space?.zones?.length ?? 0} 个；地形 ${rules.space?.terrains?.length ?? 0} 种；掩体 ${rules.space?.covers?.length ?? 0} 种`),
         h('span', { key: 'time', style: ST.small }, `time：model=${rules.time?.model ?? '—'}；单位=${rules.time?.durationUnit ?? '—'}；默认回合上限=${rules.time?.defaultMaxRounds ?? '—'}；到上限动作=${rules.time?.onRoundLimit ?? '—'}`),
         h('span', { key: 'turn', style: ST.small }, `turn：${(rules.turn?.resources ?? []).map((entry) => `${entry.name}×${entry.count ?? entry.perTurn ?? '?'}${entry.unit ?? ''}`).join(' / ') || '无资源池'}${rules.turn?.movement !== undefined ? `；移动 ${rules.turn.movement.name} ${rules.turn.movement.cells ?? rules.turn.movement.meters ?? '?'}${rules.turn.movement.unit ?? ''}` : ''}`),
+        h('div', { key: 'grids', style: ST.threeCol }, [
+          h('span', { key: 'models', style: ST.tiny }, `场地模型：${SPACE_MODELS.join(' / ')}`),
+          h('span', { key: 'times', style: ST.tiny }, `时间模型：${TIME_MODELS.join(' / ')}`),
+          h('span', { key: 'stacking', style: ST.tiny }, `词条叠加：${STACKING_MODES.join(' / ')}；字段类型：${FIELD_KINDS.join(' / ')}`),
+        ]),
       ]),
     ]);
   }
@@ -1427,6 +2763,49 @@ export function createWorkshopUi(React: any): WorkshopUi {
     ]);
   }
 
+  /** 战斗地图校准预览：底图 + 网格叠加（cellPx/offset/rotation 只影响显示）。 */
+  function CalibrationPreview(props: {
+    base: string;
+    packId: string;
+    backgroundAssetId: string | undefined;
+    cols: number;
+    rows: number;
+    calibration: { offsetX?: number; offsetY?: number; cellPx?: number; rotation?: number };
+  }): VNode {
+    const urls = props.backgroundAssetId !== undefined ? guessAssetUrls(props.base, props.packId, 'cover', props.backgroundAssetId) : [];
+    const [urlIndex, setUrlIndex] = useState(0);
+    useEffect(() => {
+      setUrlIndex(0);
+    }, [urls.join('|')]);
+    const cellPx = Math.max(8, Math.round(props.calibration.cellPx ?? 64));
+    const offsetX = Math.round(props.calibration.offsetX ?? 0);
+    const offsetY = Math.round(props.calibration.offsetY ?? 0);
+    const rotation = Math.round(props.calibration.rotation ?? 0);
+    const gridStyle = {
+      position: 'absolute',
+      inset: 0,
+      pointerEvents: 'none',
+      backgroundImage: `repeating-linear-gradient(to right, rgba(255,255,255,.22) 0 1px, transparent 1px ${cellPx}px), repeating-linear-gradient(to bottom, rgba(255,255,255,.22) 0 1px, transparent 1px ${cellPx}px)`,
+      backgroundPosition: `${offsetX}px ${offsetY}px`,
+    };
+    const imgUrl = urls[urlIndex];
+    return h('div', { style: { ...ST.preview, aspectRatio: '4 / 3', background: '#0b0d10' } }, [
+      h('div', { key: 'rot', style: { position: 'absolute', inset: 0, transform: `rotate(${rotation}deg)` } }, [
+        imgUrl !== undefined
+          ? h('img', {
+              key: 'bg',
+              src: imgUrl,
+              alt: '战斗地图底图',
+              style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', opacity: 0.92 },
+              onError: () => setUrlIndex((current: number) => current + 1),
+            })
+          : h('div', { key: 'none', style: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--dsw-alias-label-secondary)', fontSize: 11 } }, '没有可预览的底图（仅网格叠加）'),
+        h('div', { key: 'grid', style: gridStyle }),
+      ]),
+      h('span', { key: 'meta', style: { position: 'absolute', left: 6, bottom: 6, ...ST.pill, background: 'rgba(11,13,16,.72)' } }, `${props.cols}×${props.rows} 格 · cellPx ${cellPx} · offset ${offsetX},${offsetY} · rotation ${rotation}°`),
+    ]);
+  }
+
   function MapsTab(props: { snapshot: WorkshopSnapshot }): VNode {
     const { snapshot } = props;
     const pack = snapshot.detail as ContentPack;
@@ -1453,9 +2832,61 @@ export function createWorkshopUi(React: any): WorkshopUi {
     const [worldResult, setWorldResult] = useState(null as WorldGenerateResult | null);
     const [worldGenBusy, setWorldGenBusy] = useState(false);
     const [saveBusy, setSaveBusy] = useState(false);
+    const [calibrationMapId, setCalibrationMapId] = useState('');
+    const [calibrationForm, setCalibrationForm] = useState({ cellPx: 64, offsetX: 0, offsetY: 0, rotation: 0 });
+    const [calibrationBusy, setCalibrationBusy] = useState(false);
     const space = pack.rules?.space;
     const zones = space?.zones ?? [];
     const battleMaps = space?.battleMaps ?? [];
+    const calibrationMap = battleMaps.find((map) => map.mapId === calibrationMapId) ?? battleMaps[0];
+    useEffect(() => {
+      const current = battleMaps.find((map) => map.mapId === calibrationMapId) ?? battleMaps[0];
+      if (current === undefined) return;
+      if (calibrationMapId.length === 0) setCalibrationMapId(current.mapId);
+      const calibration = (current.calibration ?? {}) as { offsetX?: number; offsetY?: number; cellPx?: number; rotation?: number };
+      setCalibrationForm({
+        cellPx: typeof calibration.cellPx === 'number' ? calibration.cellPx : 64,
+        offsetX: typeof calibration.offsetX === 'number' ? calibration.offsetX : 0,
+        offsetY: typeof calibration.offsetY === 'number' ? calibration.offsetY : 0,
+        rotation: typeof calibration.rotation === 'number' ? calibration.rotation : 0,
+      });
+    }, [pack, calibrationMapId]);
+    const saveCalibration = async (): Promise<void> => {
+      if (calibrationMap === undefined || calibrationBusy) return;
+      setCalibrationBusy(true);
+      try {
+        if (builtin) {
+          store.setNotice({ tone: 'bad', text: '内置包只读：地图校准保存会被 host 拒绝', lines: ['先「概览 → 复制为可编辑副本」再编辑。'] });
+          return;
+        }
+        const next = structuredClone(pack);
+        const target = (next.rules?.space?.battleMaps ?? []).find((map) => map.mapId === calibrationMap.mapId);
+        if (target === undefined) return;
+        target.calibration = {
+          cellPx: Math.max(8, Math.round(calibrationForm.cellPx)),
+          offsetX: Math.round(calibrationForm.offsetX),
+          offsetY: Math.round(calibrationForm.offsetY),
+          rotation: Math.round(calibrationForm.rotation),
+        } as never;
+        await store.savePack(next, `地图校准 ${calibrationMap.mapId}`);
+      } finally {
+        setCalibrationBusy(false);
+      }
+    };
+    const clearCalibration = async (): Promise<void> => {
+      if (calibrationMap === undefined || calibrationBusy || builtin) return;
+      setCalibrationBusy(true);
+      try {
+        const next = structuredClone(pack);
+        const target = (next.rules?.space?.battleMaps ?? []).find((map) => map.mapId === calibrationMap.mapId);
+        if (target === undefined) return;
+        delete target.calibration;
+        await store.savePack(next, `清除地图校准 ${calibrationMap.mapId}`);
+        setCalibrationForm({ cellPx: 64, offsetX: 0, offsetY: 0, rotation: 0 });
+      } finally {
+        setCalibrationBusy(false);
+      }
+    };
 
     const runBattle = async (): Promise<void> => {
       if (battleGenBusy) return;
@@ -1653,6 +3084,55 @@ export function createWorkshopUi(React: any): WorkshopUi {
                   ]),
                 ])
               : h('div', { key: 'empty', style: ST.hint }, [h('span', { key: 't', style: ST.muted }, '还没有生成结果：填好 prompt 点「生成结构」。无 AI 时走程序化兜底（method=procedural），结构与预览仍可保存。')]),
+            h('div', { key: 'calibration', style: ST.panel }, [
+              h(SectionTitle, {
+                key: 't',
+                text: `战斗地图校准（${battleMaps.length} 张）`,
+                sub: 'calibration 只影响显示：底图与网格对齐（cellPx / offsetX / offsetY / rotation）→ pack.update',
+              }),
+              battleMaps.length === 0
+                ? h('span', { key: 'none', style: ST.muted }, '本包还没有战斗地图：先用上方生成并保存一张，或到「规则」tab 的 space 结构里添加。')
+                : [
+                    h('div', { key: 'pick', style: ST.row }, [
+                      h(Field, { key: 'map', label: '选择战斗地图' }, h(SelectInput, {
+                        value: calibrationMap?.mapId ?? '',
+                        options: battleMaps.map((map) => ({ value: map.mapId, label: `${map.name ?? map.mapId}（${map.mapId} · ${map.cols}×${map.rows}）` })),
+                        onChange: (value: string) => setCalibrationMapId(value),
+                      })),
+                      h(Tag, { key: 'bg', text: calibrationMap?.backgroundAssetId !== undefined ? `底图 ${truncate(calibrationMap.backgroundAssetId, 42)}` : '无底图（仅网格）' }),
+                      h(Tag, { key: 'cal', text: calibrationMap?.calibration !== undefined ? '已有 calibration' : '未校准' }),
+                    ]),
+                    calibrationMap !== undefined
+                      ? h('div', { key: 'body', style: ST.twoCol }, [
+                          h('div', { key: 'preview', style: ST.col }, [
+                            h(CalibrationPreview, {
+                              base: snapshot.base,
+                              packId: pack.packId,
+                              backgroundAssetId: calibrationMap.backgroundAssetId,
+                              cols: calibrationMap.cols,
+                              rows: calibrationMap.rows,
+                              calibration: calibrationForm,
+                            }),
+                            h('span', { key: 'hint', style: ST.tiny }, '预览为显示层近似：底图按 contain 显示，网格线宽 1px；rotation 为 schema v1 之外的显示扩展（校验器忽略未知键）。'),
+                          ]),
+                          h('div', { key: 'form', style: ST.col }, [
+                            h('div', { key: 'grid', style: ST.grid2 }, [
+                              h(Field, { key: 'cell', label: 'cellSize → cellPx（格宽像素）' }, h(NumberInput, { value: calibrationForm.cellPx, min: 8, max: 512, onChange: (value: number) => setCalibrationForm({ ...calibrationForm, cellPx: value }) })),
+                              h(Field, { key: 'ox', label: 'offsetX（像素）' }, h(NumberInput, { value: calibrationForm.offsetX, min: -1024, max: 1024, onChange: (value: number) => setCalibrationForm({ ...calibrationForm, offsetX: value }) })),
+                              h(Field, { key: 'oy', label: 'offsetY（像素）' }, h(NumberInput, { value: calibrationForm.offsetY, min: -1024, max: 1024, onChange: (value: number) => setCalibrationForm({ ...calibrationForm, offsetY: value }) })),
+                              h(Field, { key: 'rot', label: 'rotation（度，显示用扩展）' }, h(NumberInput, { value: calibrationForm.rotation, min: -180, max: 180, onChange: (value: number) => setCalibrationForm({ ...calibrationForm, rotation: value }) })),
+                            ]),
+                            h('div', { key: 'actions', style: ST.row }, [
+                              h('button', { key: 'save', type: 'button', style: ST.buttonPrimary, disabled: calibrationBusy || snapshot.writeBusy !== null, onClick: () => void saveCalibration() }, calibrationBusy ? '保存中…' : '保存校准到 rules.space.battleMaps'),
+                              h('button', { key: 'clear', type: 'button', style: ST.button, disabled: calibrationBusy || builtin, onClick: () => void clearCalibration() }, '清除 calibration'),
+                            ]),
+                            builtin ? h('span', { key: 'ro', style: ST.warn }, '内置包只读：校准保存会被拒绝，先复制为可编辑副本。') : null,
+                            h(JsonFold, { key: 'json', label: '该战斗地图结构（含 calibration）', value: calibrationMap }),
+                          ]),
+                        ])
+                      : null,
+                  ],
+            ]),
           ])
         : null,
       section === 'world'

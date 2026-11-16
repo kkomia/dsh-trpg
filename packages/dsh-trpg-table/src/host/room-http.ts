@@ -40,6 +40,8 @@ import {
   validatePackExport,
   validatePackImport,
   validatePackUpdate,
+  validateRulesTest,
+  validateRulesValidate,
   validateRpcRequest,
   validateWorldGenerate,
   type AssetsGenerateResult,
@@ -498,6 +500,17 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
         const studio = requireStudio();
         const params = take(validatePackAssetDelete(rpc.params));
         return await studio.packAssetDelete(params);
+      }
+      // ---- M9.6b 规则校验 / 规则测试台（loopback + host token；不建房间、不落盘） ----
+      case 'rules.validate': {
+        const studio = requireStudio();
+        const params = take(validateRulesValidate(rpc.params));
+        return studio.rulesValidate(params);
+      }
+      case 'rules.test': {
+        const studio = requireStudio();
+        const params = take(validateRulesTest(rpc.params));
+        return studio.rulesTest(params);
       }
       default:
         throw new RoomError('bad-request', `未知方法：${rpc.method}`);

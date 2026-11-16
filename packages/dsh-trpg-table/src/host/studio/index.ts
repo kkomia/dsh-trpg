@@ -31,11 +31,16 @@ import type {
   PackImportResult,
   PackUpdateParams,
   PackUpdateResult,
+  RulesTestParams,
+  RulesTestResult,
+  RulesValidateParams,
+  RulesValidateResult,
   WorldGenerateParams,
   WorldGenerateResult,
 } from '@dsh-trpg/protocol';
 import type { PackRegistry } from '../pack-registry.ts';
 import { fakeMediaPng } from '../media/index.ts';
+import { RulesWorkshop } from './rules-workshop.ts';
 import {
   generateBattleMap,
   generateWorldMap,
@@ -51,7 +56,7 @@ import {
 } from './background.ts';
 import { PackWorkspace, type PackWorkspaceOptions } from './pack-workspace.ts';
 
-/** `room-http` 依赖的最小接口（8 个工坊 RPC 一一对应）。 */
+/** `room-http` 依赖的最小接口（10 个工坊 RPC 一一对应）。 */
 export interface StudioApi {
   generateMap(params: MapGenerateParams): Promise<MapGenerateResult>;
   generateWorld(params: WorldGenerateParams): Promise<WorldGenerateResult>;
@@ -61,6 +66,10 @@ export interface StudioApi {
   packImport(params: PackImportParams): Promise<PackImportResult>;
   packAssetPut(params: PackAssetPutParams): Promise<PackAssetPutResult>;
   packAssetDelete(params: PackAssetDeleteParams): Promise<PackAssetDeleteResult>;
+  /** M9.6b：规则数据段 + 脚本完整性校验（可校验草稿，不落盘）。 */
+  rulesValidate(params: RulesValidateParams): RulesValidateResult;
+  /** M9.6b：规则测试台（临时运行时 + 样本卡，逐条返回 rolls/trace/result）。 */
+  rulesTest(params: RulesTestParams): RulesTestResult;
 }
 
 export interface StudioOptions {
@@ -141,6 +150,8 @@ function createFakeImageGenerator(): StudioImageGenerator {
 /** 工坊服务门面（生产实现）。 */
 export class Studio implements StudioApi {
   readonly workspace: PackWorkspace;
+  /** M9.6b 规则校验 / 规则测试台。 */
+  readonly rules: RulesWorkshop;
   readonly textEnabled: boolean;
   readonly imageEnabled: boolean;
   private readonly textGenerator: StudioTextGenerator | undefined;
@@ -193,6 +204,11 @@ export class Studio implements StudioApi {
         ...(options.workspaceOptions ?? {}),
       });
     }
+    this.rules = new RulesWorkshop({
+      registry: options.registry,
+      log: this.log,
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
   }
 
   /** `map.generate`：结构（AI→校验→程序化）+ 可选底图。 */
@@ -279,6 +295,14 @@ export class Studio implements StudioApi {
   packAssetDelete(params: PackAssetDeleteParams): Promise<PackAssetDeleteResult> {
     return this.workspace.assetDelete(params);
   }
+
+  rulesValidate(params: RulesValidateParams): RulesValidateResult {
+    return this.rules.validate(params);
+  }
+
+  rulesTest(params: RulesTestParams): RulesTestResult {
+    return this.rules.test(params);
+  }
 }
 
 /** host `index.ts` 的接线入口。 */
@@ -295,6 +319,11 @@ export {
   PackWorkspace,
   type PackWorkspaceOptions,
 } from './pack-workspace.ts';
+export {
+  RulesWorkshop,
+  checkRulesScripts,
+  type RulesWorkshopOptions,
+} from './rules-workshop.ts';
 export {
   generateBattleMap,
   generateWorldMap,

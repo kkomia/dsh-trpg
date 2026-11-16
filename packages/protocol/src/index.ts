@@ -241,7 +241,10 @@ export type RpcMethod =
   | 'pack.export'
   | 'pack.import'
   | 'pack.assetPut'
-  | 'pack.assetDelete';
+  | 'pack.assetDelete'
+  // ---- M9.6b 规则校验 / 规则测试台（工坊，仅 loopback + host token；RULES-MODEL §12） ----
+  | 'rules.validate'
+  | 'rules.test';
 
 export interface CreateRoomParams {
   title: string;
@@ -1228,6 +1231,8 @@ const METHODS: readonly RpcMethod[] = [
   'pack.import',
   'pack.assetPut',
   'pack.assetDelete',
+  'rules.validate',
+  'rules.test',
 ];
 
 export function isRpcMethod(value: unknown): value is RpcMethod {
@@ -2042,6 +2047,149 @@ export interface PackAssetDeleteResult {
   removed: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// M9.6b 规则校验 / 规则测试台（工坊 RPC，仅 loopback + host token）
+//
+// 权威口径（RULES-MODEL §3/§6/§12）：
+// - `rules.validate`：只校验 `pack.rules` 段（validateRulePack）+ 脚本文件存在性/sha256；
+//   可带**草稿 pack**（完整 pack.json）——校验草稿但不落盘，作者保存前先自检；
+// - `rules.test`：用**临时规则运行时 + 样本卡**跑一遍（不建房间、不影响用户房间），
+//   每条请求返回骰面 `rolls`、人话 `trace`、结构化 `result` 与可读错误；
+// - 数值只来自运行时返回值（客户端不计算）。
+// ---------------------------------------------------------------------------
+
+/** 单条规则脚本的完整性校验结果（`rules.scripts` 清单 vs 主机上的实际脚本文件）。 */
+export interface RulesScriptCheck {
+  /** 引用该脚本的钩子名（同一文件可被多个钩子引用）。 */
+  hook: string;
+  /** 脚本文件路径（`rules/scripts/*.js`）。 */
+  file: string;
+  /** `rules.scripts[hook].sha256` 声明的 sha256。 */
+  declaredSha256: string;
+  /** 主机上实际脚本文件内容的 sha256（脚本缺失/无法读取时为 null）。 */
+  actualSha256: string | null;
+  exists: boolean;
+  sha256Ok: boolean;
+  /** 人话结论（中文；ok 时也给一句）。 */
+  message: string;
+}
+
+export interface RulesValidateParams {
+  packId: string;
+  /**
+   * 可选草稿：完整 `pack.json`（`ContentPack` 形状）。传了则校验**草稿**、不落盘；
+   * 草稿的 `packId` 必须与参数一致。缺省校验已安装的包。
+   */
+  pack?: unknown;
+}
+
+export interface RulesValidateResult {
+  /** 规则段与脚本清单全部通过（warnings 不影响 ok）。 */
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  packId: string;
+  /** `rules.rulesId`（包没有 rules 段时为 null）。 */
+  rulesId: string | null;
+  /** true = 校验的是草稿（未落盘）。 */
+  draft: boolean;
+  /** 脚本完整性逐条结果（无脚本时为空数组）。 */
+  scripts: RulesScriptCheck[];
+  durationMs: number;
+}
+
+/** 测试台请求类型：检定 / 动作 / 派生值。 */
+export type RulesTestKind = 'check' | 'action' | 'derived';
+export const RULES_TEST_KINDS: readonly RulesTestKind[] = ['check', 'action', 'derived'];
+
+/** `rules.test` 的单条请求（全部字段可选，按 kind 解释）。 */
+export interface RulesTestRequest {
+  kind: RulesTestKind;
+  /** 样本卡：`pack.cards[].cardId`；缺省取包内第一张卡，没有则用合成样本卡。 */
+  actorCardId?: string;
+  /** 目标：`pack.cards[].cardId`（作为敌方目标）；缺省用合成假人。 */
+  targetId?: string;
+  /** kind=action：要试跑的动作 id（`rules.actions[].actionId`）。 */
+  actionId?: string;
+  /** kind=check：技能 id（`rules.sheet.skills[].id`）。 */
+  skillId?: string;
+  /** kind=check：属性 id（`rules.sheet.attributes[].id`）。 */
+  attributeId?: string;
+  /** kind=check/action：DC（0–60，缺省 10 / 动作自身判定用）。 */
+  dc?: number;
+  /** 检定模式（优势/劣势）。 */
+  mode?: 'normal' | 'advantage' | 'disadvantage';
+  /** 额外加值（检定/动作判定用）。 */
+  mods?: number;
+}
+
+export interface RulesTestParams {
+  packId: string;
+  /** 1–12 条请求；按顺序逐条独立跑（每条新建运行时，互不影响）。 */
+  requests: RulesTestRequest[];
+  /** 复现种子（0–2^31-1；缺省由 packId + rulesId 稳定派生）。 */
+  seed?: number;
+  /**
+   * 可选草稿 pack（同 `rules.validate`）：试跑**未保存**的规则修改；脚本仍取自已安装包的
+   * 脚本文件（`pack.update` 不写脚本字节），草稿里脚本 sha256 与实际文件不符会报可读错误。
+   */
+  pack?: unknown;
+}
+
+/** 运行时返回的骰面（与 `DiceRollRecord` 同口径）。 */
+export interface RulesTestRoll {
+  expr: string;
+  dice: number[];
+  modifier: number;
+  total: number;
+}
+
+/** 运行时 trace：人话行 + 结构化中间值（只做展示，客户端不重算）。 */
+export interface RulesTestTrace {
+  lines: string[];
+  data: Record<string, unknown>;
+}
+
+export interface RulesTestOutcome {
+  /** 请求下标（从 0 起）。 */
+  index: number;
+  kind: RulesTestKind;
+  /** 人话标题（如「技能检定：运动 DC 12」）。 */
+  label: string;
+  /** 本条是否成功（运行时报错 / 钩子报错= false，但仍带可读结果与 trace）。 */
+  ok: boolean;
+  rolls: RulesTestRoll[];
+  trace: RulesTestTrace;
+  /** 结构化结果（check = CheckResultData，action = ActionResultData，derived = 派生值表）。 */
+  result: Record<string, unknown> | null;
+  /** 可读错误（运行时报错 / 脚本钩子抛错或超时）。 */
+  error?: { code: string; messageZh: string; hint?: string };
+  durationMs: number;
+}
+
+export interface RulesTestResult {
+  ok: boolean;
+  packId: string;
+  rulesId: string | null;
+  seed: number;
+  draft: boolean;
+  /** 本次用的样本卡 id。 */
+  sampleActorId: string | null;
+  /** 样本卡来源：pack（包内卡）/ synthetic（合成卡）。 */
+  sampleSource: 'pack' | 'synthetic' | null;
+  /** 运行时事件摘要（人话；含 rules/error 与骰面）。 */
+  events: string[];
+  outcomes: RulesTestOutcome[];
+  errors: string[];
+  warnings: string[];
+  durationMs: number;
+}
+
+/** 规则测试台的回数上限（一次请求最多跑 12 条，避免长脚本卡住工坊 RPC）。 */
+export const RULES_TEST_LIMITS = {
+  maxRequests: 12,
+} as const;
+
 /** 工坊 RPC 的资源上限（RPC 请求体 12 MiB 的既有约束内的可用余量）。 */
 export const PACK_WORKSHOP_LIMITS = {
   /** `pack.assetPut` / `pack.import` 的 base64 近似字节上限（7.5 MiB）。 */
@@ -2268,6 +2416,115 @@ export function validatePackAssetDelete(params: unknown): ValidationResult<PackA
   if (!isPackId(params.packId)) return fail('packId 必须是小写 slug（字母/数字/_/-，最多 64 字符）');
   if (!isPackAssetId(params.assetId)) return fail('assetId 必须是 `<kind>.<scope>.<slug>`');
   return { ok: true, value: { packId: params.packId, assetId: params.assetId } };
+}
+
+/** `rules.validate` / `rules.test` 共用的可选草稿 pack 校验（不落盘；只做形状与大小检查）。 */
+function draftPackOf(value: unknown, packId: string, method: string): { found: boolean; pack?: unknown; error?: string } {
+  if (value === undefined) return { found: false };
+  if (!isRecord(value)) return { found: true, error: `${method} 的 pack 必须是对象（完整 pack.json 草稿）` };
+  if (value.packId !== packId) {
+    return {
+      found: true,
+      error: `${method} 草稿的 pack.packId 必须与参数 packId 一致（参数 ${JSON.stringify(packId)}，草稿 ${JSON.stringify(value.packId)}）`,
+    };
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return { found: true, error: `${method} 草稿 pack 不是可序列化的 JSON 对象` };
+  }
+  if (serialized.length > PACK_WORKSHOP_LIMITS.maxPackJsonBytes) {
+    return {
+      found: true,
+      error: `${method} 草稿 pack 过大（序列化后 ${serialized.length} 字节，上限 ${PACK_WORKSHOP_LIMITS.maxPackJsonBytes}）`,
+    };
+  }
+  return { found: true, pack: value };
+}
+
+export function validateRulesValidate(params: unknown): ValidationResult<RulesValidateParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isPackId(params.packId)) return fail('packId 必须是小写 slug（字母/数字/_/-，最多 64 字符）');
+  const draft = draftPackOf(params.pack, params.packId, 'rules.validate');
+  if (draft.error !== undefined) return fail(draft.error);
+  return {
+    ok: true,
+    value: { packId: params.packId, ...(draft.found ? { pack: draft.pack } : {}) },
+  };
+}
+
+function isRulesTestKind(value: unknown): value is RulesTestKind {
+  return typeof value === 'string' && (RULES_TEST_KINDS as readonly string[]).includes(value);
+}
+
+function isCheckMode(value: unknown): value is NonNullable<RulesTestRequest['mode']> {
+  return value === 'normal' || value === 'advantage' || value === 'disadvantage';
+}
+
+/** `rules.test` 参数校验：packId + requests[1..12]（kind/编号/DC/模式）+ 可选草稿与 seed。 */
+export function validateRulesTest(params: unknown): ValidationResult<RulesTestParams> {
+  if (!isRecord(params)) return fail('缺少参数');
+  if (!isPackId(params.packId)) return fail('packId 必须是小写 slug（字母/数字/_/-，最多 64 字符）');
+  if (!Array.isArray(params.requests)) return fail('requests 必须是数组（1–12 条 {kind, ...}）');
+  if (params.requests.length === 0) return fail('requests 不能为空：至少 1 条（kind=check/action/derived）');
+  if (params.requests.length > RULES_TEST_LIMITS.maxRequests) {
+    return fail(`requests 过多（${params.requests.length} 条，上限 ${RULES_TEST_LIMITS.maxRequests}）`);
+  }
+  const requests: RulesTestRequest[] = [];
+  for (let index = 0; index < params.requests.length; index += 1) {
+    const raw = params.requests[index];
+    if (!isRecord(raw)) return fail(`requests[${index}] 必须是对象`);
+    if (!isRulesTestKind(raw.kind)) {
+      return fail(`requests[${index}].kind 必须是 ${RULES_TEST_KINDS.join(' / ')}，收到 ${JSON.stringify(raw.kind)}`);
+    }
+    if (!isOptionalShortId(raw.actorCardId)) return fail(`requests[${index}].actorCardId 必须是字符串（最多 64 字符）`);
+    if (!isOptionalShortId(raw.targetId)) return fail(`requests[${index}].targetId 必须是字符串（最多 64 字符）`);
+    if (raw.kind === 'action') {
+      if (!isNonEmptyString(raw.actionId)) return fail(`requests[${index}]（kind=action）需要 actionId`);
+      if (raw.actionId.length > 128) return fail(`requests[${index}].actionId 过长（最多 128 字符）`);
+    } else if (raw.actionId !== undefined && !isOptionalShortId(raw.actionId, 128)) {
+      return fail(`requests[${index}].actionId 必须是字符串（最多 128 字符）`);
+    }
+    if (raw.skillId !== undefined && !isOptionalShortId(raw.skillId, 128)) {
+      return fail(`requests[${index}].skillId 必须是字符串（最多 128 字符）`);
+    }
+    if (raw.attributeId !== undefined && !isOptionalShortId(raw.attributeId, 128)) {
+      return fail(`requests[${index}].attributeId 必须是字符串（最多 128 字符）`);
+    }
+    if (raw.dc !== undefined && !isBoundedInteger(raw.dc, 0, 60)) return fail(`requests[${index}].dc 必须是 0–60 的整数`);
+    if (raw.mode !== undefined && !isCheckMode(raw.mode)) {
+      return fail(`requests[${index}].mode 必须是 normal / advantage / disadvantage`);
+    }
+    if (raw.mods !== undefined && !isBoundedInteger(raw.mods, -100, 100)) {
+      return fail(`requests[${index}].mods 必须是 -100–100 的整数`);
+    }
+    requests.push({
+      kind: raw.kind,
+      ...(typeof raw.actorCardId === 'string' ? { actorCardId: raw.actorCardId } : {}),
+      ...(typeof raw.targetId === 'string' ? { targetId: raw.targetId } : {}),
+      ...(typeof raw.actionId === 'string' ? { actionId: raw.actionId } : {}),
+      ...(typeof raw.skillId === 'string' ? { skillId: raw.skillId } : {}),
+      ...(typeof raw.attributeId === 'string' ? { attributeId: raw.attributeId } : {}),
+      ...(typeof raw.dc === 'number' ? { dc: raw.dc } : {}),
+      ...(raw.mode !== undefined ? { mode: raw.mode as NonNullable<RulesTestRequest['mode']> } : {}),
+      ...(typeof raw.mods === 'number' ? { mods: raw.mods } : {}),
+    });
+  }
+  if (params.seed !== undefined && !isBoundedInteger(params.seed, 0, 2 ** 31 - 1)) {
+    return fail('seed 必须是 0–2147483647 的整数');
+  }
+  const draft = draftPackOf(params.pack, params.packId, 'rules.test');
+  if (draft.error !== undefined) return fail(draft.error);
+  return {
+    ok: true,
+    value: {
+      packId: params.packId,
+      requests,
+      ...(typeof params.seed === 'number' ? { seed: params.seed } : {}),
+      ...(draft.found ? { pack: draft.pack } : {}),
+    },
+  };
 }
 
 /** 世界地图区域 id 是否合法（与规则包 `space.zones[].zoneId` 同规则）。 */

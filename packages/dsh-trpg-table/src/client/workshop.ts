@@ -32,10 +32,23 @@ import type {
   PackImportResult,
   PackImportStrategy,
   PackUpdateResult,
+  RulesTestRequest,
+  RulesTestResult,
+  RulesValidateResult,
   WorldGenerateParams,
   WorldGenerateResult,
 } from '@dsh-trpg/protocol';
 import { BATTLE_TERRAIN_LEGEND } from '@dsh-trpg/protocol';
+import {
+  ACTION_KINDS,
+  FIELD_KINDS,
+  RANGE_BANDS,
+  SPACE_MODELS,
+  STACKING_MODES,
+  TARGETING_SIDES,
+  TARGETING_TYPES,
+  TIME_MODELS,
+} from '../../../rules/src/types.ts';
 import type {
   CharacterCardDef,
   ContentPack,
@@ -136,6 +149,12 @@ export interface WorkshopSnapshot {
   /** 正在进行的写操作（中文标签；空 = 空闲）。 */
   writeBusy: string | null;
   exported: { fileName: string; bytes: number; packHash: string } | null;
+  /** M9.6b 规则校验结果（rules.validate；草稿或已安装包）。 */
+  validation: RulesValidateResult | null;
+  validationBusy: boolean;
+  /** M9.6b 规则测试台结果（rules.test）。 */
+  testResult: RulesTestResult | null;
+  testBusy: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -762,6 +781,10 @@ function emptySnapshot(): WorkshopSnapshot {
     lastWarnings: [],
     writeBusy: null,
     exported: null,
+    validation: null,
+    validationBusy: false,
+    testResult: null,
+    testBusy: false,
   };
 }
 
@@ -786,6 +809,10 @@ export interface WorkshopStore {
   generateMap(params: MapGenerateParams): Promise<MapGenerateResult | null>;
   generateWorld(params: WorldGenerateParams): Promise<WorldGenerateResult | null>;
   savePack(nextPack: ContentPack, label: string): Promise<PackUpdateResult | null>;
+  /** M9.6b `rules.validate`：校验已安装包或草稿（不落盘）。 */
+  validateRules(draft?: ContentPack | null): Promise<RulesValidateResult | null>;
+  /** M9.6b `rules.test`：规则测试台（临时运行时 + 样本卡；可传草稿）。 */
+  runRulesTest(input: { requests: RulesTestRequest[]; seed?: number; pack?: ContentPack | null }): Promise<RulesTestResult | null>;
   /** 当前包是否内置（只读；写操作前给可读提示）。 */
   isBuiltinPack(packId?: string): boolean;
 }
@@ -872,6 +899,8 @@ export function createWorkshopStore(): WorkshopStore {
         manifestPackId: null,
         manifestNote: null,
         manifestError: null,
+        validation: null,
+        testResult: null,
       });
     } catch (error) {
       patch({ detail: null, detailBusy: false, detailError: error instanceof Error ? error.message : String(error) });
@@ -1157,6 +1186,78 @@ export function createWorkshopStore(): WorkshopStore {
     }
   };
 
+  /** M9.6b `rules.validate`：校验已安装包或草稿（草稿不落盘）。 */
+  const validateRules = async (draft?: ContentPack | null): Promise<RulesValidateResult | null> => {
+    const packId = snapshot.selectedPackId;
+    if (packId === null) return null;
+    if (snapshot.validationBusy) return null;
+    patch({ validationBusy: true });
+    try {
+      const result = await call<RulesValidateResult>('rules.validate', {
+        packId,
+        ...(draft !== null && draft !== undefined ? { pack: draft } : {}),
+      });
+      patch({ validationBusy: false, validation: result });
+      const lines = [
+        ...result.errors.slice(0, 6).map((error) => `错误：${error}`),
+        ...result.warnings.slice(0, 6).map((warning) => `警告：${warning}`),
+      ];
+      setNotice({
+        tone: result.ok ? (result.warnings.length > 0 ? 'info' : 'ok') : 'bad',
+        text: `规则校验${result.draft ? '（草稿，未保存）' : ''}：${
+          result.ok ? `通过（${result.scripts.length} 条脚本检查）` : `${result.errors.length} 个错误`
+        }`,
+        lines,
+      });
+      return result;
+    } catch (error) {
+      patch({ validationBusy: false });
+      setNotice({ tone: 'bad', text: `规则校验失败：${error instanceof Error ? error.message : String(error)}`, lines: [] });
+      return null;
+    }
+  };
+
+  /** M9.6b `rules.test`：临时运行时 + 样本卡试跑（可传草稿；不建房间）。 */
+  const runRulesTest = async (input: {
+    requests: RulesTestRequest[];
+    seed?: number;
+    pack?: ContentPack | null;
+  }): Promise<RulesTestResult | null> => {
+    const packId = snapshot.selectedPackId;
+    if (packId === null) return null;
+    if (snapshot.testBusy) return null;
+    patch({ testBusy: true });
+    try {
+      const result = await call<RulesTestResult>('rules.test', {
+        packId,
+        requests: input.requests,
+        ...(input.seed !== undefined ? { seed: input.seed } : {}),
+        ...(input.pack !== null && input.pack !== undefined ? { pack: input.pack } : {}),
+      });
+      patch({ testBusy: false, testResult: result });
+      const failed = result.outcomes.filter((outcome) => !outcome.ok).length;
+      const lines = [
+        ...result.errors.slice(0, 6),
+        ...result.outcomes
+          .filter((outcome) => !outcome.ok && outcome.error !== undefined)
+          .slice(0, 4)
+          .map((outcome) => `${outcome.label}：${outcome.error?.messageZh ?? ''}`),
+      ];
+      setNotice({
+        tone: result.ok ? 'ok' : 'bad',
+        text: `规则测试台${result.draft ? '（草稿）' : ''}：${result.outcomes.length} 条，${
+          failed === 0 ? '全部通过' : `${failed} 条失败`
+        }（seed ${result.seed}）`,
+        lines,
+      });
+      return result;
+    } catch (error) {
+      patch({ testBusy: false });
+      setNotice({ tone: 'bad', text: `规则测试台运行失败：${error instanceof Error ? error.message : String(error)}`, lines: [] });
+      return null;
+    }
+  };
+
   return {
     getSnapshot: () => snapshot,
     subscribe(listener: () => void) {
@@ -1187,6 +1288,8 @@ export function createWorkshopStore(): WorkshopStore {
     generateMap,
     generateWorld,
     savePack,
+    validateRules,
+    runRulesTest,
     isBuiltinPack(packId) {
       const id = packId ?? snapshot.selectedPackId;
       return snapshot.packs.some((pack) => pack.packId === id && pack.source === 'builtin');
@@ -1196,6 +1299,10 @@ export function createWorkshopStore(): WorkshopStore {
 
 // 类型再导出（UI 用；避免 UI 直接依赖 content 包的内部形状）
 export type { CharacterCardDef, ContentPack, PackLorebookDef, PackModuleDef };
+/** 规则段类型（M9.6b 规则编辑器用）。 */
+export type RulePackDef = NonNullable<ContentPack['rules']>;
+/** 规则编辑器下拉选项（来自 rules 包的权威枚举，避免 UI 手抄漂移）。 */
+export { ACTION_KINDS, FIELD_KINDS, RANGE_BANDS, SPACE_MODELS, STACKING_MODES, TARGETING_SIDES, TARGETING_TYPES, TIME_MODELS };
 
 /** 给 UI 的图片嗅探（本地导入预检：只收 PNG/SVG）。 */
 export function sniffIconFormat(b64: string): 'png' | 'svg' | null {
