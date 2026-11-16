@@ -22,7 +22,7 @@
 - 房主端房间服务（`0.0.0.0:45871`）：`/trpg/rpc`、`/trpg/events`（SSE）、`/trpg/health`、`/trpg/rooms`。
 - AI GM：房间绑定房主当前打开的会话（建房带 `sessionId` 或 `room.bind`），插件在该会话 Agent 上注册 GM 提示段与 `trpg_*` 工具；玩家行动以 `user/message` 注入会话，GM 的 assistant 文本回写房间事件（玩家端/战报用）。
 - GM 工具（均带 `trpg_` 前缀）：`trpg_roll_check`（引擎检定）、`trpg_roll_dice`、`trpg_secret_note`（私密）、`trpg_reveal_lore`、`trpg_check_lore`、`trpg_list_party`、战斗工具等；只注册在牌桌会话 Agent 作用域。
-- 客户端：对话头部「🎲 跑团桌」入口 + 右侧栏「跑团桌」tab 常驻卡片（建房/加入/落座/玩家席/掷骰/GM 控制台/成长战报）；不自绘聊天页、无插件输入框（v2 的主区域整页面板已废弃）。
+- 客户端：「🎲 跑团桌」入口（正常对话页在对话头部；DSH「新会话」空态页在左上角，点它会先准备一个会话再打开右侧栏）+ 右侧栏「跑团桌」tab 常驻卡片（建房/加入/落座/玩家席/掷骰/GM 控制台/成长战报）；不自绘聊天页、无插件输入框（v2 的主区域整页面板已废弃）。
 - 断线重连：SSE 带 `lastSeq` 补发错过的事件，私密事件在补发时同样过滤。
 - 规则引擎：D&D 5e-lite（检定/战斗/先攻/法术位），内容含 4 角色卡、世界书与模组「鬼木崖·异光」。
 

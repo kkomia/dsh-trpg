@@ -98,6 +98,7 @@ M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI 
 - [x] GM 原生回复 + 工具卡实测：assistant 文本回写房间事件（`gmNarrate`），掷骰/战斗等工具卡由 DSH 原生渲染
 - [x] 客户端 v3：对话头部「🎲 跑团桌」入口 + 右侧栏「跑团桌」tab（常驻紧凑卡片）；自绘整页面板、feed 气泡流、插件输入框（`main` / dock / composer）已删除
 - [x] 清理临时诊断入口 `debug.*`（sessions/create/gateway/fetch/tail/prompt）、`probeCapture`、`probeAgentErrors`、`debugHandlerRef`、`DSH_TRPG_DEBUG_DIR`、`gm-bare`
+- [x] **新会话空态入口修复（2026-11-16）**：空态/新会话页没有对话头部操作集群（`conversation.session.header.actions` 在 `hideChrome=blank` 时整块不渲染），新增 root 作用域全局入口 `conversation.header.leading`（single slot，无会话也渲染）：空态页/空白会话页显示「🎲 跑团桌」，有正常会话时让位给原 chip；点击先 `uiWorkspace.startSession()` 准备会话、短重试后 `openTab`，失败给引导文案；真机截图 `.tmp/verify2/20-final-empty-state-no-tab.png`、`21-final-empty-state-open-tab.png` 验证空态页可直接开 tab（gitignored）
 - [x] 单测全套 **87 passed / 0 failed**；修复 `gm.test.ts` 的 RNG flake（改为用攻击后实时视图选存活目标，1000 次复跑 0 失败）
 - [x] 构建：`node scripts/build.mjs` 成功（`lib/host.js`、`lib/client.js`）
 - [x] **实机截图验收（2026-11-16，本机 DSH 桌面应用）：通过**
@@ -110,9 +111,9 @@ M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI 
 
 **关键约束（本机实测）**：只有**正在被 DSH 页面驱动（live）**的会话才能完成模型请求；插件新建/恢复的会话一律 `DeepSeek Messages transport failed [TRANSPORT]`。所以牌桌必须绑定房主已打开的会话；未打开时 `room.bind` 回可读错误（「这个会话当前没有活动的 AI…请先打开该会话再开团」）。
 
-**已知缺口**：1) 插件输入框随 v3 删除后，远端玩家的行动入口尚未接上（`room.say` 目前由探针/回归脚本调用）——「玩家在自己原生会话里写行动 → 转发到房间」随 M7 玩家镜像一并收口；2) tab 已打开时再点头部按钮会重开页签（短暂空白 + 右栏宽度回默认，不产生重复页签），待做幂等打开；3) 重载后 localStorage 残留旧房 token 会红字提示「无法恢复房间：令牌无效或已失效」，应改为静默清理。M6 的玩家行动注入验证走房主侧会话。
+**已知缺口**：1) 插件输入框随 v3 删除后，远端玩家的行动入口尚未接上（`room.say` 目前由探针/回归脚本调用）——「玩家在自己原生会话里写行动 → 转发到房间」随 M7 玩家镜像一并收口；2) tab 已打开时再点对话头部按钮或空态页入口会重开页签（短暂空白 + 右栏宽度回默认，不产生重复页签），待做幂等打开；3) 重载后 localStorage 残留旧房 token 会红字提示「无法恢复房间：令牌无效或已失效」，应改为静默清理；4) 空态入口挂在 `conversation.header.leading`（root 作用域 single slot），将来若有其他插件占用同一 slot 会冲突，需协调挂载点。M6 的玩家行动注入验证走房主侧会话。
 
-**验收**：本机 DSH 桌面端实机验收通过（2026-11-16）：主区域仍是 DSH 原生对话；头部入口打开右侧栏「跑团桌」页签；320/360px 栏宽布局正常；建房自动绑定会话，结束房间=关房并解绑。单测 87 passed / 0 failed、`node scripts/build.mjs` 构建通过；细节与截图清单见 `docs/milestones/M6.md`。局域网双机（host + 另 1–3 台真机）验收待执行。
+**验收**：本机 DSH 桌面端实机验收通过（2026-11-16）：主区域仍是 DSH 原生对话；对话头部入口与空态页左上入口均可打开右侧栏「跑团桌」页签；320/360px 栏宽布局正常；建房自动绑定会话，结束房间=关房并解绑。单测 87 passed / 0 failed、`node scripts/build.mjs` 构建通过；细节与截图清单见 `docs/milestones/M6.md`。局域网双机（host + 另 1–3 台真机）验收待执行。
 
 ## M7 — 玩家侧对话镜像 🔬 方案已调研 · 待实机验证 2026-11-16
 

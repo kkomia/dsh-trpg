@@ -41,8 +41,8 @@
 
 ## 2. 一局长什么样（核心体验）
 
-1. **建房**：房主打开一个 DSH 会话（它将成为牌桌）→ 对话头部「🎲 跑团桌」→ 右侧栏「跑团桌」tab 里「创建房间」（团名 / GM 模式）→ 生成房间码（如 `7F3K9Q`）与邀请码；房间绑定当前会话。
-2. **就座**：朋友在各自 DSH 里点对话头部「🎲 跑团桌」→ 右侧栏 tab 填房主局域网地址 + 邀请码 → 加入房间、选择/创建角色 → 落座（玩家席可见）。
+1. **建房**：房主在 DSH 里打开一个会话（它将成为牌桌；也可停在「新会话」空态页）→ 点「🎲 跑团桌」（正常对话页在对话头部，空态页在左上角，见 §9「入口双形态」）→ 右侧栏「跑团桌」tab 里「创建房间」（团名 / GM 模式）→ 生成房间码（如 `7F3K9Q`）与邀请码；房间绑定当前会话。
+2. **就座**：朋友在各自 DSH 里点「🎲 跑团桌」（对话头部或空态页左上角）→ 右侧栏 tab 填房主局域网地址 + 邀请码 → 加入房间、选择/创建角色 → 落座（玩家席可见）。
 3. **建卡**：玩家在自己机器上创建 D&D 5e-lite 角色卡（或从模组预制卡里挑一张），进房上传「公开摘要 + 规则数值」，完整卡与秘密留在本地/房主均可。
 4. **开场**：房主在牌桌会话里说一句开场（如「开始」）→ AI GM 从模组第一幕开场，回复直接出现在会话里，每人的私密层分别推送。
 5. **行动**：玩家在牌桌会话（原生对话）里用自然语言写「我推开祠堂的门，先看门缝」→ 服务端把行动绑定到该玩家角色 → AI GM 决定要不要检定 → 调 `trpg_roll_check` → 引擎掷骰 → AI 依据掷骰结果写结果叙事。
@@ -83,7 +83,7 @@
 | GM 工具 | `ctx.tools.register()` 注册 `roll_check` / `combat_attack` 等 | 已有 Tool Registry 与 guard/restrict 机制 |
 | 提示词注入 | `ctx.systemPrompt.section()` / `ctx.systemPrompt.context()` | 已有 |
 | 持久化 | DSH `storageDomain` / 插件数据目录下的 JSON + 事件日志 append-only | 已有 storage 服务；事件日志同时是可回放存档 |
-| UI | Client 插件（v3 对话原生）：**对话头部「🎲 跑团桌」入口 + 右侧栏「跑团桌」tab（常驻紧凑卡片）** + tab 内建房/加入最小表单；主区域直接用 DSH 原生会话，不自绘聊天页、不提供插件输入框 | 已通过 Slots inspection 确认可注册；详见 §9 |
+| UI | Client 插件（v3 对话原生）：**「🎲 跑团桌」入口（正常对话页在对话头部 `conversation.session.header.actions`，空态/新会话页在 `conversation.header.leading` 全局入口）+ 右侧栏「跑团桌」tab（常驻紧凑卡片）** + tab 内建房/加入最小表单；主区域直接用 DSH 原生会话，不自绘聊天页、不提供插件输入框 | 已通过 Slots inspection 确认可注册；详见 §9 |
 | 发布 | DSH bundle（`dsh.bundle.patch` + `dsh.client`），单包 `dsh-trpg-table` | 与 dsh-tavern / dsh-lora 同款形态 |
 
 ### 3.3 仓库结构（monorepo）
@@ -324,11 +324,30 @@ type Envelope =
 
 **当前形态 v3（2026-11-16 主理人拍板，取代 v2）**：跑团桌**不自绘聊天界面**，主区域直接用 DSH 原生会话——
 房主当前打开并绑定为牌桌的那个会话就是牌桌，AI GM 就是这个会话的 Agent；GM 的原生回复（markdown/流式）
-与 `trpg_*` 工具的卡片都由 DSH 原生渲染。插件只保留三样东西：
+与 `trpg_*` 工具的卡片都由 DSH 原生渲染。插件只保留四样东西（入口为双形态，见下「入口双形态」）：
 
-1. **对话头部入口**：`conversation.session.header.actions` 里的「🎲 跑团桌」按钮 → `sidebarRight.openTab('trpg-table')`；按钮顺带把当前 `sessionId` 写进 localStorage，作为建房/绑定的兜底。
-2. **右侧栏「跑团桌」tab**（常驻紧凑卡片）：`sidebarRightTabs.register({ id: 'dsh-trpg-table:table', kind: 'trpg-table', title })` 注册 tab 类型，正文注册到 `slots.register({ name: 'sidebar.right.pane.tab', key: 'dsh-trpg-table:table' })`（key = tab 定义 id）；`openTab(kind)` 按 `kind` 点名打开。正文从 `props.sessionId` 拿到当前会话（右侧栏按会话作用域注入），建房/`room.bind` 优先用它。
-3. **建房/加入最小表单**：没有房间时 tab 内就是「房主地址 + 建房 + 加入 + 玩家名」的最小表单，不占用主区域。
+1. **对话头部入口（有活动会话时）**：`conversation.session.header.actions` 里的「🎲 跑团桌」按钮 → `sidebarRight.openTab('trpg-table')`；按钮顺带把当前 `sessionId` 写进 localStorage，作为建房/绑定的兜底。
+2. **空态/新会话全局入口**：`conversation.header.leading` 里的「🎲 跑团桌」按钮——该 slot 是 root 作用域（无会话也渲染），空态页/空白会话页靠它进入；有正常会话时它自动让位给对话头部 chip，同一时刻只有一个入口。点击逻辑见下「入口双形态」。
+3. **右侧栏「跑团桌」tab**（常驻紧凑卡片）：`sidebarRightTabs.register({ id: 'dsh-trpg-table:table', kind: 'trpg-table', title })` 注册 tab 类型，正文注册到 `slots.register({ name: 'sidebar.right.pane.tab', key: 'dsh-trpg-table:table' })`（key = tab 定义 id）；`openTab(kind)` 按 `kind` 点名打开。正文从 `props.sessionId` 拿到当前会话（右侧栏按会话作用域注入），建房/`room.bind` 优先用它。
+4. **建房/加入最小表单**：没有房间时 tab 内就是「房主地址 + 建房 + 加入 + 玩家名」的最小表单，不占用主区域。
+
+**入口双形态（2026-11-16 修复，用户报「新会话空态页没有入口」）**
+
+| 页面状态 | 入口 | slot / 作用域 | 行为 |
+|---|---|---|---|
+| 正常对话页（有活动会话） | 对话头部「🎲 跑团桌」chip | `conversation.session.header.actions`（会话作用域） | 点击 `sidebarRight.openTab('trpg-table')`，并记住当前 `sessionId` |
+| 「新会话」空态页 / 空白会话页 | 左上角「🎲 跑团桌」 | `conversation.header.leading`（root 作用域 **single slot**，无会话也渲染） | 有在屏会话就直接开 tab；没有则先准备会话再开（见下） |
+
+- **根因**：`conversation.session.header.actions` 在 `hideChrome=blank` 时整块不渲染（DSH `ui-conversation` 的 `ConversationSession.tsx:148,205-207`；`ConversationHeader.tsx:26` 传 `hideChrome: blank`）。空态页其实已有一个 blank 会话（右侧栏有会话面），但会话头没有操作集群，所以原先唯一的入口看不见、点不到。
+- **为什么挂在 `conversation.header.leading`**：该 slot 是 root 作用域，无会话也渲染（证据：`ui-conversation/src/client/contract/slots.ts:266`，slot-catalog 注「Global navigation before the Session title, available without a Session」）。
+- **让位规则**：全局入口组件只在「右侧栏没有在屏会话」或「在屏会话是空白会话（blank）」时显示；有正常会话时返回 `null`，入口由原对话头部 chip 提供——同一时刻只有一个入口。
+- **点击逻辑（ensureSession）**：
+  1. 先试 `sidebarRight.openTab('trpg-table')`；右侧栏已有在屏会话面时直接成功。
+  2. 失败（空态页无会话面）：调 `uiWorkspace.startSession()` 让 DSH 自己新建会话，随后以 300ms 间隔短重试 `openTab`（约 12 次 / 3.6s），等右侧栏出现会话面；
+  3. 仍失败：在入口旁显示引导「先在左侧「新会话」建一个会话，再打开跑团桌」；完全没有工作区时 DSH 自己不会新建会话，属预期。
+- **tab 内兜底**：tab 拿不到 `sessionId` 时不再静默——显示「当前没有可绑定的会话：请在对话页顶栏打开跑团桌后再绑定」；建房未绑定时提示「未绑定会话：请在对话页顶栏打开跑团桌后点「绑定当前会话」」。
+- **验证**：typecheck 0 error、`node scripts/build.mjs` 构建成功、插件重载；真机截图 `.tmp/verify2/20-final-empty-state-no-tab.png`（空态页入口可见）与 `21-final-empty-state-open-tab.png`（点击后右侧栏打开「跑团桌」tab）；该目录 gitignored，不入库。详见 `docs/milestones/M6.md`。
+- **限制**：`conversation.header.leading` 是 **single slot**（只能有一个占用者），将来若有其他插件注册同一 slot 会冲突，需协调挂载点（当前仅本插件使用）。
 
 > **v2 历史方案（已废弃）**：曾把主区域改成整页面板（`main` key=`trpg`，自带叙事流 / 插件行动输入框 / 右侧桌面），入口用 `sidebar.panellist` + `ctx.layout.selectPanel('trpg')`。该面板已于 M6 删除，代码与交互均不再存在，此处仅作沿革说明。
 
@@ -337,7 +356,8 @@ type Envelope =
 | 区域 | 形态 | 内容 |
 |---|---|---|
 | 主区域 | DSH 原生会话（插件不接管） | AI GM 原生回复；玩家行动以 `user/message` 注入；GM 工具走原生工具卡片 |
-| 对话头部 | `conversation.session.header.actions` | 「🎲 跑团桌」→ 打开右侧栏 tab；记住当前会话 |
+| 对话头部 | `conversation.session.header.actions` | 有活动会话时：「🎲 跑团桌」→ 打开右侧栏 tab；记住当前会话 |
+| 空态页 / 新会话 | `conversation.header.leading`（root 作用域） | 无在屏会话或空白会话时：左上角「🎲 跑团桌」→ 先准备会话再打开右侧栏 tab；有正常会话时让位给对话头部 chip |
 | 右侧栏 tab | `sidebarRightTabs` + `sidebar.right.pane.tab` | 常驻紧凑卡片，约 320–420px 栏宽、纵向滚动；无房间时显示大厅 |
 | 建房/加入 | tab 内最小表单 | 房主地址、团名、GM 模式、创建/加入、玩家名、邀请码 |
 | 输入框 | **不提供**（无插件输入框） | 行动写在原生会话里；插件不再自绘 composer/dock |
@@ -357,7 +377,8 @@ type Envelope =
 
 | 层 | 名称 | 用途 |
 |---|---|---|
-| Client slot | `conversation.session.header.actions` | 对话头部「🎲 跑团桌」入口 |
+| Client slot | `conversation.session.header.actions` | 对话头部「🎲 跑团桌」入口（有活动会话时；`hideChrome=blank` 时整块不渲染） |
+| Client slot | `conversation.header.leading` | 空态页/空白会话页的全局「🎲 跑团桌」入口（root 作用域、single slot；无会话也渲染，有正常会话时让位） |
 | Client 服务 | `sidebarRightTabs.register({ id, kind, title })` | 注册右侧栏 tab 类型（id=`dsh-trpg-table:table`，kind=`trpg-table`） |
 | Client slot | `sidebar.right.pane.tab`（key=`dsh-trpg-table:table`） | tab 正文：常驻卡片；`props.sessionId` = 当前会话 |
 | Client 服务 | `sidebarRight.openTab(kind)` | 打开右侧栏 tab（kind=`trpg-table`） |
@@ -373,9 +394,9 @@ type Envelope =
 ### 9.3 关键约束与待办
 
 - **live 会话约束（本机实测）**：只有被 DSH 页面驱动（live）的会话能完成模型请求；插件新建/`resolveAgent` 恢复的会话一律 `DeepSeek Messages transport failed [TRANSPORT]`（5 次重试后整轮失败）。所以 `room.bind` 要求会话已打开，未打开时回可读错误：「这个会话当前没有活动的 AI…请先打开该会话再开团」。
-- **本机实机验收通过（2026-11-16，本机 DSH 桌面应用）**：a) 主区域仍是 DSH 原生对话；b) 对话头部「🎲 跑团桌」打开右侧栏「跑团桌」页签（与其它页签并列、无重复页签），未进房=大厅（房主地址/开团/加入）、进房=房间状态/玩家席/落座/掷骰/GM 控制台/成长；c) 约 320/360 CSS px 栏宽下卡片无溢出/重叠、长文案折行、中文无乱码，内容未超高故未触发滚动（root `overflowY:auto` 兜底）；d) 建房时 `sessionId` 取自当前 tab 会话并自动绑定，卡片显示房间号、牌桌会话短 id、「已绑定本会话」（host-only）。证据与截图清单见 `docs/milestones/M6.md`。
+- **本机实机验收通过（2026-11-16，本机 DSH 桌面应用）**：a) 主区域仍是 DSH 原生对话；b) 对话头部「🎲 跑团桌」打开右侧栏「跑团桌」页签（与其它页签并列、无重复页签），未进房=大厅（房主地址/开团/加入）、进房=房间状态/玩家席/落座/掷骰/GM 控制台/成长；空态/新会话页由左上全局入口进入（2026-11-16 修复，见上「入口双形态」）；c) 约 320/360 CSS px 栏宽下卡片无溢出/重叠、长文案折行、中文无乱码，内容未超高故未触发滚动（root `overflowY:auto` 兜底）；d) 建房时 `sessionId` 取自当前 tab 会话并自动绑定，卡片显示房间号、牌桌会话短 id、「已绑定本会话」（host-only）。证据与截图清单见 `docs/milestones/M6.md`。
 - **结束房间 = 关房并解绑**：房主「结束房间」走 `room.close`（服务端 `onRoomClosed → tableBridge.unbind`，撤销 GM 提示段与 `trpg_*` 工具注入）；玩家「退出房间」走 `room.leave`，只离席、不关房（设计如此）。修复前房主只断本地、不发 RPC，会出现「关房后仍被 GM 注入」的 bug，已在 M6 验收中修复。
-- **已知限制（M6）**：1) 重载后 localStorage 残留旧房 token 会红字提示「无法恢复房间：令牌无效或已失效」，应改为静默清理（尚未做）；2) 页签已打开时再点对话头部按钮会重开页签（短暂空白 + 右栏宽度回默认），不产生重复页签；3) 极窄 ≈300px 且多页签时页签标题截断（卡片本身正常）；4) 远端玩家行动入口随 M7 开放，`room.say` 目前由探针/回归脚本调用。
+- **已知限制（M6）**：1) 重载后 localStorage 残留旧房 token 会红字提示「无法恢复房间：令牌无效或已失效」，应改为静默清理（尚未做）；2) 页签已打开时再点对话头部按钮或空态页入口会重开页签（短暂空白 + 右栏宽度回默认），不产生重复页签；3) 极窄 ≈300px 且多页签时页签标题截断（卡片本身正常）；4) 远端玩家行动入口随 M7 开放，`room.say` 目前由探针/回归脚本调用；5) 空态入口依赖 `conversation.header.leading` 这个 root 作用域 single slot——该槽位只能有一个占用者，将来若有其他插件占用会冲突，需协调挂载点。
 - **玩家侧镜像（M7 方向）**：玩家本机 `sessions.create()` 建镜像会话，按收件人投影后 `session.append()` 原生渲染，不跑模型、不配 key；P1≈36h，P0 右栏只读 transcript 6–10h。详见 `docs/research/player-mirror.md`。
 
 
@@ -391,7 +412,7 @@ type Envelope =
 | **M3 AI GM 端到端** | GM Agent 编排、工具、上下文组装、视图投影、私密层、反串角守则 | 本机双实例：AI 带完前半段模组；串角/越权/状态漂移用例全部通过 |
 | **M4 真人 GM + 收尾** | GM 控制台（场景/秘密/先攻/日志/玩家管理）、叙事草稿采纳、散团回传、存档续团 | 两种模式各跑一幕；散团后玩家本地卡拿到成长 |
 | **M5 局域网验收 + 发布** | 本地 .tgz 安装包、安装文档、玩家手册、GM 手册、GitHub 仓库 | 你 + 1–3 个朋友在真实局域网跑完一局；仓库推到 GitHub |
-| **M6 对话原生牌桌** | 房间绑定 DSH 会话、GM 提示段 + `trpg_*` 工具进会话、右侧栏 tab 客户端、debug 清理 | 构建 + 单测 87 全绿；**本机实机验收通过**（主区域原生对话、头部入口打开右栏 tab、320/360px 布局、建房自动绑定、结束房间=关房解绑），截图见 `docs/milestones/M6.md`；局域网双机验收待做 |
+| **M6 对话原生牌桌** | 房间绑定 DSH 会话、GM 提示段 + `trpg_*` 工具进会话、右侧栏 tab 客户端、debug 清理 | 构建 + 单测 87 全绿；**本机实机验收通过**（主区域原生对话、头部入口/空态页入口打开右栏 tab、320/360px 布局、建房自动绑定、结束房间=关房解绑），截图见 `docs/milestones/M6.md`；局域网双机验收待做 |
 | **M7 玩家侧镜像** | host 会话事件中继 + 玩家本机镜像会话 replay（P1），或右栏只读 transcript（P0） | 玩家端无 key 时原生渲染整局、无模型请求；调研的 3 项待实机验证通过 |
 
 ---
