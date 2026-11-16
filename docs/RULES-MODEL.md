@@ -1,7 +1,7 @@
 # 规则模型 v1：数据 + 公式 + JS 钩子（Rule Pack）
 
-> 状态：**已拍板（2026-11-16），M9 实现**｜决策来源：[DECISIONS.md](./DECISIONS.md) 第八轮 #26｜关联：[DESIGN.md](./DESIGN.md) §5 规则系统、[CONTENT-MODEL.md](./CONTENT-MODEL.md) 内容包、[ROADMAP.md](./ROADMAP.md) M9。
-> 一句话：规则 = **数据**描述「有什么」，**受限公式**表达简单算法，**JS 钩子**只负责 8 个固定时机的复杂逻辑；核心运行时不含任何具体规则。
+> 状态：**已拍板（2026-11-16），M9 实现**｜决策来源：[DECISIONS.md](./DECISIONS.md) 第八轮 #26（物品/图标资产扩展见第九轮 #27）｜关联：[DESIGN.md](./DESIGN.md) §5 规则系统、[CONTENT-MODEL.md](./CONTENT-MODEL.md) 内容包、[UI-CONTRACT.md](./UI-CONTRACT.md)（`items[]` 图标/`assets`/投影 DTO）、[ROADMAP.md](./ROADMAP.md) M9。
+> 一句话：规则 = **数据**描述「有什么」，**受限公式**表达简单算法，**JS 钩子**只负责固定时机的复杂逻辑（**核心 8 + 场地/时间 7**，全可选）；核心运行时不含任何具体规则。
 
 ## 0. 摘要与四条确认
 
@@ -12,7 +12,7 @@
 | 3 | **客户端只渲染主机成果** | 内容包 JS 只在 host 跑（`node:vm` 沙箱）；玩家客户端零脚本执行，只收主机算好的投影（`sheet.view` / `combat.view`） | 不在玩家端求值公式、不跑钩子、不校验规则 |
 | 4 | **脚本 = pack zip 内独立文件** | `rules/scripts/*.js`，`pack.json` 按钩子名引用并带 sha256；可 diff、可单测、可编辑器编辑 | 不内联进 `pack.json` 字符串、不打包成不可 diff 的 bundle |
 
-**目标**：理论上能表达任意现有跑团规则（D&D 各版、CoC 骰池、freeform 武侠……），而不是只做一套更复杂的 D&D。**边界**：钩子数量固定（8 个 + 1 个可选迁移钩子），表达力不够时优先让「数据更灵活」（装备槽/词条/公式命名空间），而不是无限制加钩子。
+**目标**：理论上能表达任意现有跑团规则（D&D 各版、CoC 骰池、freeform 武侠……），而不是只做一套更复杂的 D&D。**边界**：钩子数量固定（**核心 8 + 场地/时间 7**，外加 1 个可选迁移钩子；全可选），表达力不够时优先让「数据更灵活」（装备槽/词条/公式命名空间/场地与时间数据），而不是无限制加钩子。
 
 ## 1. 为什么需要规则层
 
@@ -81,7 +81,19 @@
     "toHit": "attack", "damage": { "formula": "damage", "dice": "1d8" }, "description": "用主手武器攻击一个接触目标。" }],
   "progression": { "maxLevel": 10, "xpTable": [0, 100, 300, 600], "grants": [{ "atLevel": 1, "skillPoints": 2 }] },
   "tables": [{ "tableId": "loot.common", "roll": "1d100", "entries": [{ "min": 1, "max": 60, "itemId": "huozhezi" }] }],
-  "ui": { "groups": [{ "id": "combat", "title": "战斗", "fields": ["resources.hp", "derived.ac", "equipment.stats.攻击"] }] },
+  "items": [{   // 世界物品库：装备/消耗/材料都在这里；装备实例只存差异（§4）
+    "itemId": "hengdao", "name": "横刀", "icon": "item/hengdao", "tags": ["weapon:melee", "锋利"],   // 短 id，加载时归一化为 @pack:assets/icons/item/hengdao.*
+    "rarity": "common", "stats": { "攻击": 2 }, "equipSlot": ["mainHand"], "stackable": false,
+    "description": "家传旧刀，刀脊有裂纹。" },
+    { "itemId": "jinchuangyao", "name": "金创药", "icon": "@pack:assets/icons/item/jinchuangyao.png",
+      "tags": ["consumable:heal"], "rarity": "common", "stackable": true, "useAction": "use.heal",
+      "description": "恢复 1d8 生命。" }],
+  "ui": {
+    "groups": [{ "id": "combat", "title": "战斗", "fields": ["resources.hp", "derived.ac", "equipment.stats.攻击"] }],
+    "itemCategories": [{ "id": "weapon", "name": "武器", "icon": "category/weapon", "tags": ["weapon"] }],  // 背包分类由物品 tags 生成
+    "rarities": [{ "id": "common", "name": "普通", "color": "#9aa0a6" }, { "id": "rare", "name": "稀有", "color": "#4aa3ff" }],
+    "templates": { "sheetCompact": ["resources", "attributes", "skills"], "itemCard": ["icon", "stats", "description"] }  // 三屏分组/卡片字段顺序
+  },
   "formulas": {   // 命名公式：只能引用变量与白名单函数，只算静态值（不含随机）
     "proficiency": "floor((level - 1) / 4) + 2", "hpMax": "8 + derived.mod.con * level + 5 * level", "manaMax": "level * 3",
     "check": "derived.mod + skill.proficient * proficiency + skill.bonus",
@@ -106,10 +118,50 @@
 | `sheet.equipment.stats[]` | 词条池；只定义「允许哪些数值及范围」，具体数值由装备实例给 |
 | `sheet.skills[]` / `statuses[]` | 技能→属性映射（加值 = 条目公式 + 熟练）；状态定义时长/叠加/图标，持续效果由 `onEvent`/`resolveDamage` 处理 |
 | `actions[]` | 结算数据；`toHit/damage` 引用命名公式，骰子只写表达式字符串，复杂结算标记钩子 |
+| `items[]` | 世界物品库（装备/消耗/材料）：`stats` 是词条基准值（装备实例只存差异）；`equipSlot` 限定可穿槽位；`stackable/useAction` 支撑背包操作；`icon` 指资产（[UI-CONTRACT.md](./UI-CONTRACT.md) §1） |
+| `ui.{groups,itemCategories,rarities,templates}` | 卡面分组、背包分类与稀有度（含颜色）、三屏模板；**只描述怎么显示，不含任何数值** |
 | `formulas{}` | 命名公式（`check/attack/damage/defense/initiative` 为约定键，可扩展） |
 | `progression / tables / ui / migrations` | 成长、随机表、卡面分组、版本迁移；均可选 |
 
 **「能数据表达的不写脚本」**：属性范围、技能属性、装备部位与词条叠法、动作消耗与目标、成长点数、掉落表、卡面分组全是 JSON；只有需要循环/查表/条件链时才写钩子。规则包内 id 允许中文（如 `attr.敏`、`equip.攻击`），校验规则 `^[A-Za-z0-9_\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5-]*$`，namespace 内唯一。
+
+### space（场地，可选段）
+
+`space.model`：`none`（默认，theater-of-mind，沿用 v1 距离档位 `engaged/near/far`）`| zone`（区域图）`| grid`（格子图）。核心运行时只管「谁在哪、隔多远、有没有掩体」，**不管怎么画**（渲染见 [UI-CONTRACT.md](./UI-CONTRACT.md) §5）。与 `items[]`/`ui{}` 一样是 `pack.rules` 的可选顶层段，缺省即无场地概念。
+
+```jsonc
+"space": {
+  "model": "zone",                        // none | zone | grid
+  "units": "m",                           // 展示单位：m / ft / 格
+  "grid": { "cellMeters": 1.5 },          // model=grid 时有效
+  "zones": [ { "zoneId": "qingshi_gate", "name": "镇口", "tags": ["open"] },
+             { "zoneId": "cave_mouth", "name": "洞口", "tags": ["dark"] } ],
+  "edges": [ { "from": "qingshi_gate", "to": "cave_mouth", "kind": "road", "distance": 3 } ],
+  "terrains": [ { "id": "rough", "name": "碎石", "moveCost": 2 } ],
+  "covers": [ { "id": "half", "name": "半掩体", "defenseBonus": 2, "tags": ["wall", "cart"] } ],
+  "areas": [ { "areaId": "poison_mist", "name": "毒雾", "shape": "circle", "radius": 2, "effect": "status:poisoned" } ]
+},
+"formulas": { "distance": "space.hops * 3", "movement": "derived.speed * 2" }
+```
+
+- `distance` / `movement` 是**约定公式键**（不强制）：能数据表达就写公式（`space.*` 变量由核心运行时注入：`hops/cells/meters`）；区域进出、掩体匹配等条件链交给 §6 的场地/时间 7 钩子。
+- `model: none` 时忽略 `zones/grid`，距离仍按 `actions[].targeting.range` 档位判定——**向后兼容 dnd5e-lite 现状**，现存团不受影响。
+
+### time（时间，可选段）
+
+```jsonc
+"time": {
+  "clock": "segment",                     // none | segment（冒险时段）| real（与现实时钟对齐，仅展示）
+  "segments": ["晨", "昼", "昏", "夜"],    // 一天的时段
+  "dayLength": 4,                         // 一天几段
+  "durationUnits": ["round", "minute", "segment", "day"],   // 持续时间的合法单位
+  "cooldowns": [ { "id": "perEncounter", "name": "每场遭遇一次", "reset": "encounter" } ],
+  "environment": [ { "id": "night", "name": "夜", "effects": { "visibility": "dim" } } ]
+}
+```
+
+- 时间推进只由工具/钩子触发（`trpg_time_advance` 或 `onTimeAdvance`），**不读系统时钟**（确定性）；持续时间/冷却统一记作「单位 + 数量」，单位必须取自 `durationUnits`。
+- `environment` 只描述环境效果（可见度/地形影响），具体结算落 `resolveCheck`/`onEvent`。
 
 ## 4. 卡实例形状
 
@@ -124,11 +176,18 @@
   ],
   "skills": [{ "id": "athletics", "proficient": true, "bonus": 0 }],
   "statuses": [{ "id": "poisoned", "stacks": 1, "remaining": 2 }],
+  "assets": {   // 可选：形象资产引用，字段与标准化约束见 UI-CONTRACT §8
+    "avatar": "@local:card_aqing:avatar.main", "portrait": "@local:card_aqing:portrait.main",
+    "portraitVariants": { "smile": "@local:card_aqing:portrait.smile", "attack": "@local:card_aqing:portrait.attack" },
+    "spriteSheet": { "assetId": "card_aqing:sheet.walk", "rows": 4, "cols": 4, "frameSize": 128,
+                     "frames": [{ "name": "walk.down.0", "index": 0 }] }
+  },
   "notes": "玩家备注", "origin": { "packId": "core-guimuya", "moduleId": "guimuya" }
 }
 ```
 
 - **派生值不存卡**：AC、HP 上限、命中加值、先攻加值、技能总加值、装备词条聚合值全部由主机按 `computeDerived` + `formulas` + 装备实时算；卡只存「角色自己拥有的数据」。
+- `assets` 只存**引用**（`@local:` 本地 / `@room:` 落座后），二进制不进卡；尺寸/格式/体积由 [UI-CONTRACT.md](./UI-CONTRACT.md) §3 强制，落座只上传展示用资产（§4.5）。
 - `resources.<id>.current` 是唯一在卡里存的运行态；`max` 只是缓存/参考，以主机计算为准。`equipmentInstances[].stats` 是**实例化时的词条快照**（物品定义在内容包/规则数据里，实例只存差异）；换装备由主机重算投影。换规则包后旧卡必须经 `migrations` + `migrateSheet` 迁移，否则只读。
 
 ## 5. 受限公式语言
@@ -151,6 +210,7 @@ func    := min | max | floor | ceil | round | abs | clamp
 | `sheet.<fieldId>` / `resource.<id>` | number 类型自由字段 / 资源上限 | `sheet.负重上限`、`resource.hp` |
 | `derived.<key>` | `computeDerived` 产出（可嵌套点路径） | `derived.ac`、`derived.mod.dex` |
 | 结算上下文 | `proficiency`、`skill.proficient`（0/1）、`skill.bonus`、`derived.mod`（当前属性调整值） | — |
+| `space.<key>` / `time.<key>` | 场地/时间上下文（核心运行时注入：`space.hops/cells/meters`、`time.segment/day`） | `space.hops * 3` |
 | 运算/函数 | `+ - * / %`、括号、一元负号；`min/max/floor/ceil/round/abs/clamp(x,lo,hi)` | `clamp(derived.ac, 0, 40)` |
 
 **禁止**：赋值/字符串/布尔/比较/三元/函数定义/循环/副作用/文件/网络/随机/时间。需要条件与循环 = 写钩子。
@@ -166,9 +226,9 @@ func    := min | max | floor | ceil | round | abs | clamp
 
 **错误处理**：编译期（加载规则包时）校验语法、变量命名空间、函数白名单、公式 id 引用，一次聚合报出全部错误并定位 `formulas.<key>: 第 N 列 未知变量 xxx`；运行期错误（除零、`derived` 缺 key）→ 该次结算回滚 + `rules/error` 事件，不崩房。
 
-## 6. JS 钩子 API（核心）
+## 6. JS 钩子 API（核心 8 + 场地/时间 7）
 
-钩子全部**可选**，缺省走「数据 + 公式」路径。脚本是 CommonJS 模块（沙箱提供 `module/exports`，无 `require`），一个文件可导出多个钩子。
+钩子全部**可选**，缺省走「数据 + 公式」路径。**核心 8** = 下表前 8 行（`validateSheet` … `generateLoot`）；**场地/时间 7** = `computeDistance` / `onMove` / `onEnterZone` / `onLeaveZone` / `computeCover` / `onTimeAdvance` / 回合边界 `onRoundStart`+`onRoundEnd`（算一组，共 7 组时机、8 个钩子名）；外加可选 `migrateSheet`。脚本是 CommonJS 模块（沙箱提供 `module/exports`，无 `require`），一个文件可导出多个钩子。
 
 | 钩子 | 时机（谁调） | 输入 → 输出 | 缺省行为 |
 |---|---|---|---|
@@ -180,7 +240,16 @@ func    := min | max | floor | ceil | round | abs | clamp
 | `onEvent(ctx, event)` | 事件总线：`turn/start\|end`、`action/before\|after`、`damage/after`、`death`、`equip/change`、`status/tick` | event → `{effects?, sheetUpdates?, log?}` | 不做任何事 |
 | `onLevelUp(ctx, req)` | 成长结算 | `{level, xp, gains}` → sheet patch | 按 `progression.grants` 自动发点数 |
 | `generateLoot(ctx, req)` | 掉落/奖励 | `{tableId?, encounterId?, level}` → 物品实例[] | 按 `tables[]` 用种子骰掷表 |
+| `computeDistance(ctx, req)` | 任何需要距离的结算前（攻击/移动/选目标） | `{actor, target, kind}` → `{distance, band?, path?}` | 按 `space.model` 与 `formulas.distance` 算；`none` → 距离档位 |
+| `onMove(ctx, req)` | 移动提交/落位 | `{actorId, from, to, cost}` → `{ok, remaining?, effects?, log?}` | 按 `formulas.movement` 扣移动力 |
+| `onEnterZone(ctx, evt)` | 单位进入区域/格子 | `{actorId, zoneId, via}` → `{effects?, log?}` | 不做任何事 |
+| `onLeaveZone(ctx, evt)` | 单位离开区域/格子 | `{actorId, zoneId, via}` → `{effects?, log?}` | 不做任何事 |
+| `computeCover(ctx, req)` | 攻击/检定前判掩体 | `{attacker, target, targetZone}` → `{defenseBonus, tags?}` | 按 `space.covers` 数据匹配 |
+| `onTimeAdvance(ctx, req)` | 时间推进（工具/休息/回合外） | `{from, to, cause}` → `{effects?, sheetUpdates?, log?}` | 按 `time.segments` 推进，只清过期冷却/持续效果 |
+| `onRoundStart` / `onRoundEnd` | 战斗回合边界 | `{round, order}` → `{effects?, log?}` | 回合计时（冷却/持续效果 tick） |
 | `migrateSheet(ctx, sheet, fromVersion)`（可选） | 卡/规则版本迁移 | 旧 sheet → 新 sheet | 只做数据迁移表能表达的改名/补默认值 |
+
+**与 `onEvent` 的关系**：场地/时间钩子在核心运行时里有**明确的调用点**（算距离 → 判移动 → 区域进出 → 掩体 → 时间推进 → 回合边界），先于通用事件总线执行；它们返回的 `effects/sheetUpdates` 照常进效果栈与事件日志，`onEvent` 之后仍会收到对应事件 kind（`move`、`zone/enter`、`zone/leave`、`time/advance`、`round/start`、`round/end`）。专用钩子未实现 → 退化为「数据 + 公式」；公式也不够 → 再交给 `onEvent`；两者都不写 = 该规则没有场地/时间概念（`model: none`、`clock: none`），不影响现有团。
 
 **ctx 能力表**
 
@@ -318,10 +387,11 @@ packages/content/src/rules/dnd5e-lite/     # 作者源码：可 diff、可单测
 | 阶段 | 目标 | 交付 | 验收标准 |
 |---|---|---|---|
 | **M9.1** | 规则 schema + 公式求值 + 卡实例/投影 DTO（纯库 + 测试） | `@dsh-trpg/rules` 包骨架：types、`validateRulesPack()`、公式 parser/evaluator、卡实例与迁移、投影 DTO；不接 host | 公式 40+ 例单测（含编译期/运行期错误）、schema 校验、旧卡迁移；typecheck 0；不新增运行时依赖 |
-| **M9.2** | 核心运行时 + 脚本沙箱 | 种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `vm` 沙箱 + 8 钩子调度 + 超时/sha256/错误事件 | 8 钩子各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界 |
+| **M9.2** | 核心运行时 + 脚本沙箱 | 种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `vm` 沙箱 + 核心 8 + 场地/时间 7 钩子调度 + 超时/sha256/错误事件 | 核心 8 + 场地/时间 7 各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界 |
 | **M9.3** | dnd5e-lite 示例规则包 + 迁移 | `rules.json` + 4 个脚本；`core-guimuya` pack 带 rules 段；旧卡迁移器；与旧实现对照测试 | CLI 用「鬼木崖·异光」跑完一幕，骰面/命中/伤害/AC/先攻逐项一致；单测迁移后全绿（134 → 新增规则测试） |
 | **M9.4** | 协议/房间/客户端卡面（主机权威投影） | `sheet.view`/`combat.view` + `sheet`/`rules` 事件 + 重连重算；客户端只读卡面（分组/资源条/装备槽/可用动作/状态） | 双实例：落座→检定→攻击→断线重连后投影一致；玩家端构建产物不含规则执行代码；320–420px 栏宽可读 |
-| **M9.5** | 规则编辑器（M8.3 顺延至此） | 工坊规则 tab：schema 表单 + 代码编辑器 + 沙箱试跑 + 断言面板 + 模板库 | 作者不改源码完成一次规则包修改并通过规则测试台；导出 `.trpgpack` 后另一台机器可玩 |
+| **M9.5** | 资产与图标管线（新增，详见 [UI-CONTRACT.md](./UI-CONTRACT.md) §10） | 纯 JS 归一化器 + SVG 白名单净化 + OpenAI 兼容客户端 + `assets/manifest.json` + 工坊图标工作台 + 玩家立绘/变体/帧表与落座上传 | 同 UI-CONTRACT §10 的 M9.5a–d 验收标准 |
+| **M9.6** | 规则编辑器（M8.3 顺延至此；**原编号 M9.5**） | 工坊规则 tab：schema 表单 + 代码编辑器 + 沙箱试跑 + 断言面板 + 模板库 | 作者不改源码完成一次规则包修改并通过规则测试台；导出 `.trpgpack` 后另一台机器可玩 |
 
 **依赖关系**：M7 玩家侧镜像可并行（改 client 镜像/会话事件，与规则包文件面不重叠，交叉点只有投影字段与事件类型）；**M8.3 UI 依赖 M9.1 + M9.4**（schema 与投影都定稿）；**M8.3a 只读卡面可提前**（依赖 M8.2 + M9.1 的卡 DTO）；M8.4/M8.5 不受阻，可穿插。
 
@@ -329,7 +399,7 @@ packages/content/src/rules/dnd5e-lite/     # 作者源码：可 diff、可单测
 
 | 风险 | 默认对策 |
 |---|---|
-| 规则表达力不够 | 优先扩数据（词条/槽位/动作旗标/公式命名空间）；M9 后冻结钩子数量，确实不够再评估第 9 个 |
+| 规则表达力不够 | 优先扩数据（词条/槽位/动作旗标/公式命名空间/场地与时间数据）；M9 后冻结钩子数量（核心 8 + 场地/时间 7），确实不够再显式评审新增 |
 | 作者门槛 / 测试工具 | dnd5e-lite 作为可抄模板 + 四套模板库 + 规则测试台；数据/脚本 fixture 进仓库 CI 回归；文档给「从零到能跑」三段式教程 |
 | 性能（每回合钩子调用） | 单动作 ≤ 3 次钩子；`computeDerived` 按 `(卡版本, rulesHash)` 缓存；单次 200ms 上限；先量后调 |
 | 规则变更中开团 | 快照冻结 rulesHash，禁止热切换；换规则 = 新房间；旧房间按快照版本继续或降级提示 |
@@ -349,5 +419,7 @@ packages/dsh-trpg-table/src/host/gm/tools.ts       # 工具改为调规则执行
 packages/dsh-trpg-table/src/host/pack-registry.ts  # 解码 rules 段 + 脚本源码入内存 + sha256 校验
 packages/dsh-trpg-table/src/client/*               # 卡面渲染投影字段；不引入规则执行代码
 ```
+
+**图标与资产（M9.5，见 [UI-CONTRACT.md](./UI-CONTRACT.md)）**：`pack.rules.items[]`（世界物品库）与各段 `icon` 字段由新资产模型驱动；zip 内新增 `assets/manifest.json`（`trpg.assets/1`），`validatePack()` 增补 `assetId` 存在性/尺寸/体积/sha256 校验；`ZIP_LIMITS` 上限调整（整包 16 → **64 MiB**、解压总量 32 → **64 MiB**、条目数 512 → **520**，单条仍 8 MiB）；卡实例 `assets` 引用（§4）与 `SheetView`/`EquipmentView`/`InventoryView`/`iconRef` DTO 同批落地。三屏布局与三条图标获取路径见 UI-CONTRACT §2/§5。
 
 **现有测试（134）影响**：`dice.test.ts`（骰子表达式/分布）、`zip.test.ts`（zip 容器）、协议信封类基本不动；`combat.test.ts` / `spells.test.ts` / `card.test.ts` / `content.test.ts` 改为经示例规则包执行（断言口径不变）；`pack.test.ts` 增规则段校验；`room.test.ts` / `room-content.test.ts` 增投影字段与规则引用断言；`gm.test.ts` / `table-session.test.ts` 改注入点。新增：公式求值、钩子沙箱、规则包加载、卡迁移、投影一致性五类单测。

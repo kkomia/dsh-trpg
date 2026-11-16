@@ -139,7 +139,7 @@ M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI 
 
 - [x] **M8.1 地基（无 UI）✅ 2026-11-16**：统一 pack/card/lorebook/module schema + `validatePack()`/`migratePack()`；内置包 `core-guimuya` 迁移（4 张预制卡 + 10 条世界书）；`.trpgpack` zip 编解码（`node:zlib` 零依赖，stored+deflate、大小上限/路径安全/CRC、时间戳固定可复现）；导入导出/校验 CLI `scripts/content-pack.mjs`（`pack-check.mjs` 兼容别名，根 `package.json` 加 `content:pack`）；引用完整性校验（`loreIds/npcIds/encounterIds/rewardIds/startSceneId` + assets）；修复已知数据 bug（模组 `scene.lore` 值缺 `entry_` 前缀、与世界书 entry id 不匹配）；保留 `GUIMUYA_*`/`PRESET_CARDS` 兼容导出；编解码/恶意 zip/迁移单测。**结果**：实现文件 `packages/content/src/{pack,zip,pack-zip,pack-io}.ts` + `packs/core-guimuya.ts`（`CORE_GUIMUYA_PACK` / `CORE_PACKS`）；单测 114 passed（新增 `pack.test.ts` 14 + `zip.test.ts` 13），typecheck 0 错误，构建通过。
 - [x] **M8.2 房间接包 ✅ 2026-11-16**：`room.create` 带 `{packId, moduleId}`、建房选模组、房间记录 `{packVersion, moduleId, contentHash}` 快照引用、pack registry（内置 + 数据目录 `.trpgpack`）与玩家只读拉取、缺包/版本变更降级续团，去 host/client 硬编码。**结果**：`host/pack-registry.ts`（内置 `CORE_PACKS` + 数据目录 `<profile-data>/<profile>/dsh-trpg-table/content/packs/*.trpgpack`，坏包跳过、重复 `packId` 内置优先、可重扫）；协议 `room.create` 可选 `packId/moduleId`、`RoomView.content`/`RoomView.scenes`、RPC `content.list`（脱敏目录，无 token）与 `content.reload`（loopback + host token）；房间只存内容引用 + 场景摘要，包缺失/版本或 hash 漂移 → `degraded` + 警告、GM 回退内置包，重扫后恢复；host 去掉 `GUIMUYA_*` 硬编码，GM 提示/工具按房间解析；客户端大厅「内容包 / 模组」选择（失败静默降级内置包）、建房传内容引用、房间卡展示包/模组/版本 + 降级红色告警、GM 场景下拉改吃 `room.scenes`。单测 **114 → 134**（protocol 2、rooms 9、registry 6、room-http 3），typecheck 0 错误，构建通过；**本机真机验收通过**（大厅选择 / 建房内容展示 / 场景下拉 3 场 / 关房回大厅，截图 `.tmp/verify3/`，gitignored）。
-- [ ] **M8.3 内容工坊 UI（排在 M8.1、M8.2 之后）**：主区域独立工具页（角色卡编辑器 / 世界书编辑器 / 模组编辑器三 tab，含卡只读面板）+ 右栏轻量入口；pack 选择、`.trpgpack` 导入导出、校验结果、预览。**顺延至 M9 规则层定稿后**：规则数据/公式/脚本编辑器依赖 M9.1 schema；只读卡面拆为 M8.3a 可提前，完整工坊并到 M9.5（依赖见 [RULES-MODEL.md](./RULES-MODEL.md) §12/§13）
+- [ ] **M8.3 内容工坊 UI（排在 M8.1、M8.2 之后）**：主区域独立工具页（角色卡编辑器 / 世界书编辑器 / 模组编辑器三 tab，含卡只读面板）+ 右栏轻量入口；pack 选择、`.trpgpack` 导入导出、校验结果、预览。**顺延至 M9 规则层定稿后**：规则数据/公式/脚本编辑器依赖 M9.1 schema；只读卡面拆为 M8.3a 可提前，完整工坊并到 M9.6（原 M9.5，依赖见 [RULES-MODEL.md](./RULES-MODEL.md) §12/§13）
 - [ ] **M8.4 GM 检索注入 + 模组数据消费**：世界书按需检索（alwaysOn/场景关联/已 reveal/关键词 + token 预算）、checks/encounters/rewards/beats 进提示与工具
 - [ ] **M8.5 分享与 DiceFrame 适配**：`.trpgpack` 导出/导入与同 `packId` 冲突处理、DiceFrame `schema_version: 2` 卡适配器、内容作者文档（zip 目录结构 + 用编码器打包说明）
 
@@ -149,15 +149,16 @@ M8.3 内容工坊 UI 依赖 M9 规则层定稿（见 [RULES-MODEL.md](./RULES-MO
 
 ## M9 — 规则运行时（可定义规则）🧭 待确认 2026-11-16
 
-**目标**：引擎不认识任何具体规则。规则 = **数据**（JSON 描述有什么）+ **受限公式**（简单算法）+ **8 个固定 JS 钩子**（复杂逻辑）；内置示例规则包 dnd5e-lite 用新模型重写；客户端只渲染主机投影（零脚本执行）。规则模型四条结论已于 2026-11-16 拍板，完整设计、钩子/公式/数据形状与验收标准见 [RULES-MODEL.md](./RULES-MODEL.md)（§0、§3、§6、§13）。
+**目标**：引擎不认识任何具体规则。规则 = **数据**（JSON 描述有什么）+ **受限公式**（简单算法）+ **核心 8 + 场地/时间 7 的固定 JS 钩子**（复杂逻辑，全可选）；内置示例规则包 dnd5e-lite 用新模型重写；客户端只渲染主机投影（零脚本执行）。规则模型四条结论已于 2026-11-16 拍板，完整设计、钩子/公式/数据形状与验收标准见 [RULES-MODEL.md](./RULES-MODEL.md)（§0、§3、§6、§13）。M9 内新增 **M9.5 资产与图标管线**（人物/装备/背包三屏的图标与立绘体系，见 [UI-CONTRACT.md](./UI-CONTRACT.md)），原「M9.5 规则编辑器」顺延为 **M9.6**。
 
 - **M9.1 规则 schema + 公式求值 + 卡实例/投影 DTO（纯库 + 测试）**：新包 `@dsh-trpg/rules` 骨架（types、`validateRulesPack()`、公式 parser/evaluator、卡实例与迁移、投影 DTO），不接 host。验收：公式 40+ 例单测（含编译期/运行期错误）、schema 校验、旧卡迁移；typecheck 0、不新增运行时依赖。
-- **M9.2 核心运行时 + 脚本沙箱**：种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `node:vm` 沙箱 + 8 钩子调度 + 超时/sha256/错误事件。验收：8 钩子各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界。
+- **M9.2 核心运行时 + 脚本沙箱**：种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `node:vm` 沙箱 + 核心 8 + 场地/时间 7 钩子调度 + 超时/sha256/错误事件。验收：核心 8 + 场地/时间 7 各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界。
 - **M9.3 dnd5e-lite 示例规则包 + 迁移**：`rules.json` + 4 个脚本、`core-guimuya` pack 带 rules 段、旧卡迁移器、与旧 engine 对照测试。验收：CLI 用「鬼木崖·异光」跑完一幕，骰面/命中/伤害/AC/先攻逐项与旧实现一致；单测迁移后全绿（134 → 新增规则测试）。
 - **M9.4 协议/房间/客户端卡面（主机权威投影）**：`sheet.view`/`combat.view` + `sheet`/`rules` 事件 + 重连重算；客户端只读卡面（分组/资源条/装备槽/可用动作/状态）。验收：双实例落座→检定→攻击→断线重连后投影一致；玩家端构建产物不含规则执行代码；320–420px 栏宽可读。
-- **M9.5 规则编辑器（M8.3 顺延至此）**：工坊规则 tab（schema 表单 + 代码编辑器 + 沙箱试跑 + 断言面板 + 模板库）。验收：作者不改源码完成一次规则包修改并通过规则测试台；导出 `.trpgpack` 后另一台机器可玩。
+- **M9.5 资产与图标管线（新增，UI-CONTRACT §10）**：人物/装备/背包三屏的图标与立绘体系。a) **M9.5a 地基**：`@dsh-trpg/assets` 纯 JS 归一化（PNG/SVG、零原生依赖）+ SVG 白名单净化 + OpenAI 兼容客户端（chat/images）+ `assets/manifest.json`（`trpg.assets/1`）与 `validatePack()` 资产校验 + host 只读端点 `GET /trpg/assets/<packId>/<assetPath>` + `iconRef/AssetRef` DTO。b) **M9.5b 工坊图标工作台**：三 tab（导入 / AI SVG / AI 生图）+ 预览/多候选/重生成/批量 + manifest 生成历史 + 原子落盘。c) **M9.5c 开发用 ComfyUI→OpenAI shim**：放 `scripts/dev/`，不打包、不算正式功能，仅本地验证。d) **M9.5d 玩家立绘/变体/精灵帧表 + 落座资产上传**（只传展示用资产，≤8 文件 / ≤8 MiB，按 sha256 去重）。验收：归一化与净化单测（拒 16-bit/交错/JPEG/WebP、恶意 SVG 全拒）+ mock OpenAI 跑通生图链路；工坊给整库批量出图标并确认落盘、导出 `.trpgpack` 后另一台机器可见；双实例落座后队友能看到玩家立绘；`pnpm pack:plugin` 产物不含 shim。
+- **M9.6 规则编辑器（M8.3 顺延至此；原编号 M9.5）**：工坊规则 tab（schema 表单 + 代码编辑器 + 沙箱试跑 + 断言面板 + 模板库）。验收：作者不改源码完成一次规则包修改并通过规则测试台；导出 `.trpgpack` 后另一台机器可玩。
 
-**依赖与并行**：**M7 玩家侧镜像可并行**（改 client 镜像/会话事件，与规则包文件面不重叠；交叉点只有投影字段与事件类型）；**M8.3 UI 依赖 M9.1 + M9.4**（schema 与投影定稿后再开工）；**M8.3a 只读卡面可提前**（依赖 M8.2 + M9.1 的卡 DTO，让现有团先看到新卡面）；M8.4/M8.5 不受阻，可穿插。
+**依赖与并行**：**M7 玩家侧镜像可并行**（改 client 镜像/会话事件，与规则包文件面不重叠；交叉点只有投影字段与事件类型）；**M8.3 UI 依赖 M9.1 + M9.4**（schema 与投影定稿后再开工）；**M8.3a 只读卡面可提前**（依赖 M8.2 + M9.1 的卡 DTO，让现有团先看到新卡面）；**M9.5 依赖 M9.1/M9.4 的投影 DTO 与 M8.1 的 zip/资产校验**（三屏骨架随 M9.4 先落地，M9.5d 才接真图）；**M9.6 依赖 M9.1/M9.4 + M9.5b 的工坊壳**；M8.4/M8.5 不受阻，可穿插。
 
 **状态**：🧭 待确认——规则模型四条结论已定稿，M9 是否现在启动、排期与 M8.3 拆分方式待主理人拍板。
 
