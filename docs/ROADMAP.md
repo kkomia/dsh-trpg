@@ -6,7 +6,7 @@
 ## 总览
 
 ```
-M0 骨架 ─► M1 引擎+内容 ─► M2 房间+联机 ─► M3 AI GM 端到端 ─► M4 真人 GM+收尾 ─► M5 局域网验收+发布
+M0 骨架✅ ─► M1 引擎+内容✅ ─► M2 房间+联机✅ ─► M3 AI GM 端到端✅ ─► M4 真人 GM+收尾🔶 ─► M5 局域网验收+发布🔶 ─► M6 对话原生牌桌✅ ─► M7 玩家侧镜像🔬
 ```
 
 ## M0 — 工程骨架 ✅ 2026-11-13
@@ -17,7 +17,7 @@ M0 骨架 ─► M1 引擎+内容 ─► M2 房间+联机 ─► M3 AI GM 端到
 - [x] `@dsh-trpg/protocol`：信封类型、校验、版本协商
 - [x] `@dsh-trpg/engine`：骨架 + 骰子表达式解析 + 可复现随机数
 - [x] `dsh-trpg-table` bundle：`cordis.patch.yml`、host 入口、client 入口、locale、icon、DETAIL
-- [x] Client：对话输入框下方出现「🎲 跑团桌」dock，可探测房主 / 建房 / 列房
+- [x] Client：对话输入框下方出现「🎲 跑团桌」dock，可探测房主 / 建房 / 列房（v3 已移除，见 M6）
 - [x] Host：创建/列出房间（内存态）、`GET /trpg/health` 可访问
 - [x] `README.md` / `docs/` 完成
 
@@ -86,22 +86,51 @@ M0 骨架 ─► M1 引擎+内容 ─► M2 房间+联机 ─► M3 AI GM 端到
 
 **验收**：真实局域网跑完一局；仓库上线 GitHub（已达成：https://github.com/kkomia/dsh-trpg）。
 
-## M6 — 对话原生牌桌（复用 DSH 会话）🔨 进行中 2026-11-13
+## M6 — 对话原生牌桌（复用 DSH 会话）✅ 完成 2026-11-16
 
-主理人反馈：不要自绘聊天界面，直接复用 DSH 的 AI 对话框架；控件放顶栏 + 右侧栏常驻卡片。
+主理人反馈：不要自绘聊天界面，直接复用 DSH 的 AI 对话框架；控件放对话头部 + 右侧栏常驻卡片。
 
-- [x] 协议/服务：`room.create` 可带 `sessionId`、新增 `room.bind`、`RoomView.sessionId`、存档携带会话绑定
-- [x] Host 桥 `host/table-session.ts`：房主会话即牌桌——在会话 Agent 上注册 GM 提示段与 GM 工具；玩家行动 → `sessionController.prompt` 注入会话；AI 的 assistant 文本 → 房间 GM 旁白广播
-- [x] 单元测试 5 项（table-session.test.ts），全套 **87 passed / 0 failed**
-- [x] 实机验证（运行中的 DSH）：建房绑定当前会话 → 玩家行动以 user/message 注入会话 inbox；本会话系统提示出现 GM 人格与工具（roll_check 等），即 AI GM 就是会话 Agent
-- [ ] 实测 AI GM 原生回复 + 工具卡片（等下一轮对话验证）
-- [ ] 顶栏控件（开团/邀请码/落座）+ 右侧栏常驻卡片（队伍/角色卡/骰子/GM 控制台）；下线自绘主区域页
-- [ ] 玩家端镜像：把会话事件写进玩家本机会话（只渲染不跑模型），待验证
-- [ ] 清理临时诊断入口 `debug.*`
+- [x] 协议/服务：`room.create` 可带 `sessionId`、新增 `room.bind`（host token + 参数校验）、`RoomView.sessionId`、存档携带会话绑定
+- [x] 房间服务 `bindSession`：绑定/改绑/解绑，关闭房间自动解绑
+- [x] Host 桥 `host/table-session.ts`（`TableSessionBridge`）：房主会话即牌桌——在会话 Agent 上注册 GM 提示段与 GM 工具；玩家行动 → `sessionController.prompt` 注入会话；AI 的 assistant 文本 → 房间 GM 旁白广播
+- [x] GM 工具加 `trpg_` 前缀，避开 subagent 全局工具同名遮蔽；系统提示同步实际工具名
+- [x] live 会话注入实测（运行中的 DSH）：建房绑定当前会话 → 玩家行动以 `user/message` 进入会话 inbox；系统提示出现 GM 人格与工具（`trpg_roll_check` 等），即 AI GM 就是会话 Agent
+- [x] GM 原生回复 + 工具卡实测：assistant 文本回写房间事件（`gmNarrate`），掷骰/战斗等工具卡由 DSH 原生渲染
+- [x] 客户端 v3：对话头部「🎲 跑团桌」入口 + 右侧栏「跑团桌」tab（常驻紧凑卡片）；自绘整页面板、feed 气泡流、插件输入框（`main` / dock / composer）已删除
+- [x] 清理临时诊断入口 `debug.*`（sessions/create/gateway/fetch/tail/prompt）、`probeCapture`、`probeAgentErrors`、`debugHandlerRef`、`DSH_TRPG_DEBUG_DIR`、`gm-bare`
+- [x] 单测全套 **87 passed / 0 failed**；修复 `gm.test.ts` 的 RNG flake（改为用攻击后实时视图选存活目标，1000 次复跑 0 失败）
+- [x] 构建：`node scripts/build.mjs` 成功（`lib/host.js`、`lib/client.js`）
+- [x] **实机截图验收（2026-11-16，本机 DSH 桌面应用）：通过**
+  - [x] a) 主区域仍是 DSH 原生对话（对话/轨迹/统计 + 原生消息流与输入框），无插件自绘聊天、无空白中心区
+  - [x] b) 对话头部「🎲 跑团桌」入口可打开右侧栏「跑团桌」页签（与其它页签并列、无重复页签）；卡片状态：未进房=房主地址/开团（我是房主）/加入朋友的团，进房后=房间状态/玩家席/落座/掷骰/GM 控制台/成长
+  - [x] c) 布局：约 320 与 360 CSS px 栏宽下卡片无溢出/重叠、长文案折行、中文无乱码；内容未超高故未触发滚动（root `overflowY:auto` 兜底、无裁切）；≈300px 极窄且多页签时页签标题会截断（卡片本身正常，已知小限制）
+  - [x] d) 建房/绑定链路：建房时 `sessionId` 取自当前 tab 会话并自动绑定；卡片显示房间号、牌桌会话短 id、「已绑定本会话」按钮（host-only）
+  - [x] 验收中发现并修复 1 个客户端 bug：房主「结束房间」原来只断本地、不发 RPC，房间与「绑定本会话」仍存活（GM 系统提示/`trpg_*` 工具持续注入）；改为房主走 `room.close`、玩家仍走 `room.leave`，重构建+重载复验：建房→`room.list` 1 间→点结束房间→`room.list` 立即为空、UI 回大厅、`onRoomClosed → tableBridge.unbind` 撤销注入
+  - 截图：`.tmp/verify/09-fix-verify-room-created.png`（建房+绑定本会话）、`10-fix-verify-room-closed.png`（关房回大厅）；该目录 gitignored，不入库
 
-**关键约束（本机实测）**：只有**正在被 DSH 页面驱动（live）**的会话才能完成模型请求；插件新建/恢复的会话一律 `DeepSeek Messages transport failed [TRANSPORT]`。所以牌桌必须绑定房主已打开的会话。
+**关键约束（本机实测）**：只有**正在被 DSH 页面驱动（live）**的会话才能完成模型请求；插件新建/恢复的会话一律 `DeepSeek Messages transport failed [TRANSPORT]`。所以牌桌必须绑定房主已打开的会话；未打开时 `room.bind` 回可读错误（「这个会话当前没有活动的 AI…请先打开该会话再开团」）。
 
-**验收**：房主在自己的会话里看到玩家行动的注入消息与 AI GM 的原生回复（含工具卡片），插件不再自绘叙事流。
+**已知缺口**：1) 插件输入框随 v3 删除后，远端玩家的行动入口尚未接上（`room.say` 目前由探针/回归脚本调用）——「玩家在自己原生会话里写行动 → 转发到房间」随 M7 玩家镜像一并收口；2) tab 已打开时再点头部按钮会重开页签（短暂空白 + 右栏宽度回默认，不产生重复页签），待做幂等打开；3) 重载后 localStorage 残留旧房 token 会红字提示「无法恢复房间：令牌无效或已失效」，应改为静默清理。M6 的玩家行动注入验证走房主侧会话。
+
+**验收**：本机 DSH 桌面端实机验收通过（2026-11-16）：主区域仍是 DSH 原生对话；头部入口打开右侧栏「跑团桌」页签；320/360px 栏宽布局正常；建房自动绑定会话，结束房间=关房并解绑。单测 87 passed / 0 failed、`node scripts/build.mjs` 构建通过；细节与截图清单见 `docs/milestones/M6.md`。局域网双机（host + 另 1–3 台真机）验收待执行。
+
+## M7 — 玩家侧对话镜像 🔬 方案已调研 · 待实机验证 2026-11-16
+
+**目标**：玩家用自己 DSH 的原生会话看整局对话（原生气泡/工具卡/轮次），不跑模型、不配 key，插件不自绘聊天。
+
+调研结论见 [`docs/research/player-mirror.md`](./research/player-mirror.md)：**条件可行**；只能复制 DSH 已知的 Session 事件类型（不能新增插件自定义事件类型），且玩家端要新建「镜像会话」，不能直接打开房主会话。
+
+- **P1 推荐（≈36h / 4.5 人日）**：host `ctx.on('session/event')` → 按收件玩家投影/脱敏 → `GET /trpg/mirror?roomId&lastSeq`（SSE，token 鉴权，与 `/trpg/events` 同源模式）→ 玩家插件 `sessions.create()` 建镜像会话，按白名单 `session.append()` 重放（`turn/start|end`、`step/start|end`、`user/message`、`assistant/message`、`tool/call`、`tool/result`、`session/title`；`trpg_secret_note` 打码，私密行动只投行动者；丢弃 `system/message`、`request/header`、`compaction/*` 等）→ 玩家客户端 `follow` 原生渲染。
+- **P0 兜底（6–10h）**：右栏只读 transcript，复用现有 `/trpg/events` SSE，不写会话、不进原生聊天流。
+- **明确不可行**：插件写自定义事件类型（`append` 不带 `ignorable`，重开整份会话不可读）、玩家端跑模型（无 key，违背产品决策）、Live Share（需独立服务器，viewer 是浏览器页不是玩家本机 DSH）。
+
+**待实机验证（3 项，调研未跑运行时）**：
+
+1. 玩家端 DSH **无模型 key** 时，打开插件创建的会话（`follow activate=true`）是否安静通过，会否弹 `api-session/error`；
+2. 复制 host 的 `assistant/message` 时 `message.source`（host 的 provider/model 元数据）在玩家端渲染是否正常（预期只影响「请求详情」展示）；
+3. `tool/result` 的 meta 卡（掷骰/战斗卡）在玩家端是否原样渲染（依赖对应 tool 的 presentation 插件在玩家端也启用）。
+
+**验收**：玩家本机出现「【牌桌】…」镜像会话，原生渲染整局且全过程无模型请求、不消耗 key；或按 P0 先上线只读 transcript。
 
 ## 检查点汇报模板
 
