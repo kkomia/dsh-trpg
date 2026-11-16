@@ -1,11 +1,35 @@
 {
   "name": "dsh-trpg-table",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "跑团桌 · TRPG Table — 局域网多人 AI 跑团：房主建房、AI 当 KP/GM、玩家只负责 RP。",
   "type": "module",
   "license": "MIT",
   "private": false,
+  "author": "dsh-trpg contributors",
   "icon": "./icon.svg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kkomia/dsh-trpg.git",
+    "directory": "packages/dsh-trpg-table"
+  },
+  "homepage": "https://github.com/kkomia/dsh-trpg#readme",
+  "bugs": {
+    "url": "https://github.com/kkomia/dsh-trpg/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "trpg",
+    "tabletop",
+    "ai-gm",
+    "multiplayer",
+    "lan",
+    "跑团"
+  ],
   "exports": {
     ".": "./lib/host.js",
     "./client": "./lib/client.js",
@@ -19,7 +43,8 @@
     "docs",
     "icon.svg",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

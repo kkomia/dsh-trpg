@@ -3,61 +3,70 @@
 > 局域网多人 AI 跑团桌，以 DSH 插件形态交付。房主建房、AI 当 KP/GM 负责裁定与叙事、玩家只负责 RP。
 
 <p align="center">
-  <b>跑团桌</b> · <code>dsh-trpg-table</code> · MIT
+  <b>跑团桌</b> · <code>dsh-trpg-table</code> · v0.1.0 · MIT
 </p>
 
-- **AI 只叙事，不兼裁判**：掷骰、检定、伤害、先攻、状态全部由确定性引擎结算，AI 通过工具拿结论写故事——从机制上消灭「角色混淆 / 行动状态异常」。
-- **房主制**：谁建房谁是主机，权威状态与事件日志都在房主电脑上；玩家各自用自己的 DSH 客户端加入，账号与角色卡天然隔离。
-- **多人桌**：1 房主 + 1–4 玩家，公共叙事 + 私密个人层；战斗走先攻轮，探索自由行动。
-- **中式奇幻首发**：D&D 5e-lite 规则 + 原创短模组「鬼木崖·异光」。
-- **对话原生 UI（v3）**：不自绘聊天界面——主区域直接用 DSH 原生会话（房主当前会话即牌桌），插件只提供「🎲 跑团桌」入口（正常对话页在对话头部；DSH「新会话」空态页在左上角，点它会先准备一个会话再打开右侧栏）+ 右侧栏「跑团桌」tab（常驻卡片）+ 建房/加入最小表单；详见 [设计文档 §9](./docs/DESIGN.md)。
-- **后期接 IM**：房间协议与 DSH 解耦，QQ 群等公网玩家走 adapter 接入。
+- **AI 只叙事，不兼裁判**：掷骰、检定、伤害、先攻、行动经济全部由确定性规则运行时结算，AI 通过工具拿结论写故事。
+- **规则是数据**：规则包 = JSON 数据 + 受限公式 + 固定 JS 钩子（`node:vm` 沙箱）；内置 D&D 5e-lite 规则包与短模组「鬼木崖·异光」。
+- **房主制**：谁建房谁是主机，权威状态与事件日志都在房主电脑上；玩家各自用自己的 DSH 客户端加入。
+- **对话原生**：不自绘聊天界面——房主当前 DSH 会话即牌桌，AI GM 回复与工具卡由 DSH 原生渲染；插件提供对话头部/空态页「🎲 跑团桌」入口与右侧栏常驻卡片。
+- **内容包可制作可分享**：模组/世界书/角色卡统一为 `.trpgpack`（ZIP），内置内容工坊可编辑、导入导出、生成图标与地图资产。
+- **玩家侧对话镜像**：玩家本机用 DSH 原生会话看整局（原生气泡/工具卡/轮次），不跑模型、不配 key。
+- **后期接 IM**：房间协议与 DSH 解耦，QQ 群等公网玩家走 adapter 接入（v2）。
 
 ## 状态
 
-✅ **M6 对话原生牌桌（本机实机验收通过，2026-11-16）**：房主把当前 DSH 会话绑定为牌桌，AI GM 就是这个会话的 Agent（插件注入 GM 系统提示 + `trpg_*` 工具），玩家行动以用户消息注入会话，GM 原生回复与工具卡由 DSH 原生渲染；插件只保留入口（正常对话页在对话头部、空态/新会话页在左上角）+ 右侧栏「跑团桌」tab 常驻卡片 + 建房/加入最小表单。协议/房间服务/会话桥/客户端已落地，单测 **87 passed / 0 failed**、`node scripts/build.mjs` 构建通过；本机 DSH 桌面端截图验收通过（主区域=DSH 原生对话、头部入口打开右侧栏页签、320/360px 栏宽布局正常、建房自动绑定会话、结束房间=关房解绑）。另：DSH「新会话」空态页左上「🎲 跑团桌」入口已修复（2026-11-16，点它先准备会话再打开右侧栏，真机截图验证）。**局域网双机（host + 另 1–3 台真机）验收待执行**。里程碑见 [docs/ROADMAP.md](./docs/ROADMAP.md)（M0–M7），M6 详情见 [docs/milestones/M6.md](./docs/milestones/M6.md)。
+✅ **M0–M9 主要能力完成（2026-11-17）**：协议/引擎/房间联机、AI GM 与真人 GM、存档续团、对话原生牌桌（M6）、
+内容包 `.trpgpack` + 房间接包 + 检索注入（M8）、规则运行时与沙箱、三屏/世界地图/战棋、资产与生图管线、
+内容工坊（M9）、玩家侧对话镜像（M7）。本机自动化与桌面端 UI 验收通过：**单测 1130 passed / 0 failed**、
+typecheck **0 错误**、`pnpm build` 通过、`pnpm pack:plugin` 产出 `dist/dsh-trpg-table-0.1.0.tgz`（**452 KB**，10 个文件）。
 
-✅ **M8 内容模型（M8.1 地基 + M8.2 房间接包，本机真机验收通过，2026-11-16）**：模组/世界书/角色卡统一为内容包（`.trpgpack` ZIP），host 内置包 `core-guimuya` + 数据目录 pack registry；建房可选内容包/模组，房间只存 `{packId, moduleId, packVersion, contentHash}` 引用，缺包/内容变更时降级续团（GM 回退内置包，重扫恢复）；大厅内容选择器、房间内容展示与 GM 场景下拉已真机验收。单测 **134 passed / 0 failed**、typecheck 0 错误、构建通过；M8.3 内容工坊 UI 待做，详见 [docs/CONTENT-MODEL.md](./docs/CONTENT-MODEL.md) 与 [docs/ROADMAP.md](./docs/ROADMAP.md) M8。
+⚠️ **尚未执行（用户侧）**：局域网双机实机验收（host + 1–3 台真机）与 npm 正式发布——分别见
+[docs/ACCEPTANCE.md](./docs/ACCEPTANCE.md) §2 与 [docs/RELEASE.md](./docs/RELEASE.md) §5。M9.6b 工坊编辑器改动
+当前在工作区（未提交，本 tgz 已包含）；`pnpm test:gm` 冒烟脚本自 M8.4 未同步（不影响产品路径）。
 
-当前可用：房主建房（绑定当前会话）→ 朋友用局域网地址 + 邀请码加入并落座 → AI GM 在房主的牌桌会话里原生带团；存档续团、真人 GM 控制台已具备。本机单机链路已验收，局域网双机联调与玩家侧原生会话镜像（M7）待做：`docs/research/player-mirror.md`。
+当前可用链路：房主打开一个 DSH 会话 → 建房并自动绑定为牌桌 → 朋友用局域网地址 + 邀请码加入并落座 →
+AI GM 在牌桌会话里原生带团（工具卡走规则运行时）→ 右栏三屏/世界地图/战棋与工坊；玩家侧原生镜像会话可看整局。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [设计文档](./docs/DESIGN.md) | 架构、五道锁、规则系统、协议、AI GM、UI 槽位、风险 |
-| [路线图](./docs/ROADMAP.md) | M0–M7 里程碑与验收标准 |
-| [M6 验收报告](./docs/milestones/M6.md) | 对话原生牌桌：目标、设计要点、关键文件、本机实机验收证据、已修复 bug（含新会话空态入口）与已知限制 |
-| [访谈决策账](./docs/DECISIONS.md) | 立项以来 24 条决策与理由（含 M6 UI v3 补记、空态入口补记） |
-| [玩家手册](./docs/PLAYER-GUIDE.md) | 安装、加入房间、落座、掷骰、断线重连、常见问题 |
-| [GM / 房主手册](./docs/GM-GUIDE.md) | 建房、AI/真人模式、GM 控制台、存档续团、模组修改 |
-| [局域网验收清单](./docs/LAN-ACCEPTANCE.md) | 双机实机跑团的分步检查表 |
+| [发布与安装](./docs/RELEASE.md) | 版本策略、构建打包、本地 link/tgz 安装、npm 发布、发布前检查表 |
+| [验收清单](./docs/ACCEPTANCE.md) | 本机已验证项与证据、待用户执行的局域网双机验收、已知限制、记录表模板 |
+| [路线图](./docs/ROADMAP.md) | M0–M9 里程碑与验收标准（M6/M8/M9 详情、待办项） |
+| [设计文档](./docs/DESIGN.md) | 架构、五道锁、协议、AI GM、UI 槽位、风险 |
+| [规则模型](./docs/RULES-MODEL.md) / [内容模型](./docs/CONTENT-MODEL.md) / [UI 契约](./docs/UI-CONTRACT.md) | 规则运行时、`.trpgpack` 内容包、三屏/工坊/资产契约 |
+| [玩家手册](./docs/PLAYER-GUIDE.md) | 安装、加入房间、落座、掷骰、断线重连、镜像、常见问题 |
+| [GM / 房主手册](./docs/GM-GUIDE.md) | 建房、AI/真人模式、GM 控制台、存档续团、模组与工坊 |
+| [局域网验收清单](./docs/LAN-ACCEPTANCE.md) | 双机实机跑团的分步检查表（配合 ACCEPTANCE 使用） |
+| [CHANGELOG](./CHANGELOG.md) | 0.1.0 交付清单与 0.0.1 初始版本 |
 
 ## 架构一图
 
 ```
-房主 DSH（Host 半边）                          玩家 DSH ×N（Client 半边）
-┌──────────────────────────────┐   LAN        ┌──────────────────────────┐
-│ 房间服务 · 权威状态机         │  HTTP+SSE    │ 房间连接 · 常驻卡片       │
-│ 规则引擎 · 事件日志           │◄────────────►│ 角色卡 · 掷骰 · 落座      │
-│ AI GM（DSH Agent + tools）    │              │ 行动走原生会话            │
-│ GM 控制台（真人 GM 模式）     │              └──────────────────────────┘
-└──────────────────────────────┘
+房主 DSH（Host 半边）                                玩家 DSH ×N（Client 半边）
+┌────────────────────────────────────────┐   LAN     ┌──────────────────────────────┐
+│ 房间服务 · 权威状态机 · 事件日志        │  HTTP+SSE │ 房间连接 · 右侧栏常驻卡片      │
+│ 规则运行时（沙箱/种子骰/回合）           │◄────────►│ 三屏/掷骰/落座 · 内容工坊(host) │
+│ 内容包 registry（内置+数据目录）         │           │ 玩家本机镜像会话（原生渲染）   │
+│ AI GM（牌桌会话 Agent + trpg_* 工具）    │           │ 行动文本 → 房主会话             │
+│ 内容工坊/资产与生图（仅 loopback）       │           └──────────────────────────────┘
+└────────────────────────────────────────┘
 ```
 
 ## 安装（给朋友）
 
-插件以 DSH bundle 形式分发，需要 DSH Desktop（开发时用 profile 的本地链接）。
+插件以 DSH bundle 形式分发，需要 DSH Desktop。房主和每位玩家都安装同一版本；玩家端不需要配置模型（AI 只在房主机器上跑）。
 
 **方式一：本地 tgz（推荐）**
-1. 克隆仓库并构建：`pnpm install && pnpm build`
-2. 打包：`pnpm pack:plugin` → 生成 `dist/dsh-trpg-table-0.0.1.tgz`（约 51 KB）
-3. 把 tgz 发给朋友；对方在 DSH「插件 → 添加插件」选择该文件（或 `dsh plugin add <tgz 路径>`），启用后重启 DSH。
+1. 仓库构建打包：`pnpm install && pnpm pack:plugin` → `dist/dsh-trpg-table-0.1.0.tgz`（452 KB）
+2. 校验（可选）：`pnpm pack:verify`（检查内容清单/版本/许可证，不含 src/test/scripts）
+3. 把 tgz 发给朋友；对方在 DSH「插件 → 添加插件」选择该文件（或 `dsh plugin add <tgz 路径>`），启用后**重启 DSH**。
 
 **方式二：本地目录（开发）**
-在「插件 → 添加插件」里选择包目录 `packages/dsh-trpg-table`，或让 Agent 用 `plugin_manager install_bundle` 指定该目录。
-
-> 房主和每位玩家都需要安装（玩家端不需要配置模型，AI 只在房主机器上跑）。
+在「插件 → 添加插件」里选择包目录 `packages/dsh-trpg-table`，或让 Agent 用 `plugin_manager install_bundle` 指定该目录；
+本机当前开发方式为 profile `link:` 依赖 + `dsh.profile.bundles` 包含 `dsh-trpg-table`（详见 [RELEASE.md](./docs/RELEASE.md) §3）。
 
 ## 开发
 
@@ -65,26 +74,36 @@
 
 ```bash
 pnpm install
-pnpm typecheck     # 五个包的类型检查
-pnpm test          # 引擎/协议/内容/房间单测（node --test，原生跑 TS）
+pnpm typecheck     # 七个包的类型检查
+pnpm test          # 引擎/协议/内容/房间/插件/规则/资产单测（node --test，原生跑 TS；1130 项）
 pnpm test:e2e      # 真实 HTTP+SSE 的房间端到端冒烟
 pnpm build         # 打包 DSH bundle → packages/dsh-trpg-table/lib
+pnpm pack:plugin   # build + 打 tgz → dist/
+pnpm pack:verify   # 校验 tgz 内容（发布检查用）
+pnpm content:pack  # 内容包导入/导出/校验 CLI
 pnpm demo          # 无 UI 的 CLI 对局战报（引擎+内容验收）
 ```
-
-安装到 DSH（开发模式）：插件页「添加插件」选择本地目录 `packages/dsh-trpg-table`，或在 Agent 里用 `plugin_manager install_bundle` 指定该目录。
 
 ## 仓库结构
 
 ```
 packages/
   protocol/         消息类型与校验
-  engine/           D&D 5e-lite 纯函数规则引擎
-  content/          规则数据 + 角色卡 + 世界书 + 模组
+  engine/           D&D 5e-lite 纯函数规则引擎（旧路径，规则运行时对照用）
+  rules/            规则包 schema/公式/沙箱/投影 DTO/规则运行时（M9）
+  content/          内置内容包 core-guimuya + .trpgpack 编解码与校验
+  assets/           PNG/SVG 归一化、SVG 净化、OpenAI 兼容生图客户端（M9.5）
+  rooms/            房间服务、规则运行时接入、存档
   dsh-trpg-table/   发布包（DSH host + client 入口）
-docs/               设计、路线图、决策账
+docs/               设计、路线图、规则/内容/UI 契约、发布与验收
 ```
 
-## 协议
+## 已知限制
+
+玩家侧镜像只读（行动仍由房主代录）；AI GM 只能绑定当前打开（live）的会话；局域网明文 HTTP 仅限内网；
+工坊/写回/生图仅 host loopback；内置包只读需复制副本；zip64/加密 zip 与 JPEG/WebP 资产不支持；
+局域网双机与 npm 发布待执行。完整清单见 [docs/ACCEPTANCE.md](./docs/ACCEPTANCE.md) §3。
+
+## License
 
 MIT © 2026 dsh-trpg contributors
