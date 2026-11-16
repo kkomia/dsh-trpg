@@ -18,8 +18,8 @@
 
 ## 当前版本：v0.1.0（2026-11-17）
 
-M0–M9 主要能力完成，本机自动化与桌面端 UI 验收通过（单测 1130 passed / 0 failed、typecheck 0、`pnpm build` 通过、
-tgz 打包校验通过 452 KB）；**局域网双机实机验收与 npm 发布尚未执行**（见仓库 `docs/ACCEPTANCE.md`、`docs/RELEASE.md`）。
+M0–M9 全部规划里程碑完成，本机自动化与桌面端 UI 验收通过（单测 1130 passed / 0 failed、typecheck 0、`pnpm build` 通过、
+tgz 打包校验通过，体积 462,830 B（约 452 KiB））；**局域网双机实机验收与 npm 发布尚未执行**（见仓库 `docs/ACCEPTANCE.md`、`docs/RELEASE.md`）。
 
 - 房主端房间服务（`0.0.0.0:45871`）：`/trpg/rpc`、`/trpg/events`（SSE）、`/trpg/health`、`/trpg/mirror`（玩家镜像）、只读资产与房间资产端点。
 - 对话原生牌桌：房主当前打开的 DSH 会话即牌桌（建房带 `sessionId` 或 `room.bind`），插件在该会话 Agent 上注册 GM 提示段与 `trpg_*` 工具；玩家行动以 `user/message` 注入会话，GM 的 assistant 文本回写房间事件；入口在对话头部 / 空态页左上 / 右侧栏「跑团桌」tab，不自绘聊天页、无插件输入框。

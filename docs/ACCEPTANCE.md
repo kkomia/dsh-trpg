@@ -11,7 +11,7 @@
 | 单元测试（7 个包） | ✅ 1130 passed / 0 failed | 2026-11-17 `node --test` 全量输出；分项：engine/protocol/content/rooms/dsh-trpg-table/rules/assets |
 | 类型检查 | ✅ 0 错误（7 个包） | `pnpm typecheck`；各包 `tsc -p` 全 OK |
 | 构建 | ✅ host.js + client.js | `pnpm build`；产物 `packages/dsh-trpg-table/lib/` |
-| 打包内容/体积 | ✅ 462 KB（462,830 B；按 KiB 记 452 KB）/ 10 文件，无开发产物 | `pnpm pack:plugin && pnpm pack:verify`；`dist/dsh-trpg-table-0.1.0.tgz`；`scripts/check-pack.mjs` 校验通过 |
+| 打包内容/体积 | ✅ 462,830 B（约 452 KiB）/ 10 文件，无开发产物 | `pnpm pack:plugin && pnpm pack:verify`；`dist/dsh-trpg-table-0.1.0.tgz`；`scripts/check-pack.mjs` 校验通过 |
 | 房间 E2E（真实 HTTP+SSE） | ✅ ALL PASS（建房→加入→落座→骰→悄悄话→重连补发→踢人→锁房） | `pnpm test:e2e`（`scripts/smoke-room.mjs`） |
 | GM 冒烟（假 Agent） | ✅ ALL PASS（已适配 M8.4 `resolveContent` 与工具数量，commit 3a2e38f） | `pnpm test:gm`（`scripts/smoke-gm.mjs`） |
 | M6 对话原生牌桌 + 空态入口 | ✅ 真机截图（本机桌面端） | `.tmp/verify/00–10`、`.tmp/verify2/00–21`（gitignored） |

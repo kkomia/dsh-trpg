@@ -7,12 +7,13 @@
 
 ### 计划中
 
-- 局域网双机实机验收（host + 1–3 台真机）与 npm 正式发布，见 [docs/ACCEPTANCE.md](./docs/ACCEPTANCE.md)。
-- `pnpm test:gm`（假 Agent GM 冒烟脚本）自 M8.4 接口变更后未同步，待按新 `resolveContent` 口径更新。
+- 局域网双机实机验收（host + 1–3 台真机，含导出 `.trpgpack` 换机器可玩）与 npm 正式发布（0.1.0），
+  均由用户执行，步骤见 [docs/ACCEPTANCE.md](./docs/ACCEPTANCE.md) §2。
 
 ## [0.1.0] - 2026-11-17
 
-首个可分发版本：M0–M9 主要能力与 M7 玩家侧镜像完成，`pnpm pack:plugin` 产出可安装 tgz。
+首个可分发版本（全部规划里程碑完成）：M0–M9 主要能力、M7 玩家侧镜像与 M9.6b 内容编辑/规则测试台完成，
+`pnpm pack:plugin` 产出可安装 tgz。
 
 ### Added
 
@@ -41,8 +42,11 @@
   左栏内容包列表；图标三路径（本地导入 / AI SVG / AI 生图，物品库批量 ≤6）→ `pack.assetPut`；
   地图工作室（生成/预览/保存 battleMaps·zones·world，底图 `target=battle-map|world-map`）；
   分享 tab（导出下载、导入冲突策略 `reject`/`overwrite`/`rename`、内置包复制为可编辑副本）；
-  M9.6b 补齐可编辑表单（角色卡/世界书/模组/规则）、规则校验与测试台（`rules.validate`/`rules.test`，临时运行时、不落盘）、
-  DiceFrame 卡粘贴导入 UI、地图结构手改与 `calibration` 对齐。
+  M9.6b 补齐可编辑表单（角色卡/世界书/模组/规则，世界书带 Markdown 预览与行内校验）、
+  规则校验与测试台（`rules.validate` 草稿校验 + 脚本 sha256，`rules.test` 临时运行时跑检定/动作/派生，
+  1–12 条请求返回 `rolls`/`trace`/中文错误、不落盘）、DiceFrame 卡粘贴/文件导入 UI（检测 → 适配器 →
+  本地卡库 + 未映射警告）、地图结构手改与 `calibration` 对齐（`cellPx`/`offsetX`/`offsetY`/`rotation`，
+  rotation 为显示层扩展）；单测 1092 → 1130、真机截图 `.tmp/verify8/01–06`。
 - **GM 检索注入（M8.4）**：世界书改为检索式注入（alwaysOn/场景关联/已揭示/关键词，字符预算 6000；
   未选中 GM 秘密不进提示、玩家可见只取 public）；当前场景 beats/checks/encounters/rewards 与遭遇
   `maxRounds`/`battleMapId` 进 GM 提示；新增 `trpg_scene`/`trpg_reward`，通用 `trpg_use_action`/`trpg_move`/`trpg_combat`
@@ -62,9 +66,10 @@
 - 插件版本 `0.0.1` → **`0.1.0`**（仓库根 `package.json` 同步版本与发布元数据，仍为 private）。
 - 客户端 UI v3：不再自绘聊天页与插件输入框；入口 = 对话头部「🎲 跑团桌」+ 空态页左上入口 + 右侧栏「跑团桌」tab；
   主区域始终是 DSH 原生会话。
-- 打包产物 `dist/dsh-trpg-table-0.1.0.tgz`：**452 KB**（压缩）/ 1991 KB（解包）/ 10 个文件；
+- 打包产物 `dist/dsh-trpg-table-0.1.0.tgz`：**462,830 B（约 452 KiB）** / 1991 KB（解包）/ 10 个文件；
   0.0.1 时为 51 KB（内容从 M0 壳增长到 M9 全量）。
-- 单元测试 12 → **1130 passed / 0 failed**（七个包）；typecheck 0 错误；`pnpm build` 通过。
+- 单元测试 12 → **1130 passed / 0 failed**（七个包）；`pnpm test:e2e`（房间冒烟）与 `pnpm test:gm`（GM 假 Agent 冒烟）
+  均 ALL PASS；typecheck 0 错误；`pnpm build` 通过。
 
 ### Fixed
 
@@ -72,12 +77,14 @@
 - DSH「新会话」空态页无入口：新增 root 作用域 `conversation.header.leading` 全局入口（点它先准备会话再开右栏）。
 - 房主「结束房间」只断本地不发 RPC：改为 `room.close`，关房并解绑牌桌会话（撤销 GM 注入）。
 - `gm.test.ts` RNG flake（改为按攻击后实时视图选存活目标）。
+- `scripts/smoke-gm.mjs` 适配 M8.4 的 `resolveContent` 与工具数量，`pnpm test:gm` 恢复 ALL PASS（commit 3a2e38f）。
 
 ### Known limitations
 
 完整清单见 [docs/ACCEPTANCE.md](./docs/ACCEPTANCE.md) §3。要点：玩家镜像只读（玩家行动仍由房主在牌桌会话代录）；
 AI GM 只能绑定当前打开（live）的会话；局域网明文 HTTP 仅限内网；工坊/生成仅 host loopback + host token；
-内置包只读需「复制为可编辑副本」；zip64/加密 zip 与 JPEG/WebP 资产不支持；局域网双机实机验收与 npm 发布未执行。
+内置包只读需「复制为可编辑副本」；工坊规则脚本编辑只读（改脚本需导出 `.trpgpack` 重打包并重算 sha256）；
+zip64/加密 zip 与 JPEG/WebP 资产不支持；局域网双机实机验收与 npm 发布未执行（由用户执行）。
 
 ## [0.0.1] - 2026-11-13
 

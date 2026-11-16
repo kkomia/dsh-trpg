@@ -16,14 +16,15 @@
 
 ## 状态
 
-✅ **M0–M9 主要能力完成（2026-11-17）**：协议/引擎/房间联机、AI GM 与真人 GM、存档续团、对话原生牌桌（M6）、
+✅ **M0–M9 全部规划里程碑完成（2026-11-17）**：协议/引擎/房间联机、AI GM 与真人 GM、存档续团、对话原生牌桌（M6）、
 内容包 `.trpgpack` + 房间接包 + 检索注入（M8）、规则运行时与沙箱、三屏/世界地图/战棋、资产与生图管线、
 内容工坊（M9）、玩家侧对话镜像（M7）。本机自动化与桌面端 UI 验收通过：**单测 1130 passed / 0 failed**、
-typecheck **0 错误**、`pnpm build` 通过、`pnpm pack:plugin` 产出 `dist/dsh-trpg-table-0.1.0.tgz`（**452 KB**，10 个文件）。
+typecheck **0 错误**、`pnpm build` 通过、`pnpm test:e2e` 与 `pnpm test:gm` 冒烟均 **ALL PASS**、
+`pnpm pack:plugin` 产出 `dist/dsh-trpg-table-0.1.0.tgz`（**462,830 B（约 452 KiB）**，10 个文件）。
 
 ⚠️ **尚未执行（用户侧）**：局域网双机实机验收（host + 1–3 台真机）与 npm 正式发布——分别见
-[docs/ACCEPTANCE.md](./docs/ACCEPTANCE.md) §2 与 [docs/RELEASE.md](./docs/RELEASE.md) §5。M9.6b 工坊编辑器改动
-当前在工作区（未提交，本 tgz 已包含）；`pnpm test:gm` 冒烟脚本自 M8.4 未同步（不影响产品路径）。
+[docs/ACCEPTANCE.md](./docs/ACCEPTANCE.md) §2 与 [docs/RELEASE.md](./docs/RELEASE.md) §5。
+M9.6b 内容编辑器与规则测试台改动已提交（commit dad882d，已含在本 tgz）。
 
 当前可用链路：房主打开一个 DSH 会话 → 建房并自动绑定为牌桌 → 朋友用局域网地址 + 邀请码加入并落座 →
 AI GM 在牌桌会话里原生带团（工具卡走规则运行时）→ 右栏三屏/世界地图/战棋与工坊；玩家侧原生镜像会话可看整局。
@@ -60,7 +61,7 @@ AI GM 在牌桌会话里原生带团（工具卡走规则运行时）→ 右栏�
 插件以 DSH bundle 形式分发，需要 DSH Desktop。房主和每位玩家都安装同一版本；玩家端不需要配置模型（AI 只在房主机器上跑）。
 
 **方式一：本地 tgz（推荐）**
-1. 仓库构建打包：`pnpm install && pnpm pack:plugin` → `dist/dsh-trpg-table-0.1.0.tgz`（452 KB）
+1. 仓库构建打包：`pnpm install && pnpm pack:plugin` → `dist/dsh-trpg-table-0.1.0.tgz`（462,830 B，约 452 KiB）
 2. 校验（可选）：`pnpm pack:verify`（检查内容清单/版本/许可证，不含 src/test/scripts）
 3. 把 tgz 发给朋友；对方在 DSH「插件 → 添加插件」选择该文件（或 `dsh plugin add <tgz 路径>`），启用后**重启 DSH**。
 

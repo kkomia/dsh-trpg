@@ -31,7 +31,7 @@ pnpm pack:verify    # node scripts/check-pack.mjs：校验 tgz 内容/版本/许
 | 指标 | 值 |
 |---|---|
 | tgz | `dist/dsh-trpg-table-0.1.0.tgz` |
-| 体积 | **452 KB**（462,830 B）；解包 1991 KB；10 个文件 |
+| 体积 | **462,830 B（约 452 KiB）**；解包 1991 KB；10 个文件 |
 | 内容 | `package.json`、`lib/host.js`（1136.0 KB）、`lib/client.js`（842.7 KB）、`locale/zh.json`、`locale/en.json`、`icon.svg`、`cordis.patch.yml`、`README.md`、`docs/DETAIL.md`、`LICENSE` |
 | 不含（已断言） | `src/`、`test/`、`scripts/`、`scripts/dev/`（ComfyUI shim）、`node_modules/`、`.tmp/`、`tsconfig.json`、lockfile、嵌套 tgz |
 
@@ -89,13 +89,13 @@ npm publish --access public        # 包为 public；发布后该版本号不可
 | 单元测试全绿 | `pnpm test`（node --test，7 个包） | ✅ 1130 passed / 0 failed |
 | 房间 E2E 冒烟 | `pnpm test:e2e`（真实 HTTP+SSE 全流程） | ✅ ALL PASS |
 | 构建通过 | `pnpm build`（host/client 两产物） | ✅ 通过 |
-| pack 内容/体积/版本 | `pnpm pack:plugin && pnpm pack:verify` | ✅ 452 KB / 10 文件 / 校验通过 |
+| pack 内容/体积/版本 | `pnpm pack:plugin && pnpm pack:verify` | ✅ 462,830 B（约 452 KiB）/ 10 文件 / 校验通过 |
 | 版本号一致 | 插件 `0.1.0`；tgz 名与包内 version 一致 | ✅ |
 | CHANGELOG | `CHANGELOG.md` 有 0.1.0 条目与日期 | ✅ |
 | LICENSE | 根 LICENSE + 包内 LICENSE（MIT，内容一致） | ✅ |
 | 发布元数据 | repository/homepage/bugs/keywords/license/engines/files | ✅ |
 | 文档与实现对齐 | README / DETAIL / RELEASE / ACCEPTANCE | ✅ |
-| GM 假 Agent 冒烟 | `pnpm test:gm` | ⚠️ 脚本自 M8.4 未同步（缺 `resolveContent`），不影响产品路径，待更新 |
+| GM 假 Agent 冒烟 | `pnpm test:gm` | ✅ ALL PASS（脚本已适配 M8.4 `resolveContent` 与工具数量，commit 3a2e38f） |
 | 局域网双机实机 | `docs/ACCEPTANCE.md` §2（用户执行） | ⬜ 待执行（发布 npm 的前置） |
 | npm 发布 | §5（用户执行） | ⬜ 未执行 |
 
