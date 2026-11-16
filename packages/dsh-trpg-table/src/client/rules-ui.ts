@@ -25,6 +25,10 @@ import type {
   WorldMapZoneView,
 } from '@dsh-trpg/protocol';
 import type { MainViewKind, RulesSnapshot, RulesStore } from './rules-store.ts';
+import type { AssetStore } from './assets-store.ts';
+import { cardMetaFromSheet } from './assets-store.ts';
+import { resolveAssetUrl } from './assets.ts';
+import { createAssetsUi } from './assets-ui.ts';
 
 type H = (...args: any[]) => any;
 type VNode = unknown;
@@ -518,9 +522,31 @@ export interface RulesUi {
   RulesMainPanel: (props: { goHome?: () => void; readSession?: () => unknown }) => VNode;
 }
 
-export function createRulesUi(React: any, store: RulesStore): RulesUi {
+export function createRulesUi(React: any, store: RulesStore, assetStore?: AssetStore | null): RulesUi {
   const h: H = React.createElement;
   const { useEffect, useMemo, useRef, useState } = React;
+  /** M9.5d 角色资产渲染（头像/立绘/变体/帧表/资产对话框）；无 store 时全部降级为徽记。 */
+  const assetsUi = createAssetsUi(React);
+  const assets = assetStore ?? null;
+
+  /**
+   * 卡面变化时把「当前卡」同步进资产 store（按 cardId 读本地 IndexedDB）。
+   * 只在 host 投影到达后同步；未落座时由 index.ts 用选中的本地卡喂。
+   */
+  function useAssetCardFromSheet(sheet: SheetView | null): void {
+    const cardId = sheet?.cardId ?? null;
+    useEffect(() => {
+      if (assets === null || sheet === null) return;
+      assets.setCard(cardMetaFromSheet(sheet));
+    }, [assets, cardId]);
+  }
+
+  /** 当前卡面是否属于「我」（只有本人能改自己的本地资产）。 */
+  function canEditSheet(snapshot: RulesSnapshot, sheet: SheetView | null): boolean {
+    if (assets === null || sheet === null) return false;
+    const me = snapshot.session?.hostToken !== undefined ? 'host' : snapshot.session?.playerId;
+    return me !== undefined && sheet.playerId === me;
+  }
 
   function useSnapshot(): RulesSnapshot {
     const [snapshot, setSnapshot] = useState(() => store.getSnapshot() as RulesSnapshot);
@@ -667,10 +693,11 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
 
   // ---------------------------------------------------------------- 人物 · 紧凑
 
-  function SheetCompact(): VNode {
+  function SheetCompact(props: { onOpenMain?: (view: MainViewKind) => void }): VNode {
     const snapshot = useSnapshot();
     const [openAttr, setOpenAttr] = useState(null as string | null);
     const sheet = snapshot.sheet;
+    useAssetCardFromSheet(sheet);
     if (snapshot.sheetError !== null) return h(Hint, null, [h('span', { key: 't' }, `人物卡不可用：${snapshot.sheetError}`)]);
     if (sheet === null) return h(Hint, null, [h('span', { key: 't' }, snapshot.loading ? '正在读取人物卡…' : '暂无人物卡投影')]);
     const attributes = Object.entries(sheet.values.attributes);
@@ -678,9 +705,20 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
     const fields = Object.entries(sheet.fields)
       .filter(([key]) => !IDENTITY_FIELD_KEYS.has(key))
       .slice(0, 4);
+    const canEdit = canEditSheet(snapshot, sheet);
     const children: VNode[] = [
       h('div', { key: 'id', style: { ...ST.row, gap: 8, alignItems: 'center' } }, [
-        iconOrBadge(h, undefined, sheet.identity.name, 34),
+        assets !== null
+          ? h(assetsUi.SheetAvatar, {
+              key: 'av',
+              store: assets,
+              base: snapshot.session?.base,
+              identity: sheet.identity,
+              name: sheet.identity.name,
+              size: 34,
+              fallback: iconOrBadge(h, undefined, sheet.identity.name, 34),
+            })
+          : iconOrBadge(h, undefined, sheet.identity.name, 34),
         h('div', { key: 'txt', style: { ...ST.col, gap: 1, minWidth: 0 } }, [
           h('strong', { key: 'n', style: { fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, sheet.identity.name),
           h(
@@ -692,6 +730,55 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
         h(Tag, { key: 'lv' }, `Lv.${sheet.identity.level}`),
       ]),
     ];
+    // M9.5d 资产入口（换头像/立绘/变体；详细页里也有同一套按钮）。
+    children.push(
+      h('div', { key: 'assets', style: { ...ST.row, gap: 4 } }, [
+        h(
+          'button',
+          {
+            key: 'a',
+            type: 'button',
+            style: { ...ST.button, padding: '2px 7px', fontSize: 10 },
+            title: '换头像：本地导入 / AI 生成（host）/ 自备接口',
+            onClick: () => {
+              assets?.openDialog('avatar');
+              props.onOpenMain?.('sheet');
+            },
+          },
+          '换头像…',
+        ),
+        h(
+          'button',
+          {
+            key: 'p',
+            type: 'button',
+            style: { ...ST.button, padding: '2px 7px', fontSize: 10 },
+            title: '换立绘',
+            onClick: () => {
+              assets?.openDialog('portrait');
+              props.onOpenMain?.('sheet');
+            },
+          },
+          '换立绘…',
+        ),
+        h(
+          'button',
+          {
+            key: 'v',
+            type: 'button',
+            style: { ...ST.button, padding: '2px 7px', fontSize: 10 },
+            title: '表情变体（idle/smile/sad/angry/attack）',
+            onClick: () => {
+              assets?.openDialog('portraitVariant');
+              props.onOpenMain?.('sheet');
+            },
+          },
+          '表情…',
+        ),
+        canEdit ? null : h('span', { key: 'ro', style: ST.tiny }, '他人卡面只读'),
+      ]),
+    );
+    if (assets !== null) children.push(h(assetsUi.AssetNotice, { key: 'asset-notice', store: assets }));
     // 资源条
     children.push(
       h(
@@ -1105,7 +1192,7 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
           h('span', { key: 'x' }, `规则包「${rules.rulesId}@${rules.rulesVersion}」当前不可用：房间仍可继续叙事团，但人物/装备/背包/战斗暂不可用。`),
         ])
       : tab === 'sheet'
-        ? h(SheetCompact, { key: 'sheet' })
+        ? h(SheetCompact, { key: 'sheet', onOpenMain: props.onOpenMain })
         : tab === 'equip'
           ? h(EquipmentCompact, { key: 'equip' })
           : h(BagCompact, { key: 'bag' });
@@ -1220,25 +1307,88 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
 
   // ---------------------------------------------------------------- 主区域 · 人物详情
 
+  /**
+   * 未落座/卡面未就绪时的人物页：仍可管理本地私卡资产（IndexedDB）。
+   * 落座后 host 投影到达，会切到 SheetDetail 显示 host 下发的 avatarUrl/portraitUrl。
+   */
+  function LocalAssetSheet(props: { snapshot: RulesSnapshot }): VNode {
+    if (assets === null) {
+      return h(Hint, null, [
+        h('strong', { key: 't', style: { fontSize: 12 } }, '人物卡不可用'),
+        h('span', { key: 'x' }, props.snapshot.sheetError ?? '正在读取人物卡…'),
+        h('span', { key: 'hint' }, '房主需要先在右栏「落座」；玩家需要先加入房间并落座。'),
+      ]);
+    }
+    const assetSnapshot = assetsUi.useAssetSnapshot(assets);
+    const meta = assetSnapshot.meta;
+    const name = meta?.name ?? '角色';
+    const identity = {};
+    const fallback = iconOrBadge(h, undefined, name, 56);
+    return h('div', { style: { ...ST.col, gap: 10 } }, [
+      h('div', { key: 'note', style: ST.hint }, [
+        h('strong', { key: 't', style: { fontSize: 12, color: 'var(--dsw-alias-label-primary)' } }, '本地人物资产（还没落座 / 卡面未就绪）'),
+        h('span', { key: 'x' }, meta !== null
+          ? `当前本地卡：${name}。资产只存本机 IndexedDB，落座时才把头像/立绘/表情变体/帧表传到 host。`
+          : '先在右栏「我的卡」里选一张本地卡（或落座），再管理头像/立绘资产。'),
+        props.snapshot.sheetError !== null ? h('span', { key: 'e', style: ST.bad }, `卡面读取失败：${props.snapshot.sheetError}`) : null,
+      ]),
+      meta !== null
+        ? h('div', { key: 'body', style: ST.twoCol }, [
+            h('div', { key: 'l', style: { ...ST.col, gap: 10 } }, [
+              h('div', { key: 'id', style: { ...ST.card, gap: 6 } }, [
+                h(assetsUi.SheetPortrait, {
+                  key: 'portrait',
+                  store: assets,
+                  identity,
+                  name,
+                  fallback: iconOrBadge(h, undefined, name, 46),
+                }),
+                h('div', { key: 'txt', style: { ...ST.row, gap: 6 } }, [
+                  h(assetsUi.SheetAvatar, { key: 'av', store: assets, identity, name, size: 34, fallback }),
+                  h('strong', { key: 'n', style: { fontSize: 15 } }, name),
+                  [meta.race, meta.class].filter((part) => part.length > 0).length > 0 ? h(Tag, { key: 'rc' }, [meta.race, meta.class].filter((part) => part.length > 0).join(' · ')) : null,
+                ]),
+                h(assetsUi.SheetAssetPanel, { key: 'panel', store: assets, identity, canEdit: true }),
+              ]),
+            ]),
+            h('div', { key: 'r', style: { ...ST.col, gap: 10 } }, [
+              h('div', { key: 'tips', style: ST.panel }, [
+                h('div', { key: 't', style: ST.panelTitle }, '流程提示'),
+                h('span', { key: '1', style: ST.small }, '① 本地导入 / AI 生成 / 自备接口 → 先保存到本地卡（私密）'),
+                h('span', { key: '2', style: ST.small }, '② 右栏点「落座」→ 客户端先上传展示资产（≤8 个 / ≤8 MiB），再提交资产引用'),
+                h('span', { key: '3', style: ST.small }, '③ 队友在自己的人物页/战棋 token 上看到你的头像与立绘；断线重连按 sha256 去重，不重复上传'),
+                h('span', { key: '4', style: ST.small }, '④ 表情变体在人物详情按当前选定变体显示；帧表 v1 只显示第一帧（不做动画）'),
+              ]),
+            ]),
+          ])
+        : null,
+      h(assetsUi.AssetsDialog, { key: 'asset-dialog', store: assets }),
+    ]);
+  }
+
   function SheetDetail(): VNode {
     const snapshot = useSnapshot();
     const [openAttr, setOpenAttr] = useState(null as string | null);
     const [checkDc, setCheckDc] = useState(12);
     const sheet = snapshot.sheet;
-    if (sheet === null) {
-      return h(Hint, null, [
-        h('strong', { key: 't', style: { fontSize: 12 } }, '人物卡不可用'),
-        h('span', { key: 'x' }, snapshot.sheetError ?? '正在读取人物卡…'),
-        h('span', { key: 'hint' }, '房主需要先在右栏「落座」；玩家需要先加入房间并落座。'),
-      ]);
-    }
+    useAssetCardFromSheet(sheet);
+    if (sheet === null) return h(LocalAssetSheet, { snapshot });
     const attributes = Object.entries(sheet.values.attributes);
     const derivedEntries = Object.entries(sheet.values.derived);
     const hue = hashSeed(sheet.identity.name) % 360;
-    const media = h('div', { key: 'media', style: { ...ST.media, background: `radial-gradient(circle at 30% 20%, hsl(${hue} 45% 32%), hsl(${(hue + 40) % 360} 40% 14%) 70%)` } }, [
-      h('div', { key: 'badge', style: { transform: 'scale(2.1)', opacity: 0.92 } }, iconOrBadge(h, undefined, sheet.identity.name, 46)),
-      h('span', { key: 'note', style: { position: 'absolute', bottom: 4, left: 0, right: 0, textAlign: 'center', fontSize: 9, color: 'rgba(255,255,255,.72)' } }, '立绘/头像资源未上线：程序化徽记'),
-    ]);
+    const media = assets !== null
+      ? h(assetsUi.SheetPortrait, {
+          key: 'media',
+          store: assets,
+          base: snapshot.session?.base,
+          identity: sheet.identity,
+          name: sheet.identity.name,
+          fallback: iconOrBadge(h, undefined, sheet.identity.name, 46),
+        })
+      : h('div', { key: 'media', style: { ...ST.media, background: `radial-gradient(circle at 30% 20%, hsl(${hue} 45% 32%), hsl(${(hue + 40) % 360} 40% 14%) 70%)` } }, [
+          h('div', { key: 'badge', style: { transform: 'scale(2.1)', opacity: 0.92 } }, iconOrBadge(h, undefined, sheet.identity.name, 46)),
+          h('span', { key: 'note', style: { position: 'absolute', bottom: 4, left: 0, right: 0, textAlign: 'center', fontSize: 9, color: 'rgba(255,255,255,.72)' } }, '立绘/头像资源未配置：程序化徽记'),
+        ]);
     const left = h('div', { key: 'l', style: { ...ST.col, gap: 10 } }, [
       h('div', { key: 'id', style: { ...ST.card, gap: 6 } }, [
         media,
@@ -1248,6 +1398,15 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
           h(Tag, { key: 'rc' }, [sheet.identity.race, sheet.identity.class].filter(Boolean).join(' · ') || '未注明'),
         ]),
         h('span', { key: 'cardid', style: ST.tiny }, `卡 ${sheet.cardId} · 行动者 ${sheet.actorId}`),
+        assets !== null
+          ? h(assetsUi.SheetAssetPanel, {
+              key: 'asset-panel',
+              store: assets,
+              identity: sheet.identity,
+              canEdit: canEditSheet(snapshot, sheet),
+            })
+          : null,
+        assets !== null ? h(assetsUi.SheetSpriteThumb, { key: 'sprite', store: assets, base: snapshot.session?.base, identity: sheet.identity }) : null,
       ]),
       h('div', { key: 'res', style: ST.panel }, [
         h('div', { key: 't', style: ST.panelTitle }, '资源'),
@@ -1406,7 +1565,10 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
           ),
     ]);
     const right = h('div', { key: 'r', style: { ...ST.col, gap: 10 } }, [attrGrid, skillsPanel, actionsPanel]);
-    return h('div', { style: ST.twoCol }, [left, right]);
+    return h('div', { style: { ...ST.col, gap: 10 } }, [
+      h('div', { key: 'cols', style: ST.twoCol }, [left, right]),
+      assets !== null ? h(assetsUi.AssetsDialog, { key: 'asset-dialog', store: assets }) : null,
+    ]);
   }
 
   // ---------------------------------------------------------------- 主区域 · 装备详情
@@ -1790,6 +1952,9 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
     }
     const isHost = typeof snapshot.session?.hostToken === 'string';
     const legend = new Map(combat.terrainLegend.map((entry) => [entry.id, entry]));
+    /** 行动者 → 头像 URL（M9.5d：玩家落座上传后 host 下发；缺省回退几何徽记）。 */
+    const avatarById = new Map<string, string | undefined>();
+    for (const tokenView of combat.tokens) avatarById.set(tokenView.actorId, resolveAssetUrl(snapshot.session?.base, tokenView.avatarUrl));
     const selectedAction = sheet?.actions.find((action) => action.actionId === snapshot.selectedActionId) ?? null;
     const selectedTarget = combat.tokens.find((token) => token.actorId === snapshot.selectedTargetId) ?? null;
     const active = combat.tokens.find((token) => token.actorId === combat.activeActorId);
@@ -1890,7 +2055,11 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
               borderRadius: 999,
               padding: 1,
             },
-          }, iconOrBadge(h, undefined, token.name, size)),
+          }, [
+            assets !== null
+              ? h(assetsUi.AssetThumb, { key: 'av', src: avatarById.get(token.actorId), name: token.name, size, round: true, fallback: iconOrBadge(h, undefined, token.name, size) })
+              : iconOrBadge(h, undefined, token.name, size),
+          ]),
           token.hp !== undefined
             ? h('span', { key: 'hp', style: ST.hpBar }, [h('span', { key: 'f', style: { display: 'block', height: '100%', width: `${pct(token.hp.current, token.hp.max ?? (token.hp.current || 1))}%`, background: 'var(--dsw-alias-state-error-primary)' } })])
             : null,
@@ -2003,7 +2172,9 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
             },
             [
               h('span', { key: 'init', style: { ...ST.muted, width: 42, fontVariantNumeric: 'tabular-nums' } }, `${entry.initiative}`),
-              iconOrBadge(h, undefined, colorSeedOf(entry.actorId), 22),
+              assets !== null
+                ? h(assetsUi.AssetThumb, { key: 'av', src: avatarById.get(entry.actorId), name: entry.name, size: 22, round: true, fallback: iconOrBadge(h, undefined, colorSeedOf(entry.actorId), 22) })
+                : iconOrBadge(h, undefined, colorSeedOf(entry.actorId), 22),
               h('span', { key: 'n', style: { ...ST.row, gap: 5, flex: '1 1 auto' } }, [
                 h('strong', { key: 'x', style: { fontSize: 12 } }, entry.name),
                 h(Tag, { key: 'team', tone: entry.team === 'enemy' ? 'bad' : 'ok' }, labelOf(TEAM_LABELS, entry.team)),
@@ -2082,7 +2253,9 @@ export function createRulesUi(React: any, store: RulesStore): RulesUi {
             ? h('div', { key: 'target', style: ST.panel }, [
                 h('div', { key: 't', style: ST.panelTitle }, '选中目标'),
                 h('div', { key: 'r', style: { ...ST.row, gap: 6 } }, [
-                  iconOrBadge(h, undefined, selectedTarget.name, 24),
+                  assets !== null
+                    ? h(assetsUi.AssetThumb, { key: 'av', src: avatarById.get(selectedTarget.actorId), name: selectedTarget.name, size: 24, round: true, fallback: iconOrBadge(h, undefined, selectedTarget.name, 24) })
+                    : iconOrBadge(h, undefined, selectedTarget.name, 24),
                   h('span', { key: 'n', style: ST.small }, selectedTarget.name),
                   h(Tag, { key: 'team', tone: selectedTarget.team === 'enemy' ? 'bad' : 'ok' }, labelOf(TEAM_LABELS, selectedTarget.team)),
                   selectedTarget.active ? h(Tag, { key: 'a' }, '当前行动者') : null,

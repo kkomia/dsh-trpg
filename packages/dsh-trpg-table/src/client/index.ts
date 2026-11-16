@@ -31,9 +31,11 @@ import {
   upsertLocalCard,
   type LocalCardRecord,
 } from './cards.ts';
-import { callRpc } from './rpc.ts';
+import { callRpc, rpcErrorMessage } from './rpc.ts';
 import { createRulesStore, type MainViewKind } from './rules-store.ts';
 import { createRulesUi } from './rules-ui.ts';
+import { canonicalRefs } from './assets.ts';
+import { cardMetaFromCard, createAssetStore } from './assets-store.ts';
 import {
   growthToCardPatch,
   loadGrowth,
@@ -47,6 +49,7 @@ import type {
   BindSessionResult,
   CatalogModuleSummary,
   CatalogPack,
+  CharacterAssetRefInput,
   ContentListResult,
   CreateRoomResult,
   DicePayload,
@@ -403,7 +406,9 @@ export function createPlugin(React: any) {
 
   // M9.4 规则投影：数据层（RPC + SSE + 命令）与渲染层（右栏紧凑三页签 + 主区域详细页）。
   const rulesStore = createRulesStore();
-  const rulesUi = createRulesUi(React, rulesStore);
+  // M9.5d 玩家角色资产：本地 IndexedDB 私卡资产 + 生成/上传；落座时由 index 组装 characterAssets。
+  const assetStore = createAssetStore();
+  const rulesUi = createRulesUi(React, rulesStore, assetStore);
 
   /** 对话顶栏入口：打开右侧栏的跑团桌 tab；顺带记住当前会话，作为建房的兜底。 */
   function OpenTableButton(props: { onOpen?: () => void; sessionId?: string }) {
@@ -589,6 +594,11 @@ export function createPlugin(React: any) {
         : room.players.find((entry: RoomView['players'][number]) => entry.playerId === 'host');
       return me;
     }, [room, session]);
+
+    // M9.5d：会话绑定进资产 store（生图/上传用 token，换房间重置「已同步」状态）。
+    useEffect(() => {
+      assetStore.bindSession(session);
+    }, [session]);
 
     /**
      * GM 控制台场景下拉：优先用服务端下发的 `room.scenes`（当前模组的公开场景标题）；
@@ -870,6 +880,19 @@ export function createPlugin(React: any) {
 
     const selectedLocalCard = localCards.find((record: LocalCardRecord) => record.card.id === selectedLocalId) ?? null;
 
+    /** 当前要落座/编辑的角色卡（优先选中的本地卡，其次预制卡）。 */
+    const seatCard = useMemo(
+      () => selectedLocalCard?.card ?? CARDS.find((entry) => entry.id === seatCardId) ?? CARDS[0],
+      [selectedLocalCard, seatCardId],
+    );
+
+    // M9.5d：资产 store 跟随「当前卡」——未落座也能先本地导入/生成；落座后由 host 投影的 cardId 接管。
+    useEffect(() => {
+      if (!seatCard) return;
+      const sheet = rulesStore.getSnapshot().sheet;
+      if (sheet === null || sheet.cardId !== seatCard.id) assetStore.setCard(cardMetaFromCard(seatCard));
+    }, [seatCard, room?.roomId]);
+
     const savePregenCopy = useCallback(() => {
       const pregen = CARDS.find((entry) => entry.id === seatCardId) ?? CARDS[0];
       if (!pregen) return;
@@ -929,16 +952,55 @@ export function createPlugin(React: any) {
       const card = selectedLocalCard?.card ?? CARDS.find((entry) => entry.id === seatCardId) ?? CARDS[0];
       if (!card) return;
       setBusy(true);
+      // M9.5d：先上传「展示用」本地资产（头像/立绘/变体/帧表），再带 characterAssets 引用落座。
+      // 上传失败**不阻断落座**：先入座，提示可稍后在人物页「同步到房间」重试。
+      const assetLines: string[] = [];
+      let refs: CharacterAssetRefInput[] = [];
       try {
-        const result = await callRpc<RoomStateResult>(session.base, 'room.seat', { characterCard: card }, token);
-        setRoom(result.room);
-        setStatus({ kind: 'ok', text: `已落座：${card.identity.name}` });
+        const prepared = await assetStore.uploadForSeat();
+        refs = canonicalRefs(prepared.refs);
+        if (prepared.error !== null) assetLines.push(`资产上传失败（已先落座，可稍后重试）：${prepared.error}`);
+        else if (refs.length > 0) assetLines.push(`已上传 ${refs.length} 个展示资产`);
+        else if (assetStore.displayAssets().length > 0) assetLines.push('本地展示资产未上传（host 未启用房间资产存储）');
+        if (prepared.skipped.length > 0) assetLines.push(...prepared.skipped);
       } catch (error) {
-        setStatus({ kind: 'bad', text: `落座失败：${error instanceof Error ? error.message : String(error)}` });
+        assetLines.push(`资产上传异常（已先落座）：${rpcErrorMessage(error)}`);
+      }
+      try {
+        const result = await callRpc<RoomStateResult>(
+          session.base,
+          'room.seat',
+          {
+            characterCard: card,
+            ...(refs.length > 0 ? { characterAssets: refs } : {}),
+          },
+          token,
+        );
+        setRoom(result.room);
+        // 落座后本地资产归到这张卡，并刷新一次（host 投影到达后人物页显示房间可见的头像/立绘）。
+        assetStore.setCard(cardMetaFromCard(card));
+        assetStore.refresh();
+        setStatus({
+          kind: assetLines.some((line) => line.includes('失败') || line.includes('异常')) ? 'bad' : 'ok',
+          text: [`已落座：${card.identity.name}`, ...assetLines].join('；'),
+        });
+      } catch (error) {
+        assetLines.push(`落座失败：${error instanceof Error ? error.message : String(error)}`);
+        setStatus({ kind: 'bad', text: assetLines.join('；') });
       } finally {
         setBusy(false);
       }
-    }, [session, token, seatCardId, selectedLocalCard]);
+    }, [session, token, seatCardId, selectedLocalCard, assetStore]);
+
+    // 「同步到房间」按钮（人物页）：复用落座流程（先传资产再 seat），注册给资产 store。
+    const seatRef = useRef(seat);
+    seatRef.current = seat;
+    useEffect(() => {
+      assetStore.setSeatRunner(async () => {
+        await seatRef.current?.();
+      });
+      return () => assetStore.setSeatRunner(null);
+    }, [assetStore]);
 
     const roll = useCallback(async () => {
       if (!session || !token) return;
