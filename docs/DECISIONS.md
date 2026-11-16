@@ -85,6 +85,8 @@
 
 **摘要（5 条）**：①场地 = **zone-grid**（大区域 + 战棋小格双层），世界层 = AI 插画底图 + 数据热点/连线，世界地图放**主区域独立页**、右栏只显示当前区域名；②**战斗地图不手绘**——AI 结构草稿（ASCII 地形矩阵/障碍/出生点）→ 程序校验 → AI 俯视底图（2D / 像素两档）→ 预览叠加 + 作者微调，**结构数据权威、底图只是皮肤**，离线走程序兜底；③时间**只做回合计数**（`time.model='round'`、`maxRounds` 可覆盖、`onRoundLimit` 可钩子接管），状态/效果/冷却统一按回合；④距离 `distanceMode` 与行动经济 `turn.resources[]` 都数据化，核心只计数与消耗；地图上限 ≤32×32 / 单场 token ≤20 / 包内地图 ≤64；⑤**GM 工具泛化**为 `trpg_use_action` / `trpg_move` / `trpg_roll_check` / `trpg_combat`，AI 只能通过工具触发结算、绝不编数值；玩家 UI 按钮发命令给 host，RP 文字仍走原生会话。完整数据形状与钩子见 [`RULES-MODEL.md`](./RULES-MODEL.md)（space/time/turn、§6 钩子 9、§7.1 工具泛化、§3 地图生成小节），世界地图页/战棋视图/地图工作台与排期见 [`UI-CONTRACT.md`](./UI-CONTRACT.md)（§5.4/§5.5/§6/§10 M9.5e）。
 
+**实现进度补记**：M9.3/M9.4a+b/M8.4/M9.5a–c 已实现（2026-11-16，单测 828）。
+
 ## 已核实的环境事实（2026-11-13）
 
 - 工作区 `D:\gitlab\dsh-trpg` 为空；无 node/pnpm on PATH，但 DSH 自带 `node v24.21.0` + `pnpm 11.28.5`，npm 源可达。

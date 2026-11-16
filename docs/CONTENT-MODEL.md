@@ -64,9 +64,9 @@
 1. **结构**：从尾部找 EOCD（`PK\x05\x06`）→ 读中央目录 → 按偏移读 local header 定位数据；**大小/CRC 以中央目录记录为准**（容忍通用标志 bit 3 数据描述符，local header 的 size 为 0 不作为错误）。local 与中央目录冲突时以中央目录为准并记 warning。
 2. **压缩方法**：只接受 `0`（stored）与 `8`（deflate，`inflateRawSync`）；其它方法（如 9/12/14）→ 明确报「不支持的压缩方式」。
 3. **拒绝**：加密条目（标志 bit 0）、zip64（发现 zip64 EOCD locator / 需 zip64 时 v1 直接报「包过大，需 <4 GiB」）、重复条目名（大小写不敏感）、条目名无法按 UTF-8 解码、`pack.json` 缺失（提示「pack.json 必须在 zip 根目录」——作者常把目录整个压进去）。
-4. **大小上限**（常量从 `zip.ts` 的 `ZIP_LIMITS` 导出，单测直接断言）：整包 ≤ 16 MiB；`pack.json` 解压后 ≤ 4 MiB；单条目解压后 ≤ 8 MiB；条目数 ≤ 512；解压总量 ≤ 32 MiB。超限立刻中止（防压缩炸弹），错误信息带「已解压 X / 上限 Y」。
+4. **大小上限**（常量从 `zip.ts` 的 `ZIP_LIMITS` 导出，单测直接断言）：整包 ≤ **64 MiB**；`pack.json` 解压后 ≤ **4 MiB**（不变）；单条目解压后 ≤ **8 MiB**（不变）；条目数 ≤ **520**（`pack.json` + 规则脚本 + 512 资产）；解压总量 ≤ **64 MiB**。超限立刻中止（防压缩炸弹），错误信息带「已解压 X / 上限 Y」；上限口径见 [UI-CONTRACT.md](./UI-CONTRACT.md) §3.1（M9.5b/c 上调并已实装）。
 5. **路径安全**：条目名统一 `/` 分隔并 NFC 规范化（`\` 转 `/` 并 warning）；拒绝绝对路径（`/` 开头、`C:`、UNC `\\`）、`..` 段、空名、控制字符；v1 只接受 `pack.json` 与 `assets/**` 两个前缀，其余记 warning 后忽略且不落盘（兼容 macOS 打包产生的 `__MACOSX/`、`.DS_Store`）。
-6. **完整性**：每条解压后重算 CRC32 与中央目录比对，不一致报「第 N 个条目 CRC 校验失败」；`pack.json` 走 `JSON.parse`（失败给出可读的解析位置）→ `migratePack()` → `validatePack()`。
+6. **完整性**：每条解压后重算 CRC32 与中央目录比对，不一致报「第 N 个条目 CRC 校验失败」；`pack.json` 走 `JSON.parse`（失败给出可读的解析位置）→ `migratePack()` → `validatePack()`；zip 内含 `assets/manifest.json`（`trpg.assets/1`）时额外**全量校验**（M9.5b/c 已实装）：清单结构/尺寸/体积/`bytes`/`sha256` 与实际文件一致、被引用的 `assetId` 存在、孤立资产 warning（`packages/content/src/asset-manifest.ts`）。
 7. **不落盘**：返回 `{ pack, assets: Map<string, Uint8Array>, warnings[] }`，由调用方决定是否安装；导入即落盘会留下半成品。
 
 **写（导出 `encodePackZip(pack, assets)`）**
@@ -292,7 +292,7 @@ node scripts/content-pack.mjs inspect dist/core-guimuya-1.0.0.trpgpack    # 打�
 | 风险 | 说明 | 对策 |
 |---|---|---|
 | 生效方式 / 编译进 host | 内置包是 `@dsh-trpg/content` 的 TS 数据模块（`CORE_PACKS`），改动需重装插件；数据目录包启动时扫描，运行中重扫走 `content.reload`（M8.2 ✅） | 内置包与 CLI 导出共用同一套 `packToTrpgpack()` 校验/编码；重扫失败给可读 warning 并保留上一份数据包清单（目录读取失败时）；`pack.version` 独立语义化，内置包变更走 `contentHash`，禁止运行时改内置包文件 |
-| zip 压缩炸弹 | 恶意/畸形包可声明巨大解压体积耗尽内存 | 整包 16 MiB / 单条目 8 MiB / 总量 32 MiB / `pack.json` 4 MiB / 条目数 512 上限，解压即累计计数、超限立刻中止；拒绝 zip64 与非常规压缩方法；常量集中导出、单测注入超限 fixture |
+| zip 压缩炸弹 | 恶意/畸形包可声明巨大解压体积耗尽内存 | 整包 **64 MiB** / 单条目 8 MiB / 解压总量 **64 MiB** / `pack.json` 4 MiB / 条目数 **520** 上限（M9.5b/c 已实装），解压即累计计数、超限立刻中止；拒绝 zip64 与非常规压缩方法；常量集中导出、单测注入超限 fixture |
 | zip 路径穿越 / 结构异常 | 条目名 `../`、绝对路径、盘符、重复条目、加密条目、非 UTF-8 名 | 解析以中央目录为准；条目名规范化并白名单（仅 `pack.json` + `assets/**`）；拒绝绝对路径与 `..`；重复名（大小写不敏感）拒绝；不支持的标志/方法明确报错；解码只返回内存 Map、不直接落盘 |
 | 导出不可复现 | 同一内容不同机器导出字节不同，`packHash` 与快照比对失真 | 固定条目顺序、DOS 时间戳（1980-01-01）、压缩级别 6、无 extra/comment/数据描述符；`--verify` 重导出比对字节；fixture 断言 `packHash` |
 | CRC / 包损坏 | 传输截断或手改 zip 导致内容静默损坏 | 逐条 CRC32 与中央目录比对，失败报「第 N 个条目 CRC 校验失败」；校验不过不安装、不导出；registry 加载时坏包跳过并记 warning，不崩服务 |

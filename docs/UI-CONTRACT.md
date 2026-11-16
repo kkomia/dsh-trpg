@@ -1,6 +1,6 @@
 # UI 与资产契约 v1：三屏（人物 / 装备 / 背包）+ 三条图标获取路径
 
-> 状态：**已拍板（2026-11-16），M9.5 实现；地图与战棋视图见 M9.4/M9.5e**｜决策来源：[DECISIONS.md](./DECISIONS.md) 第九轮 #27（三屏三路径）；**战斗空间/地图与战棋视图见第十轮 #28**｜关联：[RULES-MODEL.md](./RULES-MODEL.md) §3/§4/§6/§8/§13、[CONTENT-MODEL.md](./CONTENT-MODEL.md) §2（`assets/` 与 zip 上限）、[ROADMAP.md](./ROADMAP.md) M9.5。
+> 状态：**已拍板（2026-11-16）；M9.5a–c ✅ 已实现（2026-11-16）、M9.5d 进行中、M9.5e 待做；地图与战棋视图见 M9.4/M9.5e**｜决策来源：[DECISIONS.md](./DECISIONS.md) 第九轮 #27（三屏三路径）；**战斗空间/地图与战棋视图见第十轮 #28**｜关联：[RULES-MODEL.md](./RULES-MODEL.md) §3/§4/§6/§8/§13、[CONTENT-MODEL.md](./CONTENT-MODEL.md) §2（`assets/` 与 zip 上限）、[ROADMAP.md](./ROADMAP.md) M9.5。
 > 一句话：跑团桌第一优先级是**三个数据界面**（人物 / 装备 / 背包），**图标是一等公民**（不内置图标库，来自本地导入 / AI 生成 SVG / AI 生图三条路径），落盘前**内部强制标准化**，客户端只渲染 host 投影与 `iconRef`；三屏之外主区域另有**世界地图页**（插画底图 + zone 热点/连线）与**战棋战斗视图**（底图 + 网格 + token + 行动经济条），地图由 AI 出结构草稿 + 程序校验 + AI 底图，**结构数据才是权威**。本文是实现依据（契约，不是提案）；结论冲突回 DECISIONS.md 改，不在这里漂移。
 
 ## 0. 摘要与已确认决策
@@ -146,12 +146,12 @@ POST {baseUrl}/v1/images/generations     Authorization: Bearer <apiKey>
 | 表情/动作变体 | variant | **768×1024** | PNG | **512 KiB** | 同立绘，最多 5 个 |
 | 帧表 | spritesheet | 每格 **128×128**（4×4 → 512×512） | PNG | **2 MiB** | 行列整数、格内无 padding |
 | 封面 | cover | ≤1024×576 | PNG | 512 KiB | 可选 |
-| 单包资产 | — | — | — | **≤512 个 / 总量 ≤64 MiB** | 见下方待办 |
+| 单包资产 | — | — | — | **≤512 个资产 / 总量 ≤64 MiB**（zip 整包 ≤64 MiB、条目 ≤520、解压总量 ≤64 MiB） | 已实装（M9.5b/c），见下方说明与 §4.1 只读端点 |
 | 落座单卡上传 | — | — | — | **≤8 个文件 / ≤8 MiB** | 只传展示用资产（§4.5） |
 
 超限行为：**拒绝落盘**，预览显示「当前 X KB / 上限 Y KB」+ 三个出口（重新生成并降档 / 手动裁剪 / 取消）。
 
-**待办（M8.1 常量调整，M9.5a 前置）**：`ZIP_LIMITS.maxArchiveBytes` 16 → **64 MiB**、`maxTotalUncompressedBytes` 32 → **64 MiB**、`maxEntries` 512 → **520**（`pack.json` + 规则脚本 + 512 资产）；`maxEntryBytes` 保持 **8 MiB**、`maxPackJsonBytes` 保持 4 MiB。落地时同步改 [CONTENT-MODEL.md](./CONTENT-MODEL.md) §2.2/§9 的上限数字。
+**已实装（M9.5a/b/c）**：归一化管线与资产 manifest 的结构/大小/sha256/引用/孤立校验已随 `validatePack()` 落地（`packages/content/src/asset-manifest.ts`，与 `@dsh-trpg/assets` 的 `trpg.assets/1` 校验同口径）；zip 上限已上调为**整包 64 MiB / 解压总量 64 MiB / 条目 520**（`pack.json` + 规则脚本 + 512 资产），**单条目仍 8 MiB、`pack.json` 仍 4 MiB**（`ZIP_LIMITS` 集中导出，`zip.test.ts` 直接断言常量与边界）；[CONTENT-MODEL.md](./CONTENT-MODEL.md) §2.2/§9 的对应数字已同步。
 
 ### 3.2 归一化器职责（新包 `@dsh-trpg/assets`，纯 TS、零原生依赖）
 
@@ -179,7 +179,7 @@ POST {baseUrl}/v1/images/generations     Authorization: Bearer <apiKey>
 
 ## 4. 资产交付与存储
 
-**4.1 host 只读资产端点。** `GET /trpg/assets/<packId>/<assetPath>`，`<assetPath>` 为去掉 `assets/` 前缀的相对路径（如 `icons/item/hengdao.svg`）：响应 200 + `Content-Type: image/png | image/svg+xml` + `ETag: "<sha256 前 16>"` + `Cache-Control: public, max-age=31536000, immutable`；不存在 404、路径非法/越权 403；**只读，无写接口**。`GET /trpg/room-assets/<roomId>/<assetId>?token=…` 给落座上传的展示资产（按房间生命周期存活、进快照、散团清理、同房可读）。immutable 与内容寻址：host 下发的 `iconUrl` 自带 `?h=<sha256 前 8>`，客户端缓存 key 用 `sha256`，换图即换 URL、永不强刷。
+**4.1 host 只读资产端点（✅ 已实装 M9.5b/c，2026-11-16）。** `GET /trpg/assets/<packId>/<assetPath>`，`<assetPath>` 为去掉 `assets/` 前缀的相对路径（如 `icons/item/hengdao.svg`），**无 token**：200 + `Content-Type: image/png | image/svg+xml` + `ETag: "<sha256 前 16>"` + `Cache-Control: public, max-age=31536000, immutable`；`If-None-Match` 命中短 ETag / 完整 sha256 / `*` → **304**；路径穿越（`..`、绝对路径、反斜杠、控制字符、非法 URL 编码、空段/`.`）→ **403**；包或资产不存在、类型不支持（v1 只提供 png/svg）→ **404**（全中文可读错误）；数据来自 `pack-registry.assetOf()`（注册表加载时缓存数据包资产）；**只读，无写接口**。`GET /trpg/room-assets/<roomId>/<assetId>?token=…` 给落座上传的展示资产（**随 M9.5d 落地**；按房间生命周期存活、进快照、散团清理、同房可读）。immutable 与内容寻址：host 下发的 `iconUrl` 自带 `?h=<sha256 前 8>`，客户端缓存 key 用 `sha256`，换图即换 URL、永不强刷。
 
 **4.2 DTO 只给 `iconRef`。** 主字段是 `iconRef`（稳定、内容寻址），`iconUrl` 只是 host 生成的便利字段（可忽略）；客户端不自行拼端点（除本地兜底）。
 
@@ -431,13 +431,13 @@ export interface CombatView {
 
 | 阶段 | 目标 | 交付 | 验收标准 |
 |---|---|---|---|
-| **M9.5a** 地基 | 归一化器 + OpenAI 兼容客户端 + manifest/端点 + DTO | `@dsh-trpg/assets`（纯 TS PNG/SVG 归一化、SVG 白名单净化、sha256/去背/缩放）；OpenAI 兼容 client（chat + images）；`trpg.assets/1` schema 与 `validatePack()` 资产校验；`GET /trpg/assets/<packId>/<assetPath>`；`AssetRef/IconRef/TraceView/EquipPreview` DTO | 归一化单测：尺寸/体积/去背/确定性 sha256/拒 16-bit·交错·JPEG·WebP；SVG 净化用例（script/foreignObject/外链/事件属性/实体各 1 全拒，合法图标通过且字节可复现）；mock OpenAI 跑通 chat + images（b64_json）；端点 404/403/ETag/immutable 断言；typecheck 0、**不新增运行时依赖** |
-| **M9.5b** 工坊图标工作台 | 三 tab + 预览 + 批量 + 历史 + 原子落盘 | 工坊「图标」tab；预览画布/多候选/重生成/手动裁剪；批量给整库生成 + 待重试列表；manifest 历史与替换；落盘前后 `validatePack()` | 不改源码给内置物品库批量生成图标并确认落盘；导出 `.trpgpack` 后另一台机器图标正常显示；坏 SVG/超限资产被拒且原因可读；孤立资产只 warning |
-| **M9.5c** 开发用 shim（仅验证） | ComfyUI → OpenAI 协议（`scripts/dev/`，**不打包**） | `scripts/dev/comfyui-openai-shim.mjs`：`/v1/images/generations`（+ 可选 `/v1/chat/completions`）兼容层，b64 返回、seed 映射、轮询与超时 | 本机 ComfyUI 出图 → 走工坊生图 → 归一化 → 预览落盘；关掉 shim 插件给可读错误（**无 shim 依赖**）；`pnpm pack:plugin` 产物不含 shim |
-| **M9.5d** 玩家资产与落座上传 | 头像/立绘/变体/帧表 + 上传展示资产（三屏接真图） | 玩家侧生成入口（host 服务或自备接口）；IndexedDB 私卡资产；`room.seat` 扩展 `assets[]`；`GET /trpg/room-assets/…`；三屏渲染 `media` 与图标 | 双实例：玩家本地生成立绘 → 落座 → 队友端看到立绘；断线重连不重复上传（sha256 去重）；超 8 文件/8 MiB 被拒；抓包断言私密字段未上传 |
-| **M9.5e** 地图与战棋生成工作台 | AI 结构草稿 + 程序校验 + AI 底图 + 预览叠加对齐 + 离线兜底 | 工坊「地图」tab（生成/校验/预览/对齐/批量/待重试）；**地图结构校验器**（尺寸/边界/连通性/出生点/token/引用/图例，与 [RULES-MODEL.md](./RULES-MODEL.md) §3 生成小节同口径）；AI 底图 prompt 模板（世界图 `2d-illustration` / 战斗图 `topdown-2d`·`pixel-topdown` 两档）；程序化底图渲染器；`calibration` 对齐参数；离线模式（无 AI 时纯程序生成结构 + 背景） | 给「洞口」生成一张 ≤32×32 战棋图；校验器拒绝断连/越界/出生点重叠各 1 例且报错定位到格；AI 不可用时程序兜底仍可导出可玩；导出 `.trpgpack` 后另一台机器世界地图与战棋底图/网格对齐正常；预览结构与落盘一致（sha256/pack 校验） |
+| **M9.5a** 地基 ✅ 完成 2026-11-16 | 归一化器 + OpenAI 兼容客户端 + manifest schema/DTO | `@dsh-trpg/assets`（纯 TS PNG/SVG 归一化、SVG 白名单重建式净化、sha256/去背/缩放）；OpenAI 兼容 client（chat + images）；`trpg.assets/1` schema 与 `validatePack()` 资产校验；`AssetRef/IconRef/TraceView/EquipPreview` DTO | 归一化单测：尺寸/体积/去背/确定性 sha256/拒 16-bit·交错·JPEG·WebP；SVG 净化用例（script/foreignObject/外链/事件属性/实体各 1 全拒，合法图标通过且字节可复现）；mock OpenAI 跑通 chat + images（b64_json）；typecheck 0、**不新增运行时依赖**。**实测：新增 182 用例（总 702），assets 不进 client bundle** |
+| **M9.5b** 资产清单、上限与只读端点 ✅ 完成 2026-11-16（工作台后端；三 tab UI 随 M9.6 工坊页） | 资产清单全量校验 + zip 上限上调 + host 只读端点 + 落盘校验 | 已交付：`assets/manifest.json` 结构/大小/sha256/引用/孤立校验（`packages/content/src/asset-manifest.ts`，`validatePack()` 自动执行）；`ZIP_LIMITS` 整包/解压总量 **64 MiB**、条目 **520**（**单条 8 MiB / `pack.json` 4 MiB 不变**）；`GET /trpg/assets/<packId>/<assetPath>`（无 token、png/svg、ETag/immutable、304/403/404）；注册表加载时缓存数据包资产。工坊「图标」三 tab（导入 / AI SVG / AI 生图）+ 预览/多候选/批量/历史/原子落盘的页面 UI 随 M9.6 工坊页落地 | manifest 校验用例（结构/超限/sha256 不符/缺文件/孤立 warning）、上限常量与边界断言、端点 304/403/404/ETag/immutable 断言。**实测：单测 808 → 828**；「整库批量出图标并确认落盘、导出 `.trpgpack` 后另一台机器可见」的验收随 M9.6 UI |
+| **M9.5c** 开发用 shim（仅验证） ✅ 完成 2026-11-16 | ComfyUI → OpenAI 协议（`scripts/dev/`，**不打包**） | `scripts/dev/comfyui-openai-shim.mjs` + `shim-core.mjs`：`/v1/images/generations`（+ 可选 `/v1/chat/completions`）兼容层，`--fake` / `--comfyui` 两种模式，b64 返回、seed 映射、轮询与超时 | 本机 ComfyUI 出图 → 走工坊生图 → 归一化 → 预览落盘；关掉 shim 插件给可读错误（**无 shim 依赖**）；`pnpm pack:plugin` 产物不含 shim。**实测：shim 单测 12 用例全过、不打包已验** |
+| **M9.5d** 玩家资产与落座上传 🔶 进行中 | 头像/立绘/变体/帧表 + 上传展示资产（三屏接真图） | 玩家侧生成入口（host 服务或自备接口）；IndexedDB 私卡资产；`room.seat` 扩展 `assets[]`；`GET /trpg/room-assets/…`；三屏渲染 `media` 与图标 | 双实例：玩家本地生成立绘 → 落座 → 队友端看到立绘；断线重连不重复上传（sha256 去重）；超 8 文件/8 MiB 被拒；抓包断言私密字段未上传 |
+| **M9.5e** 地图与战棋生成工作台 ⬜ 待做 | AI 结构草稿 + 程序校验 + AI 底图 + 预览叠加对齐 + 离线兜底 | 工坊「地图」tab（生成/校验/预览/对齐/批量/待重试）；**地图结构校验器**（尺寸/边界/连通性/出生点/token/引用/图例，与 [RULES-MODEL.md](./RULES-MODEL.md) §3 生成小节同口径）；AI 底图 prompt 模板（世界图 `2d-illustration` / 战斗图 `topdown-2d`·`pixel-topdown` 两档）；程序化底图渲染器；`calibration` 对齐参数；离线模式（无 AI 时纯程序生成结构 + 背景） | 给「洞口」生成一张 ≤32×32 战棋图；校验器拒绝断连/越界/出生点重叠各 1 例且报错定位到格；AI 不可用时程序兜底仍可导出可玩；导出 `.trpgpack` 后另一台机器世界地图与战棋底图/网格对齐正常；预览结构与落盘一致（sha256/pack 校验） |
 
-**编号与依赖**：M9 内新增 **M9.5 资产、图标与地图生成管线**（本节 a–e），原「M9.5 规则编辑器」顺延为 **M9.6**（工坊页壳、规则 tab 与**地图工坊**在 M9.6，图标工作台 tab 在 M9.5b、地图生成工作台 tab 在 M9.5e 先落）；三屏骨架与地图视图壳随 M9.4 的投影先落地（无真图/无底图时用几何徽记与程序化底图），M9.5d 才接真图、M9.5e 才接真底图；**M9.5e 依赖 M9.1 的 `space` schema + M9.5a 的资产生图/归一化 + M9.4 的战棋视图壳**；装备/背包/移动/战棋命令（§6）依赖 M9.1/M9.2 的规则执行器，**不在客户端算任何数值**。
+**编号与依赖**：M9 内新增 **M9.5 资产、图标与地图生成管线**（本节 a–e），原「M9.5 规则编辑器」顺延为 **M9.6**（工坊页壳、规则 tab 与**地图工坊**在 M9.6；图标工作台的资产清单/上限/只读端点后端在 M9.5b、三 tab UI 随 M9.6 工坊页，地图生成工作台 tab 在 M9.5e 先落）；三屏骨架与地图视图壳随 M9.4 的投影先落地（无真图/无底图时用几何徽记与程序化底图），M9.5d 才接真图、M9.5e 才接真底图；**M9.5e 依赖 M9.1 的 `space` schema + M9.5a 的资产生图/归一化 + M9.4 的战棋视图壳**；装备/背包/移动/战棋命令（§6）依赖 M9.1/M9.2 的规则执行器，**不在客户端算任何数值**。
 
 ## 11. 风险与对策
 

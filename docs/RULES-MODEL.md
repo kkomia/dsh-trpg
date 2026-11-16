@@ -408,7 +408,7 @@ func    := min | max | floor | ceil | round | abs | clamp
 5. host 重算并 SSE 下发 `sheet.view` / `combat.view`（战棋视图含位置/行动经济/回合）→ 客户端渲染骰子卡、血条、状态（不执行脚本）
 ```
 
-### 7.1 GM 工具泛化（M9.4）
+### 7.1 GM 工具泛化（M9.4）✅ 已实现 2026-11-16
 
 **结论**：插件不再为每种规则写死一个工具（`trpg_attack` / `trpg_start_combat` / `trpg_next_turn` …），改为**少量通用工具**；工具参数只说「想做什么」，动作/技能/资源的定义全部从当前房间的 `rules` 段读。工具 = AI GM 与引擎之间**唯一**的结算通道。
 
@@ -418,6 +418,8 @@ func    := min | max | floor | ceil | round | abs | clamp
 | `trpg_move` | `{role, to:{zoneId?\|x,y?}, path?}` | 校验距离/地形/连通性/移动力 → 扣移动力 → `onMove` + 进出区域钩子 | `{ok, from, to, cost, remaining, view}` |
 | `trpg_roll_check` | `{kind, actor?, target?, skill?/attribute?, dc?, mode?, mods?}` | `kind` 由规则定义（`attribute/skill/save/opposed/...`）→ `resolveCheck` | `{ok, kind, total, dc, success, crit?, degree?, rolls[], view}` |
 | `trpg_combat` | `{action, monsters?, reason?, targets?}` | `start` 掷先攻建场 / `nextTurn` 回合推进（到上限触发 `onRoundLimit`）/ `end` 收场 | `{ok, round, maxRounds, order[], activeActorId, actionEconomy, view}` |
+
+**实现状态（2026-11-16，随 M8.4 接线，commit 01c8a3e）**：上表四个通用工具已实装并接入 `RoomService` 运行时命令——`trpg_use_action` 校验 `actionId` 存在性/行动经济/距离/目标后走 `resolveAttack`/`resolveDamage`，`trpg_move` 校验距离/地形/连通性/移动力，`trpg_roll_check` 的 `kind` 由规则包定义，`trpg_combat` 的 `start` 可按模组 `encounterId` 展开怪物并应用本场 `maxRounds`/`battleMapId`；返回值里的 `rolls`/`trace`/`view` 是 AI 叙事的**唯一数值来源**。**别名策略**：规则房间额外注册旧工具名 `trpg_attack` / `trpg_start_combat` / `trpg_next_turn` / `trpg_combat_status` / `trpg_end_combat` 作为通用工具的等价别名（AI 习惯调用不会断），`trpg_roll_check` 同名为双路由（规则房走运行时 `kind`，无规则房走旧引擎）；**无规则运行时的房间**保留旧工具与旧引擎检定。**模组数据工具**：新增 `trpg_scene`（`action: view/advance`，返回本场判定/遭遇/奖励与节拍，GM 可见）与 `trpg_reward`（按 `rewardIndex` 或直接 `xp/items` 复用 `gm.award` 私发）。实测：单测 **762 → 808**，typecheck 0、构建通过。
 
 **调用约束（硬规则，与 §7 的硬规则/五道锁一致）**：
 
@@ -526,10 +528,10 @@ packages/content/src/rules/dnd5e-lite/     # 作者源码：可 diff、可单测
 | 阶段 | 目标 | 交付 | 验收标准 |
 |---|---|---|---|
 | **M9.1** ✅ 完成 2026-11-16 | 规则 schema + 公式编译/求值 + 卡实例/迁移 + 投影 DTO（纯库 + 测试） | `@dsh-trpg/rules` 已交付：types、`validateRulePack()`（含 `space` zone-grid / `time` round / `turn` 行动经济段）、公式 parser/compiler/evaluator、卡实例与迁移（`validateCard` / `buildSheetProjection` / `migrateLegacyCard`）、`fixtures.ts` 最小 d20 规则包、投影 DTO（`SheetView` / `CombatView` / `WorldMapView` 的形状定义）；不接 host。**实测：新增 172 用例（总 306 全过）、typecheck 0** | 公式 40+ 例单测（含编译期/运行期错误）、schema 校验（含 zone-grid/round/turn 各 1 组正反例）、旧卡迁移；typecheck 0；不新增运行时依赖 |
-| **M9.2** | 核心运行时 + 脚本沙箱 | 种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `vm` 沙箱 + 核心 8 + 场地/时间/上限 9 钩子调度 + 超时/sha256/错误事件 | 核心 8 + 场地/时间/上限 9 各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界 |
+| **M9.2** ✅ 完成 2026-11-16 | 核心运行时 + 脚本沙箱 | 种子骰/回合先攻/事件总线/效果栈（与规则无关）+ `vm` 沙箱 + 核心 8 + 场地/时间/上限 9 钩子调度 + 超时/sha256/错误事件。**实测：单测 306 → 457（新增 151），typecheck 0、构建通过** | 核心 8 + 场地/时间/上限 9 各覆盖正常/抛错/超时/回滚；同 eventSeq 回放骰面一致；沙箱逃逸 smoke 记录已知边界 |
 | **M9.3** | dnd5e-lite 示例规则包 + 迁移 | `rules.json` + 4 个脚本；`core-guimuya` pack 带 rules 段（含 `space`/`time`/`turn` 数据）；旧卡迁移器；与旧实现对照测试 | CLI 用「鬼木崖·异光」跑完一幕，骰面/命中/伤害/AC/先攻逐项一致；单测迁移后全绿（134 → 新增规则测试） |
-| **M9.4** | 协议/房间/客户端卡面与地图视图（主机权威投影） | `sheet.view`/`combat.view`/`worldMap.view` + `sheet`/`rules` 事件 + 重连重算；客户端只读卡面（分组/资源条/装备槽/可用动作/状态）+ **世界地图页（主区域独立页）** + **战棋战斗视图（底图+网格+token+行动经济条）** | 双实例：落座→检定→攻击→移动→断线重连后投影一致；世界地图热点/连线与战棋网格/token/回合/行动经济条正常；玩家端构建产物不含规则执行代码；320–420px 栏宽可读 |
-| **M9.5** | **资产、图标与地图生成管线**（新增，详见 [UI-CONTRACT.md](./UI-CONTRACT.md) §10） | a) 纯 JS 归一化器 + SVG 白名单净化 + OpenAI 兼容客户端 + `assets/manifest.json`；b) 工坊图标工作台；c) 开发 shim；d) 玩家立绘/变体/帧表与落座上传；**e) 地图与战棋生成工作台**：AI 结构草稿 + 地图结构校验器（尺寸/边界/连通性/出生点/token/引用/图例）+ AI 底图 + 预览叠加与对齐（`calibration`）+ 离线程序兜底（结构 + 程序化背景） | 同 UI-CONTRACT §10 的 M9.5a–e 验收标准；地图侧另验：≤32×32 / token ≤20 / 包内 ≤64 上限生效，校验器拒绝断连·越界·出生点重叠各 1 例，无 AI 时程序兜底可导出可玩 |
+| **M9.4** ✅ 完成 2026-11-16（a 后端 + b 客户端） | 协议/房间/客户端卡面与地图视图（主机权威投影） | `sheet.view`/`combat.view`/`worldMap.view` + `sheet`/`rules` 事件 + 重连重算；客户端只读卡面（分组/资源条/装备槽/可用动作/状态）+ **世界地图页（主区域独立页）** + **战棋战斗视图（底图+网格+token+行动经济条）**。M9.4a 后端：投影 DTO + 12 个 RPC + rooms 接规则运行时；M9.4b 客户端：右栏「人物/装备/背包」紧凑子页签 + 主区域 keyed panel（人物详情/装备/背包/世界地图/战棋，`cols=0` 退化 theatre-of-mind），对接 sheet/combat/worldmap RPC 与 `sheet\|combat\|rules/error` SSE。**实测：单测 702 → 762，typecheck 0、构建通过；真机截图 `.tmp/verify4/01–10`（gitignored）** | 双实例：落座→检定→攻击→移动→断线重连后投影一致；世界地图热点/连线与战棋网格/token/回合/行动经济条正常；玩家端构建产物不含规则执行代码；320–420px 栏宽可读 |
+| **M9.5** 🔶 进行中（a ✅ / b ✅ / c ✅ / d 进行中 / e 待做） | **资产、图标与地图生成管线**（新增，详见 [UI-CONTRACT.md](./UI-CONTRACT.md) §10） | a) ✅ 纯 JS 归一化器 + SVG 白名单净化 + OpenAI 兼容客户端 + `assets/manifest.json`（**实测：新增 182 用例，总 702**）；b) ✅ zip 上限上调（整包/解压总量 **64 MiB**、条目 **520**，单条 8 MiB / `pack.json` 4 MiB 不变）+ manifest 全量校验 + host 只读端点 `GET /trpg/assets/<packId>/<path>`（ETag/304/403/404）（**实测：单测 808 → 828**；三 tab 工作台 UI 随 M9.6 工坊页）；c) ✅ 开发 shim `scripts/dev/`（**实测：shim 12 用例，不打包**）；d) 进行中：玩家立绘/变体/帧表与落座上传；**e) 待做：地图与战棋生成工作台**（AI 结构草稿 + 地图结构校验器 + AI 底图 + 预览叠加与对齐 `calibration` + 离线程序兜底） | 同 UI-CONTRACT §10 的 M9.5a–e 验收标准；地图侧另验：≤32×32 / token ≤20 / 包内 ≤64 上限生效，校验器拒绝断连·越界·出生点重叠各 1 例，无 AI 时程序兜底可导出可玩 |
 | **M9.6** | 规则编辑器 + **地图工坊**（M8.3 顺延至此；**原编号 M9.5**） | 工坊规则 tab：schema 表单 + 代码编辑器 + 沙箱试跑 + 断言面板 + 模板库；地图工坊：`space` 结构矩阵编辑/校验定位/底图替换与对齐微调/世界地图热点编辑 | 作者不改源码完成一次规则包修改并通过规则测试台；不改源码调整一张战棋图或世界地图热点并通过校验；导出 `.trpgpack` 后另一台机器可玩 |
 
 **依赖关系**：M7 玩家侧镜像可并行（改 client 镜像/会话事件，与规则包文件面不重叠，交叉点只有投影字段与事件类型）；**M8.3 UI 依赖 M9.1 + M9.4**（schema 与投影都定稿）；**M8.3a 只读卡面可提前**（依赖 M8.2 + M9.1 的卡 DTO）；**M9.5e 地图生成依赖 M9.1 的 `space` schema + M9.5a 的资产生图/归一化 + M9.4 的战棋视图壳**；**M9.6 地图工坊依赖 M9.5e 的校验器与 M9.4 的视图**；M8.4/M8.5 不受阻，可穿插。
@@ -550,7 +552,7 @@ packages/content/src/rules/dnd5e-lite/     # 作者源码：可 diff、可单测
 ## 15. 与现有代码的差异 / 迁移清单
 
 ```
-packages/rules/（新，M9.1 ✅ 2026-11-16）  # @dsh-trpg/rules 已建包：types + validate-rules + formula + sheet + migrate + fixtures（M9.1）；核心运行时/沙箱（M9.2）、地图结构校验器（M9.5e）后续补
+packages/rules/（新，M9.1 ✅、M9.2 ✅ 2026-11-16）  # @dsh-trpg/rules 已建包：types + validate-rules + formula + sheet + migrate + fixtures（M9.1）、核心运行时/沙箱（M9.2 ✅）；地图结构校验器（M9.5e）后续补
 packages/engine/                     # 瘦身：dice/rng 迁入 rules；checks/characters/spells/combat 的 dnd5e 实现移除
 packages/content/src/rules/dnd5e-lite/     # 新：示例规则包源码（rules.json + scripts/*.js；space/time/turn 数据段）
 packages/content/src/packs/core-guimuya.ts # 新增 pack.rules 段（M9.3）；pack.ts 加 rules 段 schema 与 zip 内脚本 sha256 校验
