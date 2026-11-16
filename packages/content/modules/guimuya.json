@@ -36,7 +36,7 @@
       "title": "青石镇·悬赏",
       "entry": "逢五的集市刚散，镇口告示墙前还围着人。悬赏是新的，墨迹未干：查明枯木崖异光者，赏银百两。清风茶馆里，柳掌柜正在擦一只永远擦不干净的杯子。老猎户老王缩在角落，面前的热茶早就凉了。",
       "npcs": ["liu_zhanggui", "wang_laohan", "zhenzhang"],
-      "lore": ["qingshi", "bounty", "guimuya", "liuzhanggui", "laolieren"],
+      "lore": ["entry_qingshi", "entry_bounty", "entry_guimuya", "entry_liuzhanggui", "entry_laolieren"],
       "checks": [
         {
           "when": "向柳掌柜打听绿光的细节",
@@ -70,7 +70,7 @@
       "id": "scene_guimuya",
       "title": "枯木崖·古洞",
       "entry": "出镇往西三里，枯木崖像一截烧焦的手指戳在暮色里。崖顶枯松下，绿光正从崖脚的石缝中渗出来。洞口的杂草被踩倒了一片——有人比你们先到。",
-      "lore": ["guimuya", "dongfu"],
+      "lore": ["entry_guimuya", "entry_dongfu"],
       "checks": [
         {
           "when": "检查洞口的痕迹",
@@ -118,7 +118,7 @@
       "id": "scene_shendong",
       "title": "古洞深处·赤目道人",
       "entry": "洞壁越往里越湿，绿光在石壁上跳动，像整面墙都在呼吸。密室门半开，里面是一个刻满符文的圆阵，阵心躺着个瘦小的少年——老猎户的儿子阿满。阵眼旁，一个穿旧袍的人背对着你们，缓缓回过头来，眼睛红得像要滴血。",
-      "lore": ["dongfu", "gm_zhenfa", "gm_chishan"],
+      "lore": ["entry_dongfu", "entry_gm_zhenfa", "entry_gm_chishan"],
       "checks": [
         {
           "when": "靠近密室时观察地面",

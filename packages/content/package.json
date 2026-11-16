@@ -3,8 +3,11 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "跑团桌内容包：D&D 5e-lite 规则数据、角色卡、世界书、模组",
+  "description": "跑团桌内容包：D&D 5e-lite 规则数据、角色卡、世界书、模组、内容包（Content Pack）",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./pack-zip": "./src/pack-zip.ts",
+    "./pack-io": "./src/pack-io.ts",
+    "./zip": "./src/zip.ts"
   }
 }
