@@ -1,0 +1,10 @@
+{
+  "name": "@dsh-trpg/rules",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "规则包 schema 校验 / 受限公式编译求值 / 卡实例与旧卡迁移 / 卡投影 DTO（M9.1 纯库，零依赖）",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
