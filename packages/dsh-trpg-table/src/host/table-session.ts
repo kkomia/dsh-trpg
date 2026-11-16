@@ -45,6 +45,11 @@ export interface TableSessionDeps {
   getAgent: (sessionId: string) => TableAgentLike | undefined;
   /** 把一段文本作为用户消息送进会话。 */
   prompt: (sessionId: string, text: string) => Promise<void>;
+  /**
+   * 玩家行动注入会话前的旁路回调（M7 镜像投影用：登记 injectedText，把会话
+   * user/message 认领成「谁的公开/私密行动」）。抛错不影响注入。
+   */
+  onActionInjected?: (roomId: string, info: PlayerActionInfo, injectedText: string) => void;
   log?: (message: string) => void;
 }
 
@@ -194,6 +199,11 @@ export class TableSessionBridge {
     const tag = info.private ? '（悄悄话给 GM）' : '';
     const base = `【${who}】${info.text}${tag}`;
     const text = `${base}${this.actionContextBlock(roomId, info)}`;
+    try {
+      this.deps.onActionInjected?.(roomId, info, text);
+    } catch (error) {
+      this.deps.log?.(`table session action mirror note failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     void this.deps.prompt(binding.sessionId, text).catch((error: unknown) => {
       this.deps.log?.(`table session prompt failed: ${error instanceof Error ? error.message : String(error)}`);
       try {

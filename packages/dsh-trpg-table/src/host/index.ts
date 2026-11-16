@@ -17,6 +17,9 @@ import { GmManager, type GmAgentCtxLike, type GmCreateAgent, type GmHandleLike, 
 import { SubagentGmManager, type SubagentsLike } from './gm/subagent-gm.ts';
 import { resetRevealedLore } from './gm/lore-reveal.ts';
 import { TableSessionBridge } from './table-session.ts';
+import { RoomMirrorHub, type MirrorPlayerInfo } from './mirror/hub.ts';
+import { MirrorClientService, type MirrorSessionHandle, type MirrorSessionsLike } from './mirror/client.ts';
+import { registerMirrorRoutes, type MirrorWebServerLike } from './mirror/local-api.ts';
 
 export const name = 'dsh-trpg-table';
 
@@ -81,8 +84,7 @@ export interface SessionControllerScope {
 }
 
 export interface AgentsScope {
-  agents: {
-    get?(id: string): { id: string; ctx: GmAgentCtxLike } | undefined;
+  agents: {    get?(id: string): { id: string; ctx: GmAgentCtxLike } | undefined;
     create(options: {
       sessionId: string;
       setup: (agentCtx: GmAgentCtxLike) => void;
@@ -97,6 +99,16 @@ export interface ModelScope {
   agentDefaultModel?: {
     currentSelection(): { provider: string; model: string; reasoningEffort?: string } | undefined;
   };
+}
+
+/** `ctx.sessions`（M7 玩家侧镜像会话创建/append）。 */
+export interface SessionsScope {
+  sessions: MirrorSessionsLike & { get?(id: string): { id?: unknown; append(...args: unknown[]): unknown } | undefined };
+}
+
+/** `ctx.webServer`（M7 镜像控制接口挂在 DSH 本机 Web 服务上）。 */
+export interface WebServerScope {
+  webServer: MirrorWebServerLike;
 }
 
 function log(message: string): void {
@@ -143,12 +155,58 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
   }
   /** 会话原生牌桌桥（房间 ↔ DSH 会话）；服务就绪后创建。 */
   let tableBridge: TableSessionBridge | null = null;
+  /**
+   * M7 玩家侧对话镜像：
+   * - `mirrorHub` = 房主端投影中枢（房间全量事件 + 牌桌会话事件 → 按收件人脱敏的帧）；
+   * - `mirrorClient` = 本机玩家端镜像服务（连房主 `/trpg/mirror` SSE → 本地镜像会话 append）。
+   * 同一份插件在房主/玩家两端都跑，角色由「谁提供服务、谁连过来」决定。
+   */
+  let mirrorHub: RoomMirrorHub | null = null;
+  let sessionsService: SessionsScope['sessions'] | null = null;
+  /**
+   * 创建本地镜像会话（玩家侧）：
+   * 1. 首选 UI 同款的 `sessionController.create()`（会话持久化、能被 DSH 原生界面打开），
+   *    再用 `ctx.sessions.get()` 拿 live Session 对象 append；
+   * 2. 回退 `ctx.sessions.create()`（裸会话，不持久化：原生界面打开会报 session/not-found，仅兜底）。
+   */
+  const createMirrorSession = async (): Promise<MirrorSessionHandle> => {
+    if (sessionController) {
+      try {
+        const created = await sessionController.create({});
+        const live = sessionsService?.get?.(created.sessionId);
+        if (live !== undefined) return { session: live, sessionId: created.sessionId };
+        log('mirror session: sessionController 创建后拿不到 live Session，回退裸会话创建');
+      } catch (error) {
+        log(`mirror session: sessionController.create 失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const sessions = sessionsService;
+    if (sessions !== null && typeof sessions.create === 'function') {
+      const session = sessions.create();
+      const sessionId = (session as { id?: unknown }).id;
+      return { session, ...(typeof sessionId === 'string' ? { sessionId } : {}) };
+    }
+    throw new Error('当前 DSH 宿主没有可用的会话服务（ctx.sessions / sessionController）');
+  };
+  const mirrorClient = new MirrorClientService({
+    getSessions: () => sessionsService ?? undefined,
+    createSession: createMirrorSession,
+    log,
+  });
   const service = new RoomService({
     maxRooms: config.maxRooms ?? 8,
     content: registry,
     // M9.4：内容包带 rules 段时房间自动建规则运行时（包内脚本源码由注册表解析）。
     rules: registry,
     onRoomCreated: (roomId, sessionId) => {
+      // M7：每个房间登记镜像中枢（标题给玩家侧会话标题用）。
+      if (mirrorHub) {
+        try {
+          mirrorHub.registerRoom(roomId, service.gmView(roomId).title);
+        } catch {
+          mirrorHub.registerRoom(roomId);
+        }
+      }
       // 会话原生牌桌：绑定会话后不再起 subagent GM（AI 就是会话 Agent）。
       if (sessionId && tableBridge) {
         void bindTableSession(roomId, sessionId);
@@ -168,11 +226,30 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     },
     onRoomClosed: (roomId) => {
       tableBridge?.unbind(roomId);
+      // M7：镜像中枢断开该房间的镜像连接并释放缓冲。
+      mirrorHub?.disposeRoom(roomId);
       // M8.4：本场「已揭示世界书」登记随房间一起释放。
       resetRevealedLore(roomId);
     },
     onChanged: () => persistence.schedule(),
   });
+
+  // M7 镜像中枢：host 内部全量房间事件 + 牌桌会话事件（含私密，再按收件人投影）。
+  /** 玩家席解析（`trpg_secret_note` 的收件玩家按玩家名/角色名匹配）。 */
+  const playersOfRoom = (roomId: string): MirrorPlayerInfo[] => {
+    try {
+      return service.gmParty(roomId).map((player) => ({
+        playerId: player.playerId,
+        playerName: player.name,
+        ...(player.character?.identity.name !== undefined ? { characterName: player.character.identity.name } : {}),
+      }));
+    } catch {
+      return [];
+    }
+  };
+  mirrorHub = new RoomMirrorHub({ playersOf: playersOfRoom, log });
+  const offMirrorRoomEvents = service.subscribeAll((roomId, event) => mirrorHub?.onRoomEvent(roomId, event));
+
 
   /**
    * 按房间解析内容：房间只存 `{packId, moduleId}`，内容始终从注册表取。
@@ -214,6 +291,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
         new AbortController().signal,
       );
     },
+    // M7：行动注入前登记给镜像中枢（把会话 user/message 认领成「谁的公开/私密行动」）。
+    onActionInjected: (roomId, info, injectedText) => mirrorHub?.noteInjectedAction(roomId, info, injectedText),
     log,
   });
 
@@ -234,6 +313,7 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       }
       return;
     }
+    mirrorHub?.bindSession(roomId, sessionId);
     try {
       service.bindSession(roomId, sessionId);
       service.gmAlert(roomId, '牌桌已绑定到当前会话：AI GM 会直接在这里回话。', 'info');
@@ -249,6 +329,13 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     persistence.attach(service);
     if (restored > 0) {
       restoredRooms = service.snapshotAll().map((snapshot) => snapshot.room.id);
+      // M7：恢复的房间也要重新登记镜像中枢，并重挂已绑定的牌桌会话。
+      for (const snapshot of service.snapshotAll()) {
+        const roomId = snapshot.room.id;
+        mirrorHub?.registerRoom(roomId, snapshot.room.title);
+        const sessionId = snapshot.room.sessionId;
+        if (sessionId !== undefined && sessionId.length > 0) mirrorHub?.bindSession(roomId, sessionId);
+      }
       log(`restored ${restored} room(s) from disk`);
     }
   } catch (error) {
@@ -262,6 +349,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       bindHost,
       log,
       service,
+      // M7：玩家侧对话镜像 SSE（`GET /trpg/mirror`）。
+      ...(mirrorHub !== null ? { mirror: mirrorHub } : {}),
       contentCatalog: () => registry.publicCatalog(),
       // 只读资产端点：内容包 zip 里的 assets/** 由注册表按需提供（M9.5b）。
       assetOf: (packId, assetPath) => registry.assetOf(packId, assetPath),
@@ -283,10 +372,12 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       bindSession: async (roomId, sessionId) => {
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           tableBridge?.unbind(roomId);
+          mirrorHub?.unbindSession(roomId);
           return { room: service.bindSession(roomId, null) };
         }
         const result = tableBridge ? tableBridge.bind(roomId, sessionId) : { ok: false as const, error: '牌桌桥未就绪' };
         if (!result.ok) throw new RoomError('bad-request', result.error);
+        mirrorHub?.bindSession(roomId, sessionId);
         const room = service.bindSession(roomId, sessionId);
         try {
           service.gmAlert(roomId, '牌桌已绑定到这个会话：AI GM 会直接在这里回话。', 'info');
@@ -346,6 +437,26 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
       sessionController = null;
     };
   });
+  // M7 玩家侧镜像：需要 `ctx.sessions`（创建本地镜像会话 + append）。
+  ctx.inject?.(['sessions'], (scoped) => {
+    sessionsService = (scoped as SessionsScope).sessions ?? null;
+    log('sessions service acquired: 玩家侧镜像会话已启用');
+    return () => {
+      sessionsService = null;
+    };
+  });
+  // M7 玩家侧镜像控制接口：挂在本机 DSH Web 服务器 `/api/dsh-trpg-table/mirror`。
+  ctx.inject?.(['webServer'], (scoped) => {
+    const webServer = (scoped as WebServerScope).webServer;
+    if (typeof webServer?.register !== 'function') return;
+    try {
+      const offRoutes = registerMirrorRoutes(webServer, { mirror: mirrorClient, log });
+      log('mirror control routes registered: /api/dsh-trpg-table/mirror');
+      return () => offRoutes();
+    } catch (error) {
+      log(`mirror routes register failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
 
   const gmSessionIds = new Set<string>();
   const turnWaiters = new Map<string, Array<() => void>>();
@@ -355,6 +466,8 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     const session = args[0] as { id?: string } | undefined;
     const event = args[1] as { type?: string; data?: unknown; seq?: number } | undefined;
     if (!session?.id || !event?.type) return;
+    // M7：镜像投影先于房间旁白转发（assistant 消息 -> 房间旁白的回声靠它去重）。
+    mirrorHub?.onSessionEvent(session.id, event.type, event.data);
     tableBridge?.onSessionEvent(session.id, event.type, event.data);
     if (event.type === 'turn/end') {
       const waiters = turnWaiters.get(session.id);
@@ -572,6 +685,14 @@ export function apply(ctx: HostCtxLike, config: TrpgConfig = {}): void {
     } catch {
       /* ignore */
     }
+    // M7：先断开镜像连接（SSE）并释放缓冲，再停房间服务。
+    try {
+      offMirrorRoomEvents();
+    } catch {
+      /* ignore */
+    }
+    mirrorClient.dispose();
+    mirrorHub?.dispose();
     tableBridge?.dispose();
     void subagentRef.current?.dispose();
     void manager.dispose();

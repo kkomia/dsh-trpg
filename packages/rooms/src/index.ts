@@ -288,6 +288,9 @@ interface Listener {
   notify: (event: GameEvent) => void;
 }
 
+/** 房间全量事件监听（host 内部用：镜像投影需要看到私密事件，再按收件人重新投影）。 */
+export type RoomEventListener = (roomId: string, event: GameEvent) => void;
+
 interface RoomRecord {
   id: string;
   title: string;
@@ -378,6 +381,8 @@ export class RoomService {
   private readonly content?: RoomContentResolver;
   private readonly rulesResolver?: RoomRulesResolver;
   private readonly seedSalt: string;
+  /** host 内部的全量房间事件监听（GM/镜像投影用；**不是**玩家可见性通道）。 */
+  private readonly roomListeners = new Set<RoomEventListener>();
   /** 房间 → 规则运行时容器（内容包带 rules 时才建）。 */
   private readonly ruleRooms = new Map<string, RoomRulesRoom>();
   /** 房间 → 规则不可用/降级信息（规则包缺失、脚本加载失败、快照不兼容）。 */
@@ -1639,9 +1644,23 @@ export class RoomService {
     return room.events.filter((event) => event.seq > lastSeq && visibleTo(principal, event)).map((event) => ({ ...event }));
   }
 
+  /**
+   * 订阅**所有房间的全量事件**（host 内部/GM 视角：含 `to: 'gm'` 与发给其他玩家的私密事件）。
+   *
+   * 镜像投影用：投影必须看到完整事件流，再按收件玩家重新脱敏；**不能**把本订阅直接
+   * 当玩家可见性通道（玩家可见性走 `subscribe` / `eventsSince` 的 principal 投影）。
+   * @param notify - 房间 id + 事件。
+   * @returns 取消函数。
+   */
+  subscribeAll(notify: RoomEventListener): () => void {
+    this.roomListeners.add(notify);
+    return () => {
+      this.roomListeners.delete(notify);
+    };
+  }
+
   /** 订阅可见事件；返回取消函数。SSE 连接与玩家在线状态由此维护。 */
-  subscribe(principal: Principal, notify: (event: GameEvent) => void): () => void {
-    const room = this.requireRoom(principal.roomId);
+  subscribe(principal: Principal, notify: (event: GameEvent) => void): () => void {    const room = this.requireRoom(principal.roomId);
     const listener: Listener = { principal, notify };
     room.listeners.add(listener);
     if (principal.kind === 'player') {
@@ -2107,6 +2126,14 @@ export class RoomService {
     };
     room.events.push(event);
     if (room.events.length > this.maxEvents) room.events.splice(0, room.events.length - this.maxEvents);
+    // host 内部全量监听（GM 视角，含私密事件）：镜像投影据此重新按收件人脱敏。
+    for (const listener of [...this.roomListeners]) {
+      try {
+        listener(room.id, event);
+      } catch {
+        /* 单个 host 监听异常不影响广播 */
+      }
+    }
     for (const listener of [...room.listeners]) {
       if (visibleTo(listener.principal, event)) {
         try {

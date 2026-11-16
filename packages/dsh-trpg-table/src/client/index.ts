@@ -39,6 +39,15 @@ import { createWorkshopUi } from './workshop-ui.ts';
 import { canonicalRefs } from './assets.ts';
 import { cardMetaFromCard, createAssetStore } from './assets-store.ts';
 import {
+  createMirrorApi,
+  mirrorStartInput,
+  mirrorStatusText,
+  shouldAutoStartMirror,
+  MIRROR_FALLBACK_HINT,
+  type MirrorApi,
+  type MirrorStatusView,
+} from './mirror.ts';
+import {
   growthToCardPatch,
   loadGrowth,
   mergeGrowth,
@@ -535,6 +544,8 @@ export function createPlugin(React: any) {
     onOpenMain?: (view: MainViewKind) => boolean | void;
     /** M9.6a：切主区域 keyed `main` 面板 `trpg-workshop`（内容工坊）。 */
     onOpenWorkshop?: () => boolean | void;
+    /** M7：打开玩家本机镜像会话（`uiWorkspace.openSession`）；返回 false = 宿主没有该能力。 */
+    onOpenMirrorSession?: (sessionId: string) => boolean;
   }) {
     const [session, setSession] = useState(loadSession() as StoredSession | null);
     const [room, setRoom] = useState(null as RoomView | null);
@@ -595,6 +606,66 @@ export function createPlugin(React: any) {
     );
     /** 右侧栏 tab 的会话 id：绑定/建房优先用它，localStorage 只做兜底。 */
     const tabSessionId = typeof props?.sessionId === 'string' && props.sessionId.trim().length > 0 ? props.sessionId.trim() : undefined;
+
+    // ---------------------------------------------------------------- M7 对话镜像
+    // 玩家身份入房后：自动连本机镜像服务 → 本机插件 host 连房主 `/trpg/mirror` SSE →
+    // 玩家本机镜像会话（原生会话视图）。房主身份不启动（当前绑定会话就是牌桌）。
+    const [mirrorStatus, setMirrorStatus] = useState(null as MirrorStatusView | null);
+    const [mirrorApi] = useState(() => createMirrorApi() as MirrorApi);
+
+    /** 打开镜像会话：优先 DSH 的 `uiWorkspace.openSession`；宿主没有该能力时给手动打开提示。 */
+    const openMirrorSession = useCallback(
+      (sessionId: string) => {
+        const opened = props?.onOpenMirrorSession?.(sessionId);
+        if (opened === false) {
+          setStatus({
+            kind: 'bad',
+            text: `当前宿主不支持自动打开会话：请在左侧会话列表点开「跑团桌」会话（id：${sessionId}）`,
+          });
+        }
+      },
+      [props?.onOpenMirrorSession],
+    );
+
+    /** 玩家身份 + 房间就绪 → 启动镜像并轮询状态；退房/关房/切房/卸载时停止。 */
+    useEffect(() => {
+      const roomId = session?.roomId;
+      if (!session?.playerToken || !roomId) {
+        setMirrorStatus(null);
+        return;
+      }
+      let disposed = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const startInput = mirrorStartInput(session, room?.title);
+      if (startInput) {
+        void mirrorApi.start(startInput).then((status: MirrorStatusView) => {
+          if (!disposed) setMirrorStatus(status);
+        });
+      }
+      const poll = (): void => {
+        void mirrorApi.status(roomId).then((status: MirrorStatusView) => {
+          if (disposed) return;
+          setMirrorStatus(status);
+          timer = setTimeout(poll, 1500);
+        });
+      };
+      poll();
+      return () => {
+        disposed = true;
+        if (timer) clearTimeout(timer);
+        void mirrorApi.stop(roomId);
+      };
+      // room.title 变化由下面的补标题 effect 处理，避免把连接整体重启。
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [session?.playerToken, session?.roomId, mirrorApi]);
+
+    /** 恢复房间时房名异步到达：再 start 一次（host 侧幂等，补齐/更新镜像会话标题）。 */
+    useEffect(() => {
+      if (!shouldAutoStartMirror(session)) return;
+      const input = mirrorStartInput(session, room?.title);
+      if (!input) return;
+      void mirrorApi.start(input).then((status: MirrorStatusView) => setMirrorStatus(status));
+    }, [room?.title, session?.playerToken, session?.roomId, session, mirrorApi]);
 
     const myCharacter = useMemo(() => {
       if (!room || !session) return undefined;
@@ -1732,7 +1803,53 @@ export function createPlugin(React: any) {
         ])
       : null;
 
-    const children: unknown[] = [workshopEntry, statusLine].filter((entry) => entry !== null && entry !== undefined);
+    // M7：右栏「对话镜像」状态卡（玩家侧原生会话镜像；房主显示无需镜像）。
+    const mirrorText = mirrorStatusText(mirrorStatus, {
+      isHost,
+      player: Boolean(session?.playerToken),
+    });
+    const mirrorSection = session
+      ? h('div', { key: 'mirror', style: { ...CSS.section, gap: 6 } }, [
+          h('div', { key: 'head', style: CSS.sectionTitle }, [
+            h('span', { key: 't' }, '对话镜像'),
+            h(
+              'span',
+              { key: 'tag', style: CSS.tag },
+              mirrorText.kind === 'ok' ? '已连接' : mirrorText.kind === 'bad' ? '不可用' : mirrorText.kind === 'busy' ? '同步中' : '未连接',
+            ),
+          ]),
+          h('span', { key: 'text', style: mirrorText.kind === 'ok' ? CSS.ok : mirrorText.kind === 'bad' ? CSS.bad : CSS.muted }, mirrorText.text),
+          mirrorStatus?.sessionId
+            ? h(
+                'button',
+                {
+                  key: 'open',
+                  type: 'button',
+                  style: CSS.button,
+                  title: '在 DSH 原生会话界面打开镜像会话',
+                  onClick: () => {
+                    openMirrorSession(String(mirrorStatus.sessionId));
+                  },
+                },
+                '打开镜像会话',
+              )
+            : null,
+          mirrorStatus?.sessionId
+            ? h(
+                'span',
+                {
+                  key: 'sid',
+                  style: { ...CSS.muted, fontFamily: 'monospace', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis' },
+                  title: mirrorStatus.sessionId,
+                },
+                `会话 id：${shortId(String(mirrorStatus.sessionId), 12)}`,
+              )
+            : null,
+          mirrorText.kind === 'bad' ? h('span', { key: 'fallback', style: CSS.muted }, MIRROR_FALLBACK_HINT) : null,
+        ])
+      : null;
+
+    const children: unknown[] = [workshopEntry, statusLine, mirrorSection].filter((entry) => entry !== null && entry !== undefined);
     if (!session) children.push(lobby);
     else if (!room) children.push(connecting);
     else {
@@ -1786,6 +1903,27 @@ export function createPlugin(React: any) {
           navigation?.startSession?.();
         } catch (error) {
           console.warn('[dsh-trpg-table] 新建会话失败', error);
+        }
+      };
+
+      /**
+       * M7：在 DSH 原生会话界面打开玩家本机镜像会话。
+       * `uiWorkspace.openSession(sessionId)` 是 DSH 的公开导航 API（选会话并显示对话）；
+       * 精简宿主没有该服务时返回 false，右栏卡片回退为「显示会话 id 供手动打开」。
+       * @param sessionId - 镜像会话 id。
+       * @returns 成功 true；宿主无导航能力 false。
+       */
+      const openMirrorSession = (sessionId: string): boolean => {
+        const navigation = ctx.get?.('uiWorkspace') as
+          | { openSession?: (target: { kind: 'session'; sessionId: string } | string) => void }
+          | undefined;
+        if (typeof navigation?.openSession !== 'function') return false;
+        try {
+          navigation.openSession(sessionId);
+          return true;
+        } catch (error) {
+          console.warn('[dsh-trpg-table] 打开镜像会话失败', error);
+          return false;
         }
       };
 
@@ -1862,7 +2000,7 @@ export function createPlugin(React: any) {
       ctx.effect?.(() =>
         ctx.slots.inject('sidebar.right.pane.tab', () =>
           ctx.slots.register(
-            { name: 'sidebar.right.pane.tab', key: TAB_TYPE_ID, inject: () => ({ onOpenMain: openMainPanel, onOpenWorkshop: openWorkshopPanel }) },
+            { name: 'sidebar.right.pane.tab', key: TAB_TYPE_ID, inject: () => ({ onOpenMain: openMainPanel, onOpenWorkshop: openWorkshopPanel, onOpenMirrorSession: openMirrorSession }) },
             TrpgTableCard,
           ),
         ),

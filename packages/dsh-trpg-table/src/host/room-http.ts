@@ -6,6 +6,7 @@
  * - GET  /trpg/rooms                公开房间列表
  * - POST /trpg/rpc                  JSON-RPC 风格调用（token 认证）
  * - GET  /trpg/events?token&lastSeq SSE 事件流（断线重连补发）
+ * - GET  /trpg/mirror?token&lastSeq&roomId 玩家侧对话镜像 SSE（M7：按收件人投影 + 环形缓冲重放）
  * - GET  /trpg/assets/<packId>/<assetPath>  host 只读资产（**无 token**，png/svg + ETag + immutable）
  * - GET  /trpg/room-assets/<roomId>/<sha256>.<ext>  房间资产（**无 token**，落座上传的展示图）
  *
@@ -50,12 +51,23 @@ import {
 } from '@dsh-trpg/protocol';
 import type { MediaAssetsService, RoomAssetsStore } from './media/index.ts';
 import type { StudioApi } from './studio/index.ts';
+import type { MirrorFrame, MirrorReadyFrame, MirrorSink } from './mirror/types.ts';
+import { MIRROR_PROTOCOL_VERSION } from './mirror/types.ts';
 
 /** 只读资产的解析结果（host 注入，一般来自 `PackRegistry.assetOf`）。 */
 export interface RoomAsset {
   bytes: Uint8Array;
   /** sha256(字节)：ETag 与客户端缓存 key。 */
   sha256: string;
+}
+
+/** 镜像中枢的最小结构面（`RoomMirrorHub` 实现；room-http 只依赖这些方法）。 */
+export interface MirrorHubLike {
+  hasRoom(roomId: string): boolean;
+  titleOf(roomId: string): string | undefined;
+  seqRange(roomId: string): { oldest: number; latest: number } | undefined;
+  eventsSince(principal: Principal, lastSeq: number): MirrorFrame[];
+  subscribe(principal: Principal, sink: MirrorSink): () => void;
 }
 
 export interface RoomHttpOptions {
@@ -96,6 +108,10 @@ export interface RoomHttpOptions {
    * 生产不要覆盖。
    */
   isLoopbackRequest?: (request: IncomingMessage) => boolean;
+  /**
+   * 玩家侧对话镜像中枢（M7）：`GET /trpg/mirror` 用。未注入时该端点返回 503 中文错误。
+   */
+  mirror?: MirrorHubLike;
 }
 
 export interface RoomHttpServer {
@@ -575,6 +591,119 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
   }
 
   /**
+   * 玩家侧对话镜像 SSE（M7）：`GET /trpg/mirror?token&lastSeq&roomId`。
+   *
+   * - 鉴权：与 `/trpg/events` 同一套 token（玩家/房主均可），错误给中文 JSON；
+   * - 握手：`event: ready`（缓冲窗口 + 因淘汰跳过的条数），随后重放 `lastSeq` 之后可见帧；
+   * - 之后持续推 `event: mirror`；`event: close` 表示房间关闭/镜像停止；
+   * - 私密帧只投给 token 对应的 principal 可见的部分（hub 已按收件人投影）。
+   */
+  function handleMirrorSse(request: IncomingMessage, response: ServerResponse, url: URL): void {
+    const token = url.searchParams.get('token') ?? undefined;
+    let principal: Principal;
+    try {
+      principal = service.login(token);
+    } catch {
+      sendJson(response, 401, {
+        ok: false,
+        error: { code: 'unauthorized', message: '镜像令牌无效或已失效：请退出房间后重新加入' },
+      });
+      return;
+    }
+    const mirror = options.mirror;
+    if (mirror === undefined) {
+      sendJson(response, 503, {
+        ok: false,
+        error: { code: 'conflict', message: '镜像服务未启用（房主端未接入镜像中枢）' },
+      });
+      return;
+    }
+    const roomIdParam = url.searchParams.get('roomId');
+    if (roomIdParam !== null && roomIdParam !== principal.roomId) {
+      sendJson(response, 400, {
+        ok: false,
+        error: { code: 'bad-request', message: '镜像令牌与 roomId 不匹配' },
+      });
+      return;
+    }
+    if (!mirror.hasRoom(principal.roomId)) {
+      sendJson(response, 404, {
+        ok: false,
+        error: { code: 'not-found', message: '房间不存在或已关闭' },
+      });
+      return;
+    }
+    const requestedSeq = Number.parseInt(url.searchParams.get('lastSeq') ?? '0', 10);
+    const lastSeq = Number.isFinite(requestedSeq) && requestedSeq > 0 ? Math.floor(requestedSeq) : 0;
+    const range = mirror.seqRange(principal.roomId) ?? { oldest: 0, latest: 0 };
+    const effectiveLast = lastSeq > range.latest ? range.latest : lastSeq;
+    const skipped = lastSeq > 0 && range.oldest > 0 && lastSeq < range.oldest - 1 ? range.oldest - 1 - lastSeq : 0;
+
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    response.write('retry: 2000\n\n');
+
+    const writeEvent = (name: string, payload: unknown): void => {
+      try {
+        response.write(`event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
+      } catch {
+        /* 客户端已断开 */
+      }
+    };
+
+    const ready: MirrorReadyFrame = {
+      type: 'ready',
+      v: MIRROR_PROTOCOL_VERSION,
+      roomId: principal.roomId,
+      ...(mirror.titleOf(principal.roomId) !== undefined ? { roomTitle: mirror.titleOf(principal.roomId) as string } : {}),
+      lastSeq: effectiveLast,
+      oldestSeq: range.oldest,
+      latestSeq: range.latest,
+      skipped,
+    };
+    writeEvent('ready', ready);
+    for (const frame of mirror.eventsSince(principal, effectiveLast)) writeEvent('mirror', frame);
+
+    let closed = false;
+    const heartbeat = setInterval(() => {
+      try {
+        response.write(': ping\n\n');
+      } catch {
+        /* ignore */
+      }
+    }, 15000);
+    if (typeof heartbeat.unref === 'function') heartbeat.unref();
+
+    let unsubscribe: () => void = () => {};
+    const cleanup = (): void => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    unsubscribe = mirror.subscribe(principal, {
+      frame: (frame) => writeEvent('mirror', frame),
+      close: (reason) => {
+        writeEvent('close', { type: 'close', reason });
+        try {
+          response.end();
+        } catch {
+          /* ignore */
+        }
+        cleanup();
+      },
+    });
+
+    request.on('close', cleanup);
+    response.on('close', cleanup);
+    request.on('error', cleanup);
+  }
+
+  /**
    * 只读资产：无 token、只允许 png/svg、immutable + ETag、If-None-Match → 304。
    * 路径非法/越权 → 403；包/资产不存在或类型不支持 → 404（全中文错误）。
    */
@@ -713,6 +842,10 @@ export function createRoomHttpServer(options: RoomHttpOptions): RoomHttpServer {
     }
     if (request.method === 'GET' && url.pathname === '/trpg/events') {
       handleSse(request, response, url);
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/trpg/mirror') {
+      handleMirrorSse(request, response, url);
       return;
     }
     if (request.method === 'GET' && url.pathname.startsWith(ROOM_ASSET_URL_PREFIX)) {
